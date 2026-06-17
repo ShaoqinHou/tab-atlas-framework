@@ -62,7 +62,7 @@
     .metric strong {
       font-size: 20px;
     }
-    textarea, input {
+    textarea, input, select {
       box-sizing: border-box;
       width: 100%;
       border: 1px solid #afb8c1;
@@ -112,6 +112,15 @@
       background: #ddf4ff;
       border-color: #0969da;
       color: #0969da;
+    }
+    .filters button {
+      min-height: 30px;
+      padding: 4px 8px;
+    }
+    .filters button.active {
+      background: #dafbe1;
+      border-color: #1a7f37;
+      color: #116329;
     }
     .resource-title {
       font-weight: 700;
@@ -186,6 +195,7 @@
         <div class="row" style="margin-top:10px">
           <button class="primary" id="planButton">Plan</button>
           <button id="extractButton">Refresh extraction</button>
+          <button id="scanButton">Codex scan 10</button>
         </div>
         <div id="commandResult" style="margin-top:14px"></div>
       </section>
@@ -210,13 +220,20 @@
         <h2>Views</h2>
         <div id="viewsList"></div>
       </section>
+      <section>
+        <h2>Command History</h2>
+        <div id="commandsList"></div>
+      </section>
     </div>
   </main>
 
   <script>
     const chips = ['inspiration', 'game', 'art', 'ui', 'watch_later', 'project_reference', 'ignore'];
+    const sampleStates = ['strong_include', 'weak_include', 'conflict', 'needs_review', 'exclude'];
     let selectedTags = new Set();
+    let activeSampleStates = new Set(sampleStates);
     let currentReview = null;
+    let currentCommandResult = null;
 
     const $ = (id) => document.getElementById(id);
 
@@ -240,8 +257,12 @@
         ['Proposed views', status.proposedViews],
         ['Accepted views', status.acceptedViews],
         ['Tab observations', status.observations],
+        ['Agent runs', status.agentRuns],
+        ['Codex scans', status.codexScanArtifacts],
+        ['Atomic items', status.atomicItems],
       ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
       await loadViews();
+      await loadCommands();
     }
 
     async function importSnapshot() {
@@ -262,6 +283,20 @@
       await refreshStatus();
     }
 
+    async function runScan() {
+      $('commandResult').innerHTML = '<div class="notice">Scanning 10 resources with Codex...</div>';
+      const result = await api('/api/agent/scan', {
+        method: 'POST',
+        body: JSON.stringify({
+          limit: 10,
+          batchSize: 5,
+          reasoningEffort: $('reasoningEffort').value,
+        }),
+      });
+      $('commandResult').innerHTML = `<div class="notice">Codex scanned ${result.resourcesScanned} resources, wrote ${result.artifactsWritten} scan artifacts and ${result.atomicItemsWritten} atomic items. Turns: ${result.codexTurns || 0}.</div>`;
+      await refreshStatus();
+    }
+
     async function planCommand() {
       const mode = selectedPlannerMode();
       $('commandResult').innerHTML = `<div class="notice">Planning proposed view with ${mode === 'codex' ? 'Codex agent' : 'heuristic preview'}...</div>`;
@@ -274,20 +309,32 @@
           reasoningEffort: $('reasoningEffort').value,
         }),
       });
-      $('commandResult').innerHTML = renderCommandResult(result);
+      showCommandResult(result);
       await refreshStatus();
+    }
+
+    function showCommandResult(result) {
+      currentCommandResult = result;
+      $('commandResult').innerHTML = renderCommandResult(result);
     }
 
     function renderCommandResult(result) {
       const preview = result.previews[0];
       if (!preview) return `<div class="notice">${result.message}</div>`;
-      return `
-        <div class="panel">
-          <div class="row" style="margin-bottom:10px">
-            <span class="badge">Mode: ${escapeHtml(result.mode || 'unknown')}</span>
+      const badgeHtml = result.mode ? `
+            <span class="badge">Mode: ${escapeHtml(result.mode)}</span>
             <span class="badge">Codex used: ${result.codexTurnSpent ? 'yes' : 'no'}</span>
             <span class="badge">Validation: ${escapeHtml(result.validationStatus || 'unknown')}</span>
             <span class="badge">No browser tabs changed</span>
+      ` : `
+            <span class="badge">Stored preview</span>
+            <span class="badge">No browser tabs changed</span>
+      `;
+      const visibleSamples = preview.samples.filter(sample => activeSampleStates.has(sample.state));
+      return `
+        <div class="panel">
+          <div class="row" style="margin-bottom:10px">
+            ${badgeHtml}
           </div>
           <div class="resource-title">${preview.name}</div>
           <div class="muted">${preview.goal || ''}</div>
@@ -299,8 +346,16 @@
           <h2 style="margin-top:14px">Rules</h2>
           <div class="muted">Include: ${preview.inclusionRules.join('; ')}</div>
           <div class="muted">Exclude: ${preview.exclusionRules.join('; ')}</div>
+          <h2 style="margin-top:14px">Refine</h2>
+          <textarea id="refineText" placeholder="Refine this view"></textarea>
+          <div class="row" style="margin-top:10px">
+            <button onclick="refineView('${escapeAttribute(preview.viewId)}')">Refine view</button>
+          </div>
           <h2 style="margin-top:14px">Samples</h2>
-          ${preview.samples.map(renderSample).join('')}
+          <div class="filters row" style="margin-bottom:8px">
+            ${sampleStates.map(state => `<button class="${activeSampleStates.has(state) ? 'active' : ''}" onclick="toggleSampleState('${state}')">${state.replace('_', ' ')}</button>`).join('')}
+          </div>
+          ${visibleSamples.map(sample => renderSample(sample, preview.viewId)).join('') || '<div class="muted">No samples match the active filters.</div>'}
         </div>
       `;
     }
@@ -316,12 +371,18 @@
       return `<div class="counts">${Object.entries(labels).map(([key, label]) => `<div class="count"><strong>${counts[key] || 0}</strong><br>${label}</div>`).join('')}</div>`;
     }
 
-    function renderSample(sample) {
+    function renderSample(sample, viewId) {
+      const safeId = cssSafeId(`${viewId}_${sample.resourceId}`);
       return `
         <div class="sample">
           <div><strong>${escapeHtml(sample.title)}</strong></div>
           <div class="muted">${sample.state}${sample.section ? ` / ${escapeHtml(sample.section)}` : ''} / ${Math.round(sample.confidence * 100)}%</div>
           <div class="muted">${escapeHtml(sample.reason || '')}</div>
+          <div class="row" style="margin-top:8px">
+            <button onclick="whyIncluded('${escapeAttribute(viewId)}', '${escapeAttribute(sample.resourceId)}', '${safeId}')">Why included?</button>
+            <a class="button" target="_blank" rel="noreferrer" href="${escapeAttribute(sample.redactedUrl || '#')}">Open externally</a>
+          </div>
+          <div id="why_${safeId}" class="muted" style="margin-top:6px"></div>
         </div>
       `;
     }
@@ -337,7 +398,7 @@
 
     async function loadViewPreview(viewId) {
       const preview = await api(`/api/views/${viewId}/preview`);
-      $('commandResult').innerHTML = renderCommandResult({ message: '', previews: [preview] });
+      showCommandResult({ message: '', previews: [preview] });
     }
 
     async function loadViews() {
@@ -349,6 +410,56 @@
           <button onclick="loadViewPreview('${view.id}')">Preview</button>
         </div>
       `).join('') : '<div class="muted">No views yet.</div>';
+    }
+
+    async function loadCommands() {
+      const commands = await api('/api/commands');
+      $('commandsList').innerHTML = commands.length ? commands.map(command => {
+        const firstView = command.viewIds && command.viewIds[0];
+        return `
+          <div class="sample">
+            <div><strong>${escapeHtml(command.text)}</strong></div>
+            <div class="muted">${escapeHtml(command.status)} / ${escapeHtml(command.created_at)}</div>
+            <div class="row" style="margin-top:8px">
+              <button onclick="reuseCommand(${jsArg(command.text)})">Reuse</button>
+              ${firstView ? `<button onclick="loadViewPreview('${escapeAttribute(firstView)}')">Preview result</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('') : '<div class="muted">No commands yet.</div>';
+    }
+
+    async function refineView(viewId) {
+      const text = $('refineText') ? $('refineText').value : '';
+      if (!text.trim()) return;
+      $('commandResult').innerHTML = '<div class="notice">Refining view...</div>';
+      const result = await api('/api/agent/refine', {
+        method: 'POST',
+        body: JSON.stringify({
+          viewId,
+          text,
+          mode: selectedPlannerMode(),
+          candidateLimit: 200,
+          reasoningEffort: $('reasoningEffort').value,
+        }),
+      });
+      showCommandResult(result);
+      await refreshStatus();
+    }
+
+    async function whyIncluded(viewId, resourceId, safeId) {
+      const result = await api(`/api/resources/${resourceId}/explain?viewId=${encodeURIComponent(viewId)}`);
+      $(`why_${safeId}`).innerHTML = `${escapeHtml(result.explanation)}<br>Evidence: ${result.evidenceRefs.map(escapeHtml).join(', ') || '(none)'}`;
+    }
+
+    function toggleSampleState(state) {
+      if (activeSampleStates.has(state)) activeSampleStates.delete(state);
+      else activeSampleStates.add(state);
+      if (currentCommandResult) $('commandResult').innerHTML = renderCommandResult(currentCommandResult);
+    }
+
+    function reuseCommand(text) {
+      $('commandText').value = text;
     }
 
     async function loadReview() {
@@ -433,9 +544,18 @@
       return escapeHtml(value).replace(/`/g, '&#96;');
     }
 
+    function cssSafeId(value) {
+      return String(value).replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+
+    function jsArg(value) {
+      return escapeAttribute(JSON.stringify(String(value)));
+    }
+
     $('importButton').addEventListener('click', () => importSnapshot().catch(showError));
     $('refreshButton').addEventListener('click', () => refreshStatus().catch(showError));
     $('extractButton').addEventListener('click', () => runExtraction().catch(showError));
+    $('scanButton').addEventListener('click', () => runScan().catch(showCommandError));
     $('planButton').addEventListener('click', () => planCommand().catch(showCommandError));
 
     function showError(error) {

@@ -13,6 +13,7 @@ Evidence priority:
 
 Rules:
 - A resource can belong to multiple views.
+- Atomic items may be included separately from their parent resource when they better match the user's command.
 - User annotations are primary clues. If they conflict with title/metadata, preserve the conflict and explain it.
 - Do not invent details not present in evidence.
 - Do not claim transcript evidence unless a transcript artifact exists.

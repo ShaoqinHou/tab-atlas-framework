@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS atomic_items (
   created_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_atomic_items_resource ON atomic_items(resource_id);
+
 CREATE TABLE IF NOT EXISTS user_annotations (
   id TEXT PRIMARY KEY,
   target_kind TEXT NOT NULL CHECK (target_kind IN ('resource', 'atomic_item')),

@@ -4,6 +4,7 @@ import { planSemanticViewHeuristic } from '../ai/heuristicSemanticView.js';
 import { planSemanticView } from '../ai/planSemanticView.js';
 import { buildResourceBriefs } from '../resources/briefs.js';
 import type { LlmProvider } from '../llm/types.js';
+import { StructuredOutputError } from '../llm/runStructured.js';
 import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
 import { createUserCommand, persistSemanticViewPlan, previewView, type ViewPreview } from '../views/service.js';
 import { logAgentRun } from './runLog.js';
@@ -15,6 +16,7 @@ export const RunAgentCommandInput = z.object({
   candidateLimit: z.number().int().positive().max(500).default(200),
   dryRun: z.boolean().default(false),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('medium'),
+  seedResourceIds: z.array(z.string()).default([]),
 });
 
 export type RunAgentCommandInput = z.input<typeof RunAgentCommandInput>;
@@ -44,13 +46,19 @@ export async function runAgentCommand(
   const provider = typeof providerOrMode === 'object' ? providerOrMode : undefined;
   const mode = typeof providerOrMode === 'string' ? providerOrMode : parsed.mode;
   const providerLabel = mode === 'codex' ? providerLabelFor(provider) : 'heuristic';
-  const providerThreadId = mode === 'codex' ? providerThreadIdFor(provider) : null;
+  let providerThreadId = mode === 'codex' ? providerThreadIdFor(provider) : null;
   const query = deriveCandidateSearchQuery(parsed.text);
   const matches = searchResources(db, {
     query,
     filters: { annotationStatus: 'any', limit: parsed.candidateLimit },
   }).matches;
-  const candidateResourceIds = selectCandidateResourceIds(db, parsed.text, matches.map(match => match.resourceId), parsed.candidateLimit);
+  const candidateResourceIds = selectCandidateResourceIds(
+    db,
+    parsed.text,
+    matches.map(match => match.resourceId),
+    parsed.seedResourceIds,
+    parsed.candidateLimit,
+  );
   const briefs = buildResourceBriefs(db, candidateResourceIds);
 
   let plan: SemanticViewPlan;
@@ -64,6 +72,7 @@ export async function runAgentCommand(
       commandText: parsed.text,
       candidateCount: candidateResourceIds.length,
       candidateResourceIds,
+      seedResourceIds: parsed.seedResourceIds,
       reasoningEffort: parsed.reasoningEffort,
       dryRun: parsed.dryRun,
     };
@@ -74,6 +83,7 @@ export async function runAgentCommand(
         askReviewForAmbiguous: true,
       });
       plan = result.value;
+      providerThreadId = providerThreadIdFor(provider);
       codexTurnSpent = (result.usage.quotaTurns ?? 0) > 0;
       validationStatus = 'passed';
       agentRunId = logAgentRun(db, {
@@ -95,7 +105,7 @@ export async function runAgentCommand(
         schemaId: 'SemanticViewPlan',
         validationStatus: 'error',
         error: error instanceof Error ? error.message : String(error),
-        usage: { quotaTurns: 1 },
+        usage: error instanceof StructuredOutputError ? error.usage : undefined,
         startedAt,
         finishedAt: new Date().toISOString(),
       });
@@ -157,8 +167,14 @@ export function deriveCandidateSearchQuery(text: string): string {
   return [...new Set(terms)].join(' ');
 }
 
-function selectCandidateResourceIds(db: Database.Database, commandText: string, searchIds: string[], limit: number): string[] {
-  const ids = new Set<string>(searchIds);
+function selectCandidateResourceIds(
+  db: Database.Database,
+  commandText: string,
+  searchIds: string[],
+  seedResourceIds: string[],
+  limit: number,
+): string[] {
+  const ids = new Set<string>([...seedResourceIds, ...searchIds]);
   if (referencesTasteOrPurpose(commandText)) {
     for (const id of getUserMarkedResourceIds(db, limit)) ids.add(id);
   }

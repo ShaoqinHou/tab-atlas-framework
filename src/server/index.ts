@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import Fastify from 'fastify';
 import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
+import { countAtomicItems, countCodexScanArtifacts, runCodexResourceScan, type RunCodexResourceScanInput } from '../agent/scanService.js';
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
@@ -57,6 +58,7 @@ app.get('/api/status', async () => {
   const youtube = db.prepare("SELECT COUNT(*) AS c FROM resources WHERE url_kind LIKE 'youtube_%'").get() as { c: number };
   const proposedViews = db.prepare("SELECT COUNT(*) AS c FROM views WHERE status = 'proposed'").get() as { c: number };
   const acceptedViews = db.prepare("SELECT COUNT(*) AS c FROM views WHERE status = 'accepted'").get() as { c: number };
+  const agentRuns = db.prepare('SELECT COUNT(*) AS c FROM agent_runs').get() as { c: number };
   const annotated = db.prepare(`
     SELECT COUNT(DISTINCT target_id) AS c
     FROM user_annotations
@@ -71,6 +73,9 @@ app.get('/api/status', async () => {
     annotated: annotated.c,
     proposedViews: proposedViews.c,
     acceptedViews: acceptedViews.c,
+    agentRuns: agentRuns.c,
+    codexScanArtifacts: countCodexScanArtifacts(db),
+    atomicItems: countAtomicItems(db),
   };
 });
 
@@ -100,6 +105,71 @@ app.post('/api/agent/command', async (request, reply) => {
   };
   const result = await runAgentCommand(db, provider, input);
   return reply.send(result);
+});
+
+app.post('/api/agent/refine', async (request, reply) => {
+  const body = asRecord(request.body);
+  const viewId = typeof body.viewId === 'string' ? body.viewId : '';
+  const refinement = typeof body.text === 'string' ? body.text : '';
+  if (!viewId || !refinement) return reply.status(400).send({ ok: false, error: 'viewId and text are required' });
+  const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = mode === 'codex' ? getCodexProvider({ reasoningEffort }) : 'heuristic';
+  const preview = previewView(db, viewId);
+  const seedResourceIds = db.prepare(`
+    SELECT DISTINCT target_id AS id
+    FROM memberships
+    WHERE view_id = ? AND target_kind = 'resource'
+  `).all(viewId).map((row: unknown) => (row as { id: string }).id);
+  const input: RunAgentCommandInput = {
+    text: [
+      `Refine existing view "${preview.name}".`,
+      preview.goal ? `Existing goal: ${preview.goal}` : '',
+      `User refinement: ${refinement}`,
+    ].filter(Boolean).join(' '),
+    mode,
+    candidateLimit: typeof body.candidateLimit === 'number' ? body.candidateLimit : undefined,
+    reasoningEffort,
+    seedResourceIds,
+  };
+  const result = await runAgentCommand(db, provider, input);
+  return reply.send(result);
+});
+
+app.post('/api/agent/scan', async (request, reply) => {
+  const body = asRecord(request.body);
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = getCodexProvider({ reasoningEffort });
+  const input: RunCodexResourceScanInput = {
+    limit: typeof body.limit === 'number' ? body.limit : undefined,
+    batchSize: typeof body.batchSize === 'number' ? body.batchSize : undefined,
+    resourceIds: Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === 'string') : undefined,
+    reasoningEffort,
+    force: Boolean(body.force),
+  };
+  const result = await runCodexResourceScan(db, provider, input);
+  return reply.send(result);
+});
+
+app.get('/api/commands', async () => {
+  return db.prepare(`
+    SELECT
+      c.id,
+      c.text,
+      c.status,
+      c.created_at,
+      COALESCE((
+        SELECT json_group_array(s.view_id)
+        FROM semantic_view_specs s
+        WHERE s.command_id = c.id
+      ), '[]') AS view_ids_json
+    FROM user_commands c
+    ORDER BY c.created_at DESC
+    LIMIT 25
+  `).all().map((row: unknown) => {
+    const command = row as { view_ids_json: string };
+    return { ...command, viewIds: parseJsonArray(command.view_ids_json) };
+  });
 });
 
 app.post('/api/annotations', async (request, reply) => {
@@ -188,6 +258,15 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
 }
 
+function parseJsonArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'>): CodexSdkProvider {
   const key = config.reasoningEffort ?? 'medium';
   const existing = codexProviders.get(key);
@@ -202,5 +281,5 @@ function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'
 }
 
 function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
-  return value === 'minimal' || value === 'low' || value === 'high' || value === 'xhigh' ? value : 'medium';
+  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : 'medium';
 }

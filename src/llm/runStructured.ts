@@ -13,7 +13,11 @@ export interface RunStructuredResult<T> {
 }
 
 export class StructuredOutputError extends Error {
-  constructor(message: string, public readonly attempts: { raw: string; errors: string[] }[]) {
+  constructor(
+    message: string,
+    public readonly attempts: { raw: string; errors: string[] }[],
+    public readonly usage: LlmUsage = {},
+  ) {
     super(message);
     this.name = 'StructuredOutputError';
   }
@@ -56,7 +60,7 @@ export async function runStructured<T>(
     }
     return { value: parsed.data, usage, attempts: attempts.length + 1 };
   }
-  throw new StructuredOutputError(`structured output failed after ${maxRetries + 1} attempts`, attempts);
+  throw new StructuredOutputError(`structured output failed after ${maxRetries + 1} attempts`, attempts, usage);
 }
 
 export function extractJson(text: string): unknown | null {
