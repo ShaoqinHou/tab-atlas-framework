@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/categorize-batch-output.schema.json",
+  "title": "CategorizeBatchOutput",
+  "type": "object",
+  "required": [
+    "resourceAnalyses",
+    "proposedTags",
+    "proposedViews",
+    "memberships",
+    "lowConfidence"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "resourceAnalyses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "resourceId",
+          "summary",
+          "contentKind",
+          "confidence",
+          "evidenceRefs"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "resourceId": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "contentKind": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "atomicItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "itemKind",
+                "summary",
+                "confidence",
+                "evidenceRefs"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "itemKind": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "evidenceRefs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "proposedTags": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "proposedViews": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "memberships": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "lowConfidence": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}

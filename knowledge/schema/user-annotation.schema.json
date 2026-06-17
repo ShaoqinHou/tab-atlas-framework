@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/user-annotation.schema.json",
+  "title": "UserAnnotation",
+  "type": "object",
+  "required": [
+    "targetKind",
+    "targetId",
+    "tags",
+    "source",
+    "createdAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "targetKind": {
+      "type": "string",
+      "enum": [
+        "resource",
+        "atomic_item"
+      ]
+    },
+    "targetId": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "description": {
+      "type": "string"
+    },
+    "decision": {
+      "type": "string",
+      "enum": [
+        "important",
+        "watch_later",
+        "project_reference",
+        "inspiration",
+        "archive_later",
+        "ignore",
+        "needs_deeper_read",
+        "none"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "focused_review",
+        "resource_detail",
+        "agent_chat",
+        "bulk_edit",
+        "import"
+      ]
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "type": "string"
+    }
+  }
+}

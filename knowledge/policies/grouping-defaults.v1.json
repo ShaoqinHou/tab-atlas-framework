@@ -1,0 +1,39 @@
+{
+  "id": "grouping-defaults.v1",
+  "version": "1.0.0",
+  "principles": [
+    "Prefer user-intent views over generic taxonomy labels.",
+    "A resource may belong to multiple views.",
+    "Split videos/collections from single source articles when meaningful.",
+    "Preserve user-pinned names and views.",
+    "Use evidence-backed confidence and expose uncertainty.",
+    "Avoid creating tiny views with fewer than three resources unless the user requested them.",
+    "User tags and user descriptions are high-priority evidence, not cosmetic labels.",
+    "Views are semantic lenses; do not force resources into one permanent folder.",
+    "Support strict/loose/purpose-based commands by changing inclusion and exclusion rules, not by changing the underlying resource.",
+    "When a command says 'mostly X but welcome Y', create sections or membership states rather than excluding Y.",
+    "If the model is unsure, create a focused review queue instead of pretending certainty."
+  ],
+  "limits": {
+    "defaultMaxTopLevelViews": 12,
+    "defaultMinResourcesPerView": 3,
+    "lowConfidenceThreshold": 0.55,
+    "autoArchiveThreshold": 0.0,
+    "defaultAmbiguousReviewQueueSize": 20
+  },
+  "evidenceRules": [
+    "Explicit user descriptions outrank title/URL and AI-inferred tags.",
+    "Explicit user tags must be included in resource briefs before extracted metadata.",
+    "Every membership needs at least one evidence reference.",
+    "Transcript-derived claims must reference a transcript artifact.",
+    "Description-derived claims must reference a description artifact.",
+    "Title-only classifications must be marked low or medium confidence unless the URL/host strongly supports them."
+  ],
+  "membershipStates": [
+    "strong_include",
+    "weak_include",
+    "conflict",
+    "exclude",
+    "needs_review"
+  ]
+}

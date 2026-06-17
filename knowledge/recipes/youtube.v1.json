@@ -1,0 +1,42 @@
+{
+  "id": "youtube.v1",
+  "version": "1.0.0",
+  "description": "Extract public metadata and explicit transcript artifacts from YouTube URLs without letting the LLM browse the page.",
+  "appliesTo": [
+    "youtube_video",
+    "youtube_short",
+    "youtube_playlist",
+    "youtu.be"
+  ],
+  "riskLevel": "medium",
+  "allowedOperations": [
+    "parse video and playlist IDs from URL",
+    "use browser snapshot title",
+    "fetch public metadata without cookies",
+    "use optional YouTube Data API key for videos.list metadata",
+    "store transcript only from explicit configured adapters with provenance"
+  ],
+  "blockedOperations": [
+    "use browser cookies",
+    "scrape logged-in user state",
+    "pretend official captions API can download arbitrary public transcripts",
+    "hallucinate atomic paper/tool lists from title alone"
+  ],
+  "outputs": [
+    "metadata",
+    "description",
+    "chapters",
+    "transcript",
+    "linksMentioned",
+    "atomicItemCandidates"
+  ],
+  "failureStatuses": [
+    "blocked_permission",
+    "adapter_missing",
+    "metadata_only",
+    "failed_network",
+    "failed_parse",
+    "manual_needed"
+  ],
+  "notes": "Transcript adapters must be disabled by default unless user explicitly configures one."
+}

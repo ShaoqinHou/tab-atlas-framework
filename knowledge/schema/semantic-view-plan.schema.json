@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/semantic-view-plan.schema.json",
+  "title": "SemanticViewPlan",
+  "type": "object",
+  "required": ["commandText", "views", "reviewQueues", "explanation"],
+  "additionalProperties": false,
+  "properties": {
+    "commandText": { "type": "string" },
+    "views": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "goal", "inclusionRules", "exclusionRules", "memberships", "confidence"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "goal": { "type": "string" },
+          "description": { "type": "string" },
+          "inclusionRules": { "type": "array", "items": { "type": "string" } },
+          "exclusionRules": { "type": "array", "items": { "type": "string" } },
+          "sections": { "type": "array", "items": { "type": "string" } },
+          "sortPolicy": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "memberships": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["targetKind", "targetId", "state", "confidence", "reason", "evidenceRefs"],
+              "additionalProperties": false,
+              "properties": {
+                "targetKind": { "type": "string", "enum": ["resource", "atomic_item"] },
+                "targetId": { "type": "string" },
+                "section": { "type": "string" },
+                "state": { "type": "string", "enum": ["strong_include", "weak_include", "conflict", "exclude", "needs_review"] },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+                "reason": { "type": "string" },
+                "evidenceRefs": { "type": "array", "items": { "type": "string" } },
+                "conflict": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "reviewQueues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["queueName", "reason", "targetIds"],
+        "additionalProperties": false,
+        "properties": {
+          "queueName": { "type": "string" },
+          "reason": { "type": "string" },
+          "targetIds": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "explanation": { "type": "string" }
+  }
+}

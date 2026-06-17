@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/user-command-plan.schema.json",
+  "title": "UserCommandPlan",
+  "type": "object",
+  "required": [
+    "intent",
+    "intentAxes",
+    "proposedOperations",
+    "requiresApproval",
+    "needsReview",
+    "explanation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "intent": { "type": "string" },
+    "intentAxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topics": { "type": "array", "items": { "type": "string" } },
+        "purposes": { "type": "array", "items": { "type": "string" } },
+        "media": { "type": "array", "items": { "type": "string" } },
+        "strictness": { "type": "string", "enum": ["strict", "balanced", "loose", "unspecified"] },
+        "includeIfUserMarked": { "type": "array", "items": { "type": "string" } },
+        "excludeUnlessUserMarked": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "proposedOperations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "requiresApproval": { "type": "boolean" },
+    "needsReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "needed": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "queueName": { "type": "string" }
+      }
+    },
+    "explanation": { "type": "string" }
+  }
+}

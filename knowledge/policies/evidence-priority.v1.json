@@ -1,0 +1,37 @@
+{
+  "id": "evidence-priority.v1",
+  "version": "1.0.0",
+  "priorityOrder": [
+    "user_description",
+    "user_tag",
+    "user_correction",
+    "pinned_membership",
+    "pinned_exclusion",
+    "browser_group",
+    "transcript_artifact",
+    "description_artifact",
+    "page_metadata",
+    "title_url_signal",
+    "ai_inference"
+  ],
+  "defaultWeights": {
+    "user_description": 1.0,
+    "user_tag": 0.95,
+    "user_correction": 0.95,
+    "pinned_membership": 1.0,
+    "pinned_exclusion": 1.0,
+    "browser_group": 0.6,
+    "transcript_artifact": 0.75,
+    "description_artifact": 0.7,
+    "page_metadata": 0.65,
+    "title_url_signal": 0.45,
+    "ai_inference": 0.25
+  },
+  "rules": [
+    "User descriptions and user tags must be shown before extracted text in resource briefs.",
+    "If user evidence conflicts with AI/extractor evidence, preserve the conflict and ask for review instead of silently overriding the user.",
+    "A user-pinned exclusion can only be violated if the user explicitly asks to reconsider it.",
+    "Transcript-based classifications require transcript artifact evidence refs.",
+    "Title-only classifications should not be strong includes unless the command is title/URL-oriented."
+  ]
+}

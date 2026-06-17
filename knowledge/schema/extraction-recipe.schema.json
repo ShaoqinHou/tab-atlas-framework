@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/extraction-recipe.schema.json",
+  "title": "ExtractionRecipe",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "appliesTo",
+    "riskLevel",
+    "allowedOperations",
+    "blockedOperations",
+    "outputs",
+    "failureStatuses"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "appliesTo": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "riskLevel": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "allowedOperations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blockedOperations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "failureStatuses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

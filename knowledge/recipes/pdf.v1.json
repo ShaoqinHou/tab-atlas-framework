@@ -1,0 +1,33 @@
+{
+  "id": "pdf.v1",
+  "version": "1.0.0",
+  "description": "Extract metadata and limited text from PDFs such as papers, reports, and manuals.",
+  "appliesTo": [
+    "pdf"
+  ],
+  "riskLevel": "medium",
+  "allowedOperations": [
+    "fetch public PDF without cookies",
+    "limit file size",
+    "hash bytes",
+    "extract title/authors/abstract when possible",
+    "extract first pages"
+  ],
+  "blockedOperations": [
+    "download private PDFs with browser cookies",
+    "store huge PDFs by default",
+    "send full PDF text to Codex without compaction"
+  ],
+  "outputs": [
+    "pdf_metadata",
+    "pdf_text_excerpt",
+    "paper_candidate"
+  ],
+  "failureStatuses": [
+    "blocked_size_limit",
+    "blocked_auth_required",
+    "failed_parse",
+    "failed_network"
+  ],
+  "notes": "Store text excerpts and hash first; full file caching should be an opt-in."
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/review-queue-item.schema.json",
+  "title": "ReviewQueueItem",
+  "type": "object",
+  "required": ["resourceId", "queueName", "status", "reason", "priority"],
+  "additionalProperties": false,
+  "properties": {
+    "resourceId": { "type": "string" },
+    "queueName": { "type": "string" },
+    "status": { "type": "string", "enum": ["pending", "skipped", "completed", "dismissed"] },
+    "reason": { "type": "string" },
+    "priority": { "type": "number" },
+    "lastPresentedAt": { "type": "string" },
+    "skippedCount": { "type": "integer", "minimum": 0 }
+  }
+}

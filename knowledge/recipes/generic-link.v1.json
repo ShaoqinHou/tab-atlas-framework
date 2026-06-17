@@ -1,0 +1,30 @@
+{
+  "id": "generic-link.v1",
+  "version": "1.0.0",
+  "resourceKinds": ["web_page", "docs", "search", "login", "unknown"],
+  "goal": "Create a useful compact brief for any non-specialized URL without cookies, browser automation, or arbitrary JavaScript execution.",
+  "steps": [
+    "Normalize URL and remove common tracking parameters.",
+    "Use tab title, host, path, and browser group as immediate evidence.",
+    "Fetch with no cookies if allowed by settings and size limits.",
+    "Extract content type, status, canonical link, HTML title, meta description, Open Graph/Twitter card fields, headings, and main-text excerpt.",
+    "Detect auth/dashboard/login/private-looking pages and keep shallow records.",
+    "Create extraction artifact with status and provenance.",
+    "Build a resource brief with user annotations first."
+  ],
+  "limits": {
+    "timeoutMs": 10000,
+    "maxBytes": 2000000,
+    "maxMainTextChars": 4000,
+    "executeJavaScript": false,
+    "sendCookies": false
+  },
+  "failureStatuses": [
+    "blocked_auth_required",
+    "blocked_size_limit",
+    "blocked_policy",
+    "failed_network",
+    "failed_parse",
+    "metadata_only"
+  ]
+}

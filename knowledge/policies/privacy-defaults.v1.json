@@ -1,0 +1,23 @@
+{
+  "id": "privacy-defaults.v1",
+  "version": "1.0.0",
+  "principles": [
+    "Bind server to localhost only.",
+    "No cloud upload by default.",
+    "No cookies, passwords, local storage, or raw browser session parsing.",
+    "Redact secrets in URLs before LLM prompts.",
+    "Require user approval for browser mutations."
+  ],
+  "sensitiveUrlSignals": [
+    "token",
+    "auth",
+    "code",
+    "session",
+    "key",
+    "password",
+    "email",
+    "sig",
+    "signature"
+  ],
+  "llmPromptPolicy": "Send only sanitized resource briefs and evidence excerpts. Do not include raw private URLs or full page HTML."
+}

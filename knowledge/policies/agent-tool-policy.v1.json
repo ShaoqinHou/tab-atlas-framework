@@ -1,0 +1,37 @@
+{
+  "id": "agent-tool-policy.v1",
+  "version": "1.0.0",
+  "allowedWithoutApproval": [
+    "searchResources",
+    "getResourceBriefs",
+    "planSemanticView",
+    "previewViewPlan",
+    "addUserAnnotation",
+    "getReviewNext",
+    "submitReviewDecision",
+    "explainMembership",
+    "createReviewQueue",
+    "storeAiProposal"
+  ],
+  "requiresUserApproval": [
+    "applyBrowserClose",
+    "applyBrowserMove",
+    "applyBrowserGroup",
+    "applyBookmarkArchive",
+    "deleteResource",
+    "bulkMarkIgnored"
+  ],
+  "forbidden": [
+    "readCookies",
+    "readPasswords",
+    "readLocalStorage",
+    "readRawBrowserSessionFiles",
+    "driveBrowserToInspectEveryUrl",
+    "uploadTabDataToCloud"
+  ],
+  "notes": [
+    "Codex should operate through app tools and resource briefs, not direct database mutation.",
+    "The first implementation may expose these as TypeScript services; HTTP or MCP wrappers can come later.",
+    "Destructive browser actions remain future approval-queue work."
+  ]
+}

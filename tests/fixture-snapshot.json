@@ -1,0 +1,31 @@
+{
+  "capturedAt": "2026-06-16T16:24:30.000Z",
+  "tabs": [
+    {
+      "browser": "chrome",
+      "windowId": 100,
+      "tabId": 101,
+      "index": 0,
+      "active": false,
+      "pinned": false,
+      "groupId": -1,
+      "groupTitle": "",
+      "groupColor": "",
+      "title": "Codex CLI – OpenAI Developers",
+      "url": "https://developers.openai.com/codex/cli?utm_source=test"
+    },
+    {
+      "browser": "edge",
+      "windowId": 200,
+      "tabId": 201,
+      "index": 1,
+      "active": true,
+      "pinned": false,
+      "groupId": 12,
+      "groupTitle": "Research",
+      "groupColor": "blue",
+      "title": "Example AI Papers Video",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&utm_campaign=x"
+    }
+  ]
+}

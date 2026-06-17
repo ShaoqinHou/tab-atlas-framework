@@ -1,0 +1,30 @@
+{
+  "name": "tab-atlas-framework",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "import": "tsx scripts/import-snapshot.ts",
+    "smoke:codex": "tsx scripts/smoke-codex.ts"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "latest",
+    "better-sqlite3": "latest",
+    "commander": "latest",
+    "fastify": "latest",
+    "nanoid": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "eslint": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}

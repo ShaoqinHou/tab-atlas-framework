@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "TabAtlas Passive Exporter",
+  "version": "0.1.0",
+  "description": "Passive local-only tab snapshot exporter for TabAtlas.",
+  "permissions": ["tabs", "tabGroups", "storage"],
+  "host_permissions": ["http://127.0.0.1:9787/*", "http://127.0.0.1:9786/*"],
+  "background": {
+    "service_worker": "service_worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "TabAtlas"
+  }
+}

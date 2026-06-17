@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabatlas.local/schema/grouping-policy.schema.json",
+  "title": "GroupingPolicy",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "principles",
+    "limits",
+    "evidenceRules"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "principles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limits": {
+      "type": "object"
+    },
+    "evidenceRules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

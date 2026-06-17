@@ -1,0 +1,38 @@
+{
+  "id": "webpage.v1",
+  "version": "1.0.0",
+  "description": "Extract safe public metadata and main-text excerpts from generic web pages.",
+  "appliesTo": [
+    "web_page",
+    "docs",
+    "article",
+    "blog"
+  ],
+  "riskLevel": "low",
+  "allowedOperations": [
+    "fetch without cookies",
+    "extract title",
+    "extract meta description",
+    "extract Open Graph metadata",
+    "extract headings",
+    "extract limited main text"
+  ],
+  "blockedOperations": [
+    "send cookies",
+    "execute arbitrary JavaScript",
+    "bypass login",
+    "fetch private dashboards with credentials"
+  ],
+  "outputs": [
+    "metadata",
+    "html_text_excerpt",
+    "links"
+  ],
+  "failureStatuses": [
+    "blocked_auth_required",
+    "blocked_size_limit",
+    "failed_network",
+    "failed_parse"
+  ],
+  "notes": "Login/account/search pages should usually become shallow resources with low extraction depth."
+}

@@ -1,0 +1,35 @@
+{
+  "id": "github.v1",
+  "version": "1.0.0",
+  "description": "Extract repo/issue/file identity and lightweight public metadata from GitHub URLs.",
+  "appliesTo": [
+    "github_repo",
+    "github_issue",
+    "github_pull",
+    "github_file",
+    "github_discussion"
+  ],
+  "riskLevel": "low",
+  "allowedOperations": [
+    "parse owner/repo/path",
+    "fetch public page metadata",
+    "optionally use GitHub API token if user configures one",
+    "extract README excerpt for public repos"
+  ],
+  "blockedOperations": [
+    "use private GitHub tokens by default",
+    "scrape private repos through browser cookies"
+  ],
+  "outputs": [
+    "github_metadata",
+    "readme_excerpt",
+    "repo_identity"
+  ],
+  "failureStatuses": [
+    "blocked_auth_required",
+    "not_found",
+    "failed_network",
+    "failed_parse"
+  ],
+  "notes": "Private GitHub support must be explicit and token-scoped."
+}
