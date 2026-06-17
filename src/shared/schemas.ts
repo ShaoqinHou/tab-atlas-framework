@@ -98,6 +98,8 @@ export const MembershipState = z.enum([
   'needs_review',
 ]);
 
+export type MembershipState = z.infer<typeof MembershipState>;
+
 export const AtomicItemBrief = z.object({
   itemId: z.string(),
   itemKind: z.string(),
