@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabAtlas</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f6f7f9;
+      color: #1f2328;
+    }
+    body {
+      margin: 0;
+    }
+    header {
+      background: #ffffff;
+      border-bottom: 1px solid #d8dee4;
+      padding: 18px 28px;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(360px, 1.1fr) minmax(360px, 0.9fr);
+      gap: 18px;
+      padding: 18px 28px 28px;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 10px;
+    }
+    h2 {
+      font-size: 16px;
+      margin: 0 0 12px;
+    }
+    section, .panel {
+      background: #ffffff;
+      border: 1px solid #d8dee4;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(110px, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      border: 1px solid #d8dee4;
+      border-radius: 6px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+    .metric span {
+      display: block;
+      color: #656d76;
+      font-size: 12px;
+    }
+    .metric strong {
+      font-size: 20px;
+    }
+    textarea, input {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid #afb8c1;
+      border-radius: 6px;
+      padding: 10px;
+      font: inherit;
+    }
+    textarea {
+      min-height: 88px;
+      resize: vertical;
+    }
+    button, a.button {
+      border: 1px solid #8c959f;
+      background: #f6f8fa;
+      border-radius: 6px;
+      color: #24292f;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      padding: 6px 10px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    button.primary {
+      background: #0969da;
+      border-color: #0969da;
+      color: #ffffff;
+    }
+    button.danger {
+      background: #fff1f1;
+      border-color: #cf222e;
+      color: #cf222e;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .chips button {
+      min-height: 30px;
+      padding: 4px 8px;
+    }
+    .chips button.active {
+      background: #ddf4ff;
+      border-color: #0969da;
+      color: #0969da;
+    }
+    .resource-title {
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .muted {
+      color: #656d76;
+      font-size: 13px;
+    }
+    .counts {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(80px, 1fr));
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .count {
+      background: #f6f8fa;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 13px;
+    }
+    .sample {
+      border-top: 1px solid #d8dee4;
+      padding: 10px 0;
+    }
+    .sample:last-child {
+      padding-bottom: 0;
+    }
+    .notice {
+      background: #fff8c5;
+      border: 1px solid #d4a72c;
+      border-radius: 6px;
+      padding: 10px;
+      font-size: 13px;
+    }
+    @media (max-width: 900px) {
+      main, .metrics {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TabAtlas</h1>
+    <div class="metrics" id="metrics"></div>
+  </header>
+  <main>
+    <div class="stack">
+      <section>
+        <h2>Ask TabAtlas</h2>
+        <textarea id="commandText">Make a loose group mainly game inspiration but welcome all marked inspiration</textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="planButton">Plan</button>
+          <button id="extractButton">Refresh extraction</button>
+        </div>
+        <div id="commandResult" style="margin-top:14px"></div>
+      </section>
+
+      <section>
+        <h2>Import Snapshot</h2>
+        <input id="importPath" value="C:\Users\housh\Documents\Codex\2026-06-17\i-tend-to-have-many-tags\outputs\headless-tab-exporter\captures\latest-all.json">
+        <div class="row" style="margin-top:10px">
+          <button id="importButton">Import</button>
+          <button id="refreshButton">Refresh status</button>
+        </div>
+        <div id="importResult" class="muted" style="margin-top:10px"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section>
+        <h2>Focused Review</h2>
+        <div id="reviewCard"></div>
+      </section>
+      <section>
+        <h2>Views</h2>
+        <div id="viewsList"></div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const chips = ['inspiration', 'game', 'art', 'ui', 'watch_later', 'project_reference', 'ignore'];
+    let selectedTags = new Set();
+    let currentReview = null;
+
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { 'content-type': 'application/json' },
+        ...options,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      return response.json();
+    }
+
+    async function refreshStatus() {
+      const status = await api('/api/status');
+      $('metrics').innerHTML = [
+        ['Snapshots', status.snapshots],
+        ['Unique links', status.resources],
+        ['YouTube', status.youtube],
+        ['Unmarked', status.unmarked],
+        ['Annotated', status.annotated],
+        ['Proposed views', status.proposedViews],
+        ['Accepted views', status.acceptedViews],
+        ['Tab observations', status.observations],
+      ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
+      await loadViews();
+    }
+
+    async function importSnapshot() {
+      $('importResult').textContent = 'Importing...';
+      const result = await api('/api/import-file', {
+        method: 'POST',
+        body: JSON.stringify({ file: $('importPath').value }),
+      });
+      $('importResult').textContent = `Imported ${result.tabCount} tabs into ${result.resourceCount} resources.`;
+      await refreshStatus();
+      await loadReview();
+    }
+
+    async function runExtraction() {
+      $('commandResult').innerHTML = '<div class="notice">Refreshing local extraction artifacts...</div>';
+      const result = await api('/api/extract/run', { method: 'POST', body: '{}' });
+      $('commandResult').innerHTML = `<div class="notice">Extracted ${result.artifactsWritten} artifacts across ${result.resourcesProcessed} resources.</div>`;
+      await refreshStatus();
+    }
+
+    async function planCommand() {
+      $('commandResult').innerHTML = '<div class="notice">Planning proposed view...</div>';
+      const result = await api('/api/agent/command', {
+        method: 'POST',
+        body: JSON.stringify({ text: $('commandText').value, mode: 'heuristic' }),
+      });
+      $('commandResult').innerHTML = renderCommandResult(result);
+      await refreshStatus();
+    }
+
+    function renderCommandResult(result) {
+      const preview = result.previews[0];
+      if (!preview) return `<div class="notice">${result.message}</div>`;
+      return `
+        <div class="panel">
+          <div class="resource-title">${preview.name}</div>
+          <div class="muted">${preview.goal || ''}</div>
+          ${renderCounts(preview.countsByState)}
+          <div class="row">
+            <button class="primary" onclick="acceptView('${preview.viewId}')">Accept view</button>
+            <button onclick="loadViewPreview('${preview.viewId}')">Refresh preview</button>
+          </div>
+          <h2 style="margin-top:14px">Rules</h2>
+          <div class="muted">Include: ${preview.inclusionRules.join('; ')}</div>
+          <div class="muted">Exclude: ${preview.exclusionRules.join('; ')}</div>
+          <h2 style="margin-top:14px">Samples</h2>
+          ${preview.samples.map(renderSample).join('')}
+        </div>
+      `;
+    }
+
+    function renderCounts(counts) {
+      const labels = {
+        strong_include: 'Strong',
+        weak_include: 'Weak',
+        conflict: 'Conflict',
+        needs_review: 'Review',
+        exclude: 'Exclude',
+      };
+      return `<div class="counts">${Object.entries(labels).map(([key, label]) => `<div class="count"><strong>${counts[key] || 0}</strong><br>${label}</div>`).join('')}</div>`;
+    }
+
+    function renderSample(sample) {
+      return `
+        <div class="sample">
+          <div><strong>${escapeHtml(sample.title)}</strong></div>
+          <div class="muted">${sample.state}${sample.section ? ` / ${escapeHtml(sample.section)}` : ''} / ${Math.round(sample.confidence * 100)}%</div>
+          <div class="muted">${escapeHtml(sample.reason || '')}</div>
+        </div>
+      `;
+    }
+
+    async function acceptView(viewId) {
+      const preview = await api(`/api/views/${viewId}/apply`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'accepted' }),
+      });
+      $('commandResult').innerHTML = `<div class="notice">Accepted ${preview.name}. Browser tabs were not changed.</div>${renderCounts(preview.countsByState)}`;
+      await refreshStatus();
+    }
+
+    async function loadViewPreview(viewId) {
+      const preview = await api(`/api/views/${viewId}/preview`);
+      $('commandResult').innerHTML = renderCommandResult({ message: '', previews: [preview] });
+    }
+
+    async function loadViews() {
+      const views = await api('/api/views');
+      $('viewsList').innerHTML = views.length ? views.map(view => `
+        <div class="sample">
+          <div><strong>${escapeHtml(view.name)}</strong></div>
+          <div class="muted">${view.status} / ${view.origin}</div>
+          <button onclick="loadViewPreview('${view.id}')">Preview</button>
+        </div>
+      `).join('') : '<div class="muted">No views yet.</div>';
+    }
+
+    async function loadReview() {
+      selectedTags = new Set();
+      const result = await api('/api/review/next?queue=unmarked&preload=2');
+      currentReview = result.current;
+      if (!currentReview) {
+        $('reviewCard').innerHTML = '<div class="muted">No review items.</div>';
+        return;
+      }
+      $('reviewCard').innerHTML = renderReview(result);
+    }
+
+    function renderReview(result) {
+      const item = result.current;
+      const url = item.redactedUrl || item.canonicalUrl;
+      return `
+        <div class="resource-title">${escapeHtml(item.title || '(untitled)')}</div>
+        <div class="muted">${escapeHtml(item.host)} / ${escapeHtml(item.urlKind)} / ${escapeHtml(item.extractionStatus)}</div>
+        <div class="muted" style="word-break:break-all">${escapeHtml(url)}</div>
+        <div class="muted">Groups: ${item.browserGroupTitles.map(escapeHtml).join(', ') || '(none)'}</div>
+        <div class="chips row" style="margin-top:12px">${chips.map(tag => `<button onclick="toggleTag('${tag}', this)">${tag}</button>`).join('')}</div>
+        <textarea id="reviewNote" placeholder="Note" style="margin-top:10px"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="primary" onclick="saveReview()">Save & next</button>
+          <button onclick="skipReview()">Skip</button>
+          <button class="danger" onclick="ignoreReview()">Mark ignore</button>
+          <a class="button" target="_blank" rel="noreferrer" href="${escapeAttribute(item.canonicalUrl)}">Open externally</a>
+        </div>
+        <h2 style="margin-top:14px">Next</h2>
+        ${result.next.map(next => `<div class="muted">${escapeHtml(next.title || next.canonicalUrl)}</div>`).join('') || '<div class="muted">(none)</div>'}
+      `;
+    }
+
+    function toggleTag(tag, button) {
+      if (selectedTags.has(tag)) {
+        selectedTags.delete(tag);
+        button.classList.remove('active');
+      } else {
+        selectedTags.add(tag);
+        button.classList.add('active');
+      }
+    }
+
+    async function saveReview() {
+      if (!currentReview) return;
+      await api(`/api/review/${currentReview.resourceId}/complete`, {
+        method: 'POST',
+        body: JSON.stringify({
+          tags: [...selectedTags],
+          description: $('reviewNote').value,
+          decision: selectedTags.has('watch_later') ? 'watch_later' : selectedTags.has('project_reference') ? 'project_reference' : selectedTags.has('inspiration') ? 'inspiration' : 'none',
+        }),
+      });
+      await refreshStatus();
+      await loadReview();
+    }
+
+    async function skipReview() {
+      if (!currentReview) return;
+      await api(`/api/review/${currentReview.resourceId}/skip`, { method: 'POST', body: '{}' });
+      await loadReview();
+    }
+
+    async function ignoreReview() {
+      if (!currentReview) return;
+      await api(`/api/review/${currentReview.resourceId}/ignore`, { method: 'POST', body: '{}' });
+      await refreshStatus();
+      await loadReview();
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    }
+
+    function escapeAttribute(value) {
+      return escapeHtml(value).replace(/`/g, '&#96;');
+    }
+
+    $('importButton').addEventListener('click', () => importSnapshot().catch(showError));
+    $('refreshButton').addEventListener('click', () => refreshStatus().catch(showError));
+    $('extractButton').addEventListener('click', () => runExtraction().catch(showError));
+    $('planButton').addEventListener('click', () => planCommand().catch(showError));
+
+    function showError(error) {
+      $('commandResult').innerHTML = `<div class="notice">${escapeHtml(error.message || error)}</div>`;
+    }
+
+    refreshStatus().then(loadReview).catch(showError);
+  </script>
+</body>
+</html>
