@@ -18,6 +18,10 @@ it('categorizes a batch with stub provider', async () => {
     host: 'developers.openai.com',
     title: 'Codex CLI',
     browserGroupTitles: ['Research'],
+    userAnnotations: [],
+    systemTags: ['docs'],
+    atomicItems: [],
+    extractionStatus: 'metadata_only',
     evidence: [{ id: 'ev_1', kind: 'title', text: 'Codex CLI', provenance: 'extension_snapshot', confidence: 0.8 }]
   }]);
 

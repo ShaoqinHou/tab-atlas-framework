@@ -20,11 +20,14 @@
     "zod": "latest"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "latest",
     "@types/node": "latest",
     "eslint": "latest",
+    "globals": "^17.6.0",
     "tsx": "latest",
     "typescript": "latest",
+    "typescript-eslint": "^8.61.1",
     "vitest": "latest"
   }
 }

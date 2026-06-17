@@ -46,6 +46,9 @@ it('plans a semantic view where a user note outranks a misleading title', async 
       source: 'focused_review',
       createdAt: '2026-06-17T00:00:00.000Z'
     }],
+    systemTags: ['youtube', 'video'],
+    atomicItems: [],
+    extractionStatus: 'metadata_only',
     evidence: [{ id: 'ev_title', kind: 'title', text: 'Beautiful watercolor environments', provenance: 'extension_snapshot', confidence: 0.4 }]
   }]);
 
