@@ -6,13 +6,15 @@ import { buildResourceBriefs } from '../resources/briefs.js';
 import type { LlmProvider } from '../llm/types.js';
 import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
 import { createUserCommand, persistSemanticViewPlan, previewView, type ViewPreview } from '../views/service.js';
+import { logAgentRun } from './runLog.js';
 import { searchResources } from './tools.js';
 
 export const RunAgentCommandInput = z.object({
   text: z.string().min(1),
-  mode: z.enum(['heuristic', 'codex']).default('heuristic'),
-  candidateLimit: z.number().int().positive().max(500).default(80),
+  mode: z.enum(['heuristic', 'codex']).default('codex'),
+  candidateLimit: z.number().int().positive().max(500).default(200),
   dryRun: z.boolean().default(false),
+  reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('medium'),
 });
 
 export type RunAgentCommandInput = z.input<typeof RunAgentCommandInput>;
@@ -25,6 +27,11 @@ export interface RunAgentCommandResult {
   previews: ViewPreview[];
   plan: SemanticViewPlan;
   codexTurnSpent: boolean;
+  mode: 'heuristic' | 'codex';
+  providerLabel: string;
+  providerThreadId?: string | null;
+  validationStatus: 'passed' | 'failed' | 'not_applicable';
+  agentRunId?: string;
   dryRun: boolean;
 }
 
@@ -36,27 +43,64 @@ export async function runAgentCommand(
   const parsed = RunAgentCommandInput.parse(input);
   const provider = typeof providerOrMode === 'object' ? providerOrMode : undefined;
   const mode = typeof providerOrMode === 'string' ? providerOrMode : parsed.mode;
+  const providerLabel = mode === 'codex' ? providerLabelFor(provider) : 'heuristic';
+  const providerThreadId = mode === 'codex' ? providerThreadIdFor(provider) : null;
   const query = deriveCandidateSearchQuery(parsed.text);
   const matches = searchResources(db, {
     query,
     filters: { annotationStatus: 'any', limit: parsed.candidateLimit },
   }).matches;
-  const candidateResourceIds = matches.length
-    ? matches.map(match => match.resourceId)
-    : getRecentResourceIds(db, parsed.candidateLimit);
+  const candidateResourceIds = selectCandidateResourceIds(db, parsed.text, matches.map(match => match.resourceId), parsed.candidateLimit);
   const briefs = buildResourceBriefs(db, candidateResourceIds);
 
   let plan: SemanticViewPlan;
   let codexTurnSpent = false;
+  let agentRunId: string | undefined;
+  let validationStatus: RunAgentCommandResult['validationStatus'] = mode === 'codex' ? 'failed' : 'not_applicable';
   if (mode === 'codex') {
     if (!provider) throw new Error('Codex mode requires an LlmProvider');
-    const result = await planSemanticView(provider, parsed.text, briefs, {
-      maxViews: 4,
-      allowWeakMatches: true,
-      askReviewForAmbiguous: true,
-    });
-    plan = result.value;
-    codexTurnSpent = (result.usage.quotaTurns ?? 0) > 0;
+    const startedAt = new Date().toISOString();
+    const inputSummary = {
+      commandText: parsed.text,
+      candidateCount: candidateResourceIds.length,
+      candidateResourceIds,
+      reasoningEffort: parsed.reasoningEffort,
+      dryRun: parsed.dryRun,
+    };
+    try {
+      const result = await planSemanticView(provider, parsed.text, briefs, {
+        maxViews: 4,
+        allowWeakMatches: true,
+        askReviewForAmbiguous: true,
+      });
+      plan = result.value;
+      codexTurnSpent = (result.usage.quotaTurns ?? 0) > 0;
+      validationStatus = 'passed';
+      agentRunId = logAgentRun(db, {
+        provider: providerLabel,
+        purpose: 'semantic_view_plan',
+        input: inputSummary,
+        output: outputSummaryForPlan(plan),
+        schemaId: 'SemanticViewPlan',
+        validationStatus,
+        usage: result.usage,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      logAgentRun(db, {
+        provider: providerLabel,
+        purpose: 'semantic_view_plan',
+        input: inputSummary,
+        schemaId: 'SemanticViewPlan',
+        validationStatus: 'error',
+        error: error instanceof Error ? error.message : String(error),
+        usage: { quotaTurns: 1 },
+        startedAt,
+        finishedAt: new Date().toISOString(),
+      });
+      throw error;
+    }
   } else {
     plan = planSemanticViewHeuristic(parsed.text, briefs);
   }
@@ -70,6 +114,11 @@ export async function runAgentCommand(
       previews: [],
       plan,
       codexTurnSpent,
+      mode,
+      providerLabel,
+      providerThreadId,
+      validationStatus,
+      agentRunId,
       dryRun: true,
     };
   }
@@ -85,6 +134,11 @@ export async function runAgentCommand(
     previews,
     plan,
     codexTurnSpent,
+    mode,
+    providerLabel,
+    providerThreadId,
+    validationStatus,
+    agentRunId,
     dryRun: false,
   };
 }
@@ -103,6 +157,30 @@ export function deriveCandidateSearchQuery(text: string): string {
   return [...new Set(terms)].join(' ');
 }
 
+function selectCandidateResourceIds(db: Database.Database, commandText: string, searchIds: string[], limit: number): string[] {
+  const ids = new Set<string>(searchIds);
+  if (referencesTasteOrPurpose(commandText)) {
+    for (const id of getUserMarkedResourceIds(db, limit)) ids.add(id);
+  }
+  for (const id of getRecentResourceIds(db, limit)) ids.add(id);
+  return [...ids].slice(0, limit);
+}
+
+function referencesTasteOrPurpose(commandText: string): boolean {
+  return /\b(inspiration|important|reference|later|project|ignore|archive|watch|moodboard|taste|purpose)\b/i.test(commandText);
+}
+
+function getUserMarkedResourceIds(db: Database.Database, limit: number): string[] {
+  const rows = db.prepare(`
+    SELECT DISTINCT target_id AS id
+    FROM user_annotations
+    WHERE target_kind = 'resource'
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(limit) as { id: string }[];
+  return rows.map(row => row.id);
+}
+
 function summarizePlan(plan: SemanticViewPlan): Record<MembershipState, number> {
   const summary = emptySummary();
   for (const view of plan.views) {
@@ -111,6 +189,27 @@ function summarizePlan(plan: SemanticViewPlan): Record<MembershipState, number> 
     }
   }
   return summary;
+}
+
+function outputSummaryForPlan(plan: SemanticViewPlan): unknown {
+  return {
+    commandText: plan.commandText,
+    viewCount: plan.views.length,
+    viewNames: plan.views.map(view => view.name),
+    summary: summarizePlan(plan),
+    reviewQueueCount: plan.reviewQueues.length,
+  };
+}
+
+function providerLabelFor(provider: LlmProvider | undefined): string {
+  if (!provider) return 'codex:missing-provider';
+  return provider.constructor?.name ?? 'codex-provider';
+}
+
+function providerThreadIdFor(provider: LlmProvider | undefined): string | null {
+  if (!provider || typeof provider !== 'object') return null;
+  const candidate = provider as { threadId?: unknown };
+  return typeof candidate.threadId === 'string' ? candidate.threadId : null;
 }
 
 function summarizePreviews(previews: ViewPreview[]): Record<MembershipState, number> {

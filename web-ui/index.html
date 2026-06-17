@@ -147,6 +147,15 @@
       padding: 10px;
       font-size: 13px;
     }
+    .badge {
+      background: #ddf4ff;
+      border: 1px solid #54aeff;
+      border-radius: 999px;
+      color: #0969da;
+      display: inline-flex;
+      font-size: 12px;
+      padding: 3px 8px;
+    }
     @media (max-width: 900px) {
       main, .metrics {
         grid-template-columns: 1fr;
@@ -164,6 +173,16 @@
       <section>
         <h2>Ask TabAtlas</h2>
         <textarea id="commandText">Make a loose group mainly game inspiration but welcome all marked inspiration</textarea>
+        <div class="row" style="margin-top:10px">
+          <label><input type="radio" name="plannerMode" value="codex" checked style="width:auto"> Codex agent</label>
+          <label><input type="radio" name="plannerMode" value="heuristic" style="width:auto"> Fast heuristic preview</label>
+          <select id="reasoningEffort">
+            <option value="medium" selected>medium</option>
+            <option value="low">low</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </div>
         <div class="row" style="margin-top:10px">
           <button class="primary" id="planButton">Plan</button>
           <button id="extractButton">Refresh extraction</button>
@@ -244,10 +263,16 @@
     }
 
     async function planCommand() {
-      $('commandResult').innerHTML = '<div class="notice">Planning proposed view...</div>';
+      const mode = selectedPlannerMode();
+      $('commandResult').innerHTML = `<div class="notice">Planning proposed view with ${mode === 'codex' ? 'Codex agent' : 'heuristic preview'}...</div>`;
       const result = await api('/api/agent/command', {
         method: 'POST',
-        body: JSON.stringify({ text: $('commandText').value, mode: 'heuristic' }),
+        body: JSON.stringify({
+          text: $('commandText').value,
+          mode,
+          candidateLimit: 200,
+          reasoningEffort: $('reasoningEffort').value,
+        }),
       });
       $('commandResult').innerHTML = renderCommandResult(result);
       await refreshStatus();
@@ -258,6 +283,12 @@
       if (!preview) return `<div class="notice">${result.message}</div>`;
       return `
         <div class="panel">
+          <div class="row" style="margin-bottom:10px">
+            <span class="badge">Mode: ${escapeHtml(result.mode || 'unknown')}</span>
+            <span class="badge">Codex used: ${result.codexTurnSpent ? 'yes' : 'no'}</span>
+            <span class="badge">Validation: ${escapeHtml(result.validationStatus || 'unknown')}</span>
+            <span class="badge">No browser tabs changed</span>
+          </div>
           <div class="resource-title">${preview.name}</div>
           <div class="muted">${preview.goal || ''}</div>
           ${renderCounts(preview.countsByState)}
@@ -331,6 +362,11 @@
       $('reviewCard').innerHTML = renderReview(result);
     }
 
+    function selectedPlannerMode() {
+      const selected = document.querySelector('input[name="plannerMode"]:checked');
+      return selected ? selected.value : 'codex';
+    }
+
     function renderReview(result) {
       const item = result.current;
       const url = item.redactedUrl || item.canonicalUrl;
@@ -400,10 +436,26 @@
     $('importButton').addEventListener('click', () => importSnapshot().catch(showError));
     $('refreshButton').addEventListener('click', () => refreshStatus().catch(showError));
     $('extractButton').addEventListener('click', () => runExtraction().catch(showError));
-    $('planButton').addEventListener('click', () => planCommand().catch(showError));
+    $('planButton').addEventListener('click', () => planCommand().catch(showCommandError));
 
     function showError(error) {
       $('commandResult').innerHTML = `<div class="notice">${escapeHtml(error.message || error)}</div>`;
+    }
+
+    function showCommandError(error) {
+      $('commandResult').innerHTML = `
+        <div class="notice">
+          ${escapeHtml(error.message || error)}
+          <div class="row" style="margin-top:10px">
+            <button onclick="retryHeuristic()">Retry with heuristic</button>
+          </div>
+        </div>
+      `;
+    }
+
+    async function retryHeuristic() {
+      document.querySelector('input[name="plannerMode"][value="heuristic"]').checked = true;
+      await planCommand();
     }
 
     refreshStatus().then(loadReview).catch(showError);

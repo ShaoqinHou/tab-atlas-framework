@@ -113,4 +113,107 @@ describe('agent command service', () => {
     expect(result.codexTurnSpent).toBe(false);
     expect(result.plan.views[0].name).toContain('Loose');
   });
+
+  it('calls a provider in codex mode, persists the view, and logs agent_runs', async () => {
+    const { db, byTitle } = seedCommandFixture();
+    let calls = 0;
+    const provider: LlmProvider = {
+      async complete() {
+        calls += 1;
+        return {
+          text: JSON.stringify({
+            commandText: 'Make a game inspiration group',
+            views: [{
+              name: 'Codex game inspiration',
+              goal: 'Collect game inspiration resources.',
+              inclusionRules: ['Include resources useful for game ideas.'],
+              exclusionRules: ['Exclude unrelated resources.'],
+              sections: [],
+              confidence: 0.9,
+              memberships: [{
+                targetKind: 'resource',
+                targetId: byTitle['Gameplay mechanics breakdown'],
+                state: 'strong_include',
+                confidence: 0.9,
+                reason: 'Codex selected this gameplay mechanics resource.',
+                evidenceRefs: ['fixture_ref'],
+              }],
+            }],
+            reviewQueues: [],
+            explanation: 'Codex planned the view.',
+          }),
+          usage: { quotaTurns: 1, inputTokens: 10, outputTokens: 20 },
+        };
+      },
+    };
+
+    const result = await runAgentCommand(db, provider, {
+      text: 'Make a game inspiration group',
+      mode: 'codex',
+    });
+
+    expect(calls).toBe(1);
+    expect(result.mode).toBe('codex');
+    expect(result.codexTurnSpent).toBe(true);
+    expect(result.validationStatus).toBe('passed');
+    expect(result.providerLabel).toBe('Object');
+    expect(result.viewIds).toHaveLength(1);
+    expect(result.summary.strong_include).toBe(1);
+
+    const run = db.prepare('SELECT provider, validation_status, usage_json FROM agent_runs LIMIT 1').get() as {
+      provider: string;
+      validation_status: string;
+      usage_json: string;
+    };
+    expect(run.provider).toBe('Object');
+    expect(run.validation_status).toBe('passed');
+    expect(JSON.parse(run.usage_json).quotaTurns).toBe(1);
+  });
+
+  it('reasks after invalid codex JSON and then persists the corrected plan', async () => {
+    const { db, byTitle } = seedCommandFixture();
+    let calls = 0;
+    const provider: LlmProvider = {
+      async complete() {
+        calls += 1;
+        if (calls === 1) return { text: 'not json', usage: { quotaTurns: 1 } };
+        return {
+          text: JSON.stringify({
+            commandText: 'Make an art inspiration group',
+            views: [{
+              name: 'Codex art inspiration',
+              goal: 'Collect art inspiration.',
+              inclusionRules: ['Include visual resources.'],
+              exclusionRules: ['Exclude unrelated resources.'],
+              sections: [],
+              confidence: 0.8,
+              memberships: [{
+                targetKind: 'resource',
+                targetId: byTitle['Beautiful watercolor environments'],
+                state: 'strong_include',
+                confidence: 0.88,
+                reason: 'Codex selected the watercolor resource as visual inspiration.',
+                evidenceRefs: ['fixture_ref'],
+              }],
+            }],
+            reviewQueues: [],
+            explanation: 'Corrected JSON after reask.',
+          }),
+          usage: { quotaTurns: 1 },
+        };
+      },
+    };
+
+    const result = await runAgentCommand(db, provider, {
+      text: 'Make an art inspiration group',
+      mode: 'codex',
+    });
+
+    expect(calls).toBe(2);
+    expect(result.validationStatus).toBe('passed');
+    expect(result.summary.strong_include).toBe(1);
+    const run = db.prepare('SELECT validation_status, usage_json FROM agent_runs LIMIT 1').get() as { validation_status: string; usage_json: string };
+    expect(run.validation_status).toBe('passed');
+    expect(JSON.parse(run.usage_json).quotaTurns).toBe(2);
+  });
 });

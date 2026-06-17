@@ -1,10 +1,11 @@
 import fs from 'node:fs/promises';
 import Fastify from 'fastify';
-import { runAgentCommand } from '../agent/commandService.js';
+import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
+import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { buildResourceBrief } from '../resources/briefs.js';
 import { applyViewPlan, previewView } from '../views/service.js';
 
@@ -13,6 +14,7 @@ const port = Number(process.env.TABATLAS_PORT ?? 9787);
 const db = openDatabase(process.env.TABATLAS_DB);
 const app = Fastify({ logger: true });
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
+const codexProviders = new Map<string, CodexSdkProvider>();
 
 app.get('/health', async () => ({ ok: true, app: 'tabatlas', time: new Date().toISOString() }));
 
@@ -86,11 +88,17 @@ app.post('/api/agent/tools/getResourceBriefs', async (request, reply) => {
 
 app.post('/api/agent/command', async (request, reply) => {
   const body = asRecord(request.body);
-  const result = await runAgentCommand(db, 'heuristic', {
+  const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = mode === 'codex' ? getCodexProvider({ reasoningEffort }) : 'heuristic';
+  const input: RunAgentCommandInput = {
     text: typeof body.text === 'string' ? body.text : '',
+    mode,
     candidateLimit: typeof body.candidateLimit === 'number' ? body.candidateLimit : undefined,
     dryRun: Boolean(body.dryRun),
-  });
+    reasoningEffort,
+  };
+  const result = await runAgentCommand(db, provider, input);
   return reply.send(result);
 });
 
@@ -178,4 +186,21 @@ app.listen({ host, port }).catch(err => {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'>): CodexSdkProvider {
+  const key = config.reasoningEffort ?? 'medium';
+  const existing = codexProviders.get(key);
+  if (existing) return existing;
+  const provider = new CodexSdkProvider({
+    reasoningEffort: config.reasoningEffort ?? 'medium',
+    reuseThread: true,
+    workingDirectory: process.cwd(),
+  });
+  codexProviders.set(key, provider);
+  return provider;
+}
+
+function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
+  return value === 'minimal' || value === 'low' || value === 'high' || value === 'xhigh' ? value : 'medium';
 }
