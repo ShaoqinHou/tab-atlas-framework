@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS review_queue_items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_review_queue ON review_queue_items(queue_name, status, priority DESC, position ASC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_review_queue_unique_resource ON review_queue_items(queue_name, resource_id);
 
 CREATE TABLE IF NOT EXISTS agent_runs (
   id TEXT PRIMARY KEY,

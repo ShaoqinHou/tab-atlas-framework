@@ -64,6 +64,8 @@ export const AnnotationDecision = z.enum([
   'none',
 ]);
 
+export type AnnotationDecision = z.infer<typeof AnnotationDecision>;
+
 export const UserAnnotationSource = z.enum([
   'focused_review',
   'resource_detail',
@@ -71,6 +73,8 @@ export const UserAnnotationSource = z.enum([
   'bulk_edit',
   'import',
 ]);
+
+export type UserAnnotationSource = z.infer<typeof UserAnnotationSource>;
 
 export const UserAnnotation = z.object({
   id: z.string().optional(),
@@ -102,6 +106,8 @@ export const AtomicItemBrief = z.object({
   evidenceRefs: z.array(z.string()).default([]),
   confidence: z.number().min(0).max(1).default(0.5),
 });
+
+export type AtomicItemBrief = z.infer<typeof AtomicItemBrief>;
 
 export const ResourceBrief = z.object({
   resourceId: z.string(),
