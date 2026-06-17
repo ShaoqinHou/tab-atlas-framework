@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import { AddUserAnnotationInput } from '../agent/toolContracts.js';
 import { UserAnnotation, type AnnotationDecision } from '../shared/schemas.js';
+import { refreshResourceSearchText } from '../resources/searchIndex.js';
 
 type AnnotationRow = {
   id: string;
@@ -38,7 +39,7 @@ export function addUserAnnotation(db: Database.Database, input: AddAnnotationInp
     now,
   );
 
-  refreshResourceSearchText(db, parsed.targetKind, parsed.targetId);
+  if (parsed.targetKind === 'resource') refreshResourceSearchText(db, parsed.targetId);
 
   return UserAnnotation.parse({
     id,
@@ -89,33 +90,4 @@ function parseTags(value: string): string[] {
   } catch {
     return [];
   }
-}
-
-function refreshResourceSearchText(db: Database.Database, targetKind: 'resource' | 'atomic_item', targetId: string): void {
-  if (targetKind !== 'resource') return;
-  const resource = db.prepare(`
-    SELECT id, title_best, redacted_url
-    FROM resources
-    WHERE id = ?
-  `).get(targetId) as { id: string; title_best: string | null; redacted_url: string } | undefined;
-  if (!resource) return;
-
-  const annotations = getUserAnnotations(db, 'resource', targetId);
-  const userText = annotations
-    .flatMap(annotation => [...annotation.tags, annotation.description ?? '', annotation.decision])
-    .filter(Boolean)
-    .join(' ');
-
-  const extractedText = (db.prepare(`
-    SELECT text_excerpt FROM extraction_artifacts
-    WHERE resource_id = ? AND text_excerpt IS NOT NULL
-  `).all(targetId) as { text_excerpt: string }[])
-    .map(row => row.text_excerpt)
-    .join(' ');
-
-  db.prepare('DELETE FROM resource_fts WHERE resource_id = ?').run(targetId);
-  db.prepare(`
-    INSERT INTO resource_fts (resource_id, title, url, user_text, extracted_text)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(resource.id, resource.title_best ?? '', resource.redacted_url, userText, extractedText);
 }

@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS extraction_artifacts (
   extracted_at TEXT NOT NULL
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_resource_recipe ON extraction_artifacts(resource_id, recipe_id);
+
 CREATE TABLE IF NOT EXISTS atomic_items (
   id TEXT PRIMARY KEY,
   resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
