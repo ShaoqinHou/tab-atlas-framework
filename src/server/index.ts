@@ -12,7 +12,8 @@ import {
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
-import { getJobSnapshot, listJobItems, listJobs, requestJobCancel } from '../jobs/service.js';
+import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
+import { startInProcessJobWorker } from '../jobs/worker.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
 import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { buildResourceBrief } from '../resources/briefs.js';
@@ -32,6 +33,22 @@ const db = openDatabase(process.env.TABATLAS_DB);
 const app = Fastify({ logger: true });
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
 const codexProviders = new Map<string, CodexSdkProvider>();
+const jobWorker = startInProcessJobWorker(db, {
+  codex_scan: async (jobId, context) => {
+    const job = getJobSnapshot(db, jobId);
+    const input = asRecord(job.input);
+    const reasoningEffort = readReasoningEffort(input.reasoningEffort);
+    const provider = getCodexProvider({ reasoningEffort });
+    await resumeCodexScanJob(db, provider, jobId, {
+      maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
+      maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
+      signal: context.signal,
+    });
+  },
+}, {
+  pollMs: Number(process.env.TABATLAS_WORKER_POLL_MS ?? 1500),
+  concurrency: Number(process.env.TABATLAS_WORKER_CONCURRENCY ?? 1),
+});
 
 app.get('/health', async () => ({ ok: true, app: 'tabatlas', time: new Date().toISOString() }));
 
@@ -202,6 +219,16 @@ app.post('/api/jobs/:jobId/resume', async (request, reply) => {
   return reply.send(result);
 });
 
+app.post('/api/jobs/:jobId/retry-failed', async (request, reply) => {
+  const params = request.params as { jobId: string };
+  const body = asRecord(request.body);
+  const retried = retryFailedJobItems(db, params.jobId, {
+    itemIds: Array.isArray(body.itemIds) ? body.itemIds.filter((item): item is string => typeof item === 'string') : undefined,
+    maxAttempts: typeof body.maxAttempts === 'number' ? body.maxAttempts : undefined,
+  });
+  return reply.send(retried);
+});
+
 app.get('/api/commands', async () => {
   return db.prepare(`
     SELECT
@@ -330,6 +357,9 @@ app.listen({ host, port }).catch(err => {
   app.log.error(err);
   process.exit(1);
 });
+
+process.once('SIGINT', () => jobWorker.stop());
+process.once('SIGTERM', () => jobWorker.stop());
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};

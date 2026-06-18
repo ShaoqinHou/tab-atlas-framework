@@ -35,7 +35,7 @@ type ItemRow = {
   attempts: number;
 };
 
-type JobItemSnapshot = {
+export type JobItemSnapshot = {
   id: string;
   jobId: string;
   key: string;
@@ -50,6 +50,19 @@ type JobItemSnapshot = {
   startedAt?: string;
   finishedAt?: string;
 };
+
+export interface ClaimJobItemOptions {
+  maxAttempts?: number;
+}
+
+export interface RetryFailedItemsOptions {
+  itemIds?: string[];
+  maxAttempts?: number;
+}
+
+export interface RecoverStaleRunningOptions {
+  staleAfterMs?: number;
+}
 
 export function createJob(db: Database.Database, input: CreateJobInputValue): JobSnapshotValue {
   const parsed = CreateJobInput.parse(input);
@@ -69,6 +82,7 @@ export function createJob(db: Database.Database, input: CreateJobInputValue): Jo
     for (const item of parsed.items) {
       insert.run(`jobitem_${nanoid()}`, id, item.key, item.resourceId ?? null, JSON.stringify(item.input), now, now);
     }
+    if (parsed.items.length === 0) finalizeJob(db, id);
   });
   tx();
   return getJobSnapshot(db, id);
@@ -177,16 +191,23 @@ export function prepareJobResume(db: Database.Database, jobId: string): JobSnaps
   return getJobSnapshot(db, jobId);
 }
 
-export function beginNextJobItem(db: Database.Database, jobId: string): ClaimedJobItem | null {
+export function beginNextJobItem(
+  db: Database.Database,
+  jobId: string,
+  options: ClaimJobItemOptions = {},
+): ClaimedJobItem | null {
+  const maxAttempts = options.maxAttempts ?? 3;
   const tx = db.transaction(() => {
     const job = db.prepare('SELECT status, cancel_requested FROM jobs WHERE id = ?').get(jobId) as { status: string; cancel_requested: number } | undefined;
     if (!job) throw new Error(`Job not found: ${jobId}`);
     if (job.cancel_requested === 1 || ['succeeded', 'failed', 'cancelled'].includes(job.status)) return null;
+    markRetryExhaustedPendingItems(db, jobId, maxAttempts);
     const item = db.prepare(`
       SELECT id, job_id, item_key, resource_id, input_json, attempts
       FROM job_items WHERE job_id = ? AND status = 'pending'
+        AND attempts < ?
       ORDER BY rowid LIMIT 1
-    `).get(jobId) as ItemRow | undefined;
+    `).get(jobId, maxAttempts) as ItemRow | undefined;
     if (!item) {
       finalizeJob(db, jobId);
       return null;
@@ -269,6 +290,94 @@ export function requestJobCancel(db: Database.Database, jobId: string): JobSnaps
   return getJobSnapshot(db, jobId);
 }
 
+export function retryFailedJobItems(
+  db: Database.Database,
+  jobId: string,
+  options: RetryFailedItemsOptions = {},
+): JobSnapshotValue {
+  const maxAttempts = options.maxAttempts ?? 3;
+  const params: unknown[] = [new Date().toISOString(), jobId, maxAttempts];
+  const itemClause = options.itemIds?.length
+    ? `AND id IN (${options.itemIds.map(() => '?').join(', ')})`
+    : '';
+  if (options.itemIds?.length) params.push(...options.itemIds);
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE job_items
+      SET status = 'pending', error = NULL, finished_at = NULL, updated_at = ?
+      WHERE job_id = ? AND status = 'failed' AND attempts < ?
+      ${itemClause}
+    `).run(...params);
+    db.prepare(`
+      UPDATE jobs
+      SET status = 'queued', error = NULL, finished_at = NULL, cancel_requested = 0, updated_at = ?
+      WHERE id = ? AND status IN ('failed', 'paused', 'running', 'queued')
+    `).run(new Date().toISOString(), jobId);
+    refreshJobProgress(db, jobId);
+    finalizeJob(db, jobId);
+  });
+  tx();
+  return getJobSnapshot(db, jobId);
+}
+
+export function recoverStaleRunningItems(
+  db: Database.Database,
+  jobId: string,
+  options: RecoverStaleRunningOptions = {},
+): JobSnapshotValue {
+  const staleAfterMs = options.staleAfterMs ?? 5 * 60 * 1000;
+  const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    db.prepare(`
+      UPDATE job_items
+      SET status = 'pending', error = 'recovered stale running lease', started_at = NULL, updated_at = ?
+      WHERE job_id = ? AND status = 'running' AND updated_at < ?
+    `).run(now, jobId, cutoff);
+    db.prepare(`
+      UPDATE jobs
+      SET status = 'queued', updated_at = ?
+      WHERE id = ? AND status = 'running'
+        AND NOT EXISTS (SELECT 1 FROM job_items WHERE job_id = ? AND status = 'running')
+    `).run(now, jobId, jobId);
+    refreshJobProgress(db, jobId);
+    finalizeJob(db, jobId);
+  });
+  tx();
+  return getJobSnapshot(db, jobId);
+}
+
+export function touchJobItemLease(db: Database.Database, itemId: string): void {
+  db.prepare(`
+    UPDATE job_items
+    SET updated_at = ?
+    WHERE id = ? AND status = 'running'
+  `).run(new Date().toISOString(), itemId);
+}
+
+export function isJobCancelRequested(db: Database.Database, jobId: string): boolean {
+  const row = db.prepare('SELECT cancel_requested FROM jobs WHERE id = ?').get(jobId) as { cancel_requested: number } | undefined;
+  return row?.cancel_requested === 1;
+}
+
+export function listRunnableJobs(db: Database.Database, options: { kinds?: string[]; limit?: number } = {}): JobSnapshotValue[] {
+  const kinds = options.kinds ?? [];
+  const params: unknown[] = [];
+  const kindClause = kinds.length ? `AND kind IN (${kinds.map(() => '?').join(', ')})` : '';
+  params.push(...kinds, options.limit ?? 20);
+  const rows = db.prepare(`
+    SELECT id
+    FROM jobs
+    WHERE cancel_requested = 0
+      AND status IN ('queued', 'running')
+      AND EXISTS (SELECT 1 FROM job_items WHERE job_id = jobs.id AND status IN ('pending', 'running'))
+      ${kindClause}
+    ORDER BY created_at
+    LIMIT ?
+  `).all(...params) as { id: string }[];
+  return rows.map(row => getJobSnapshot(db, row.id));
+}
+
 export function refreshJobProgress(db: Database.Database, jobId: string): JobProgressValue {
   const rows = db.prepare(`SELECT status, COUNT(*) AS count FROM job_items WHERE job_id = ? GROUP BY status`).all(jobId) as { status: string; count: number }[];
   const counts: Record<string, number> = {};
@@ -286,6 +395,19 @@ function finalizeJob(db: Database.Database, jobId: string): void {
   const status = job.cancel_requested ? 'cancelled' : value.failed ? 'failed' : 'succeeded';
   const now = new Date().toISOString();
   db.prepare(`UPDATE jobs SET status = ?, finished_at = COALESCE(finished_at, ?), updated_at = ? WHERE id = ?`).run(status, now, now, jobId);
+}
+
+function markRetryExhaustedPendingItems(db: Database.Database, jobId: string, maxAttempts: number): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE job_items
+    SET status = 'failed',
+        error = COALESCE(error, 'retry limit exceeded'),
+        finished_at = COALESCE(finished_at, ?),
+        updated_at = ?
+    WHERE job_id = ? AND status = 'pending' AND attempts >= ?
+  `).run(now, now, jobId, maxAttempts);
+  refreshJobProgress(db, jobId);
 }
 
 function progress(counts: Record<string, number>): JobProgressValue {

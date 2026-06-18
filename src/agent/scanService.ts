@@ -12,9 +12,11 @@ import {
   createJob,
   finishJobItem,
   getJobSnapshot,
+  isJobCancelRequested,
   prepareJobResume,
   requeueJobItem,
   skipJobItem,
+  touchJobItemLease,
 } from '../jobs/service.js';
 import type { JobSnapshot as JobSnapshotValue } from '../jobs/contracts.js';
 import { logAgentRun } from './runLog.js';
@@ -238,7 +240,7 @@ export async function resumeCodexScanJob(
   db: Database.Database,
   provider: LlmProvider,
   jobId: string,
-  options: { maxItems?: number; maxRetries?: number } = {},
+  options: { maxItems?: number; maxRetries?: number; signal?: AbortSignal } = {},
 ): Promise<CodexScanJobResumeResult> {
   const maxItems = options.maxItems ?? 20;
   const maxRetries = options.maxRetries ?? 3;
@@ -250,6 +252,7 @@ export async function resumeCodexScanJob(
   let codexTurns = 0;
 
   while (processedItems < maxItems) {
+    if (options.signal?.aborted || isJobCancelRequested(db, jobId)) break;
     const item = beginNextJobItem(db, jobId);
     if (!item) break;
     const candidate = ResourceScanCandidateInput.parse(item.input);
@@ -262,7 +265,15 @@ export async function resumeCodexScanJob(
 
     const brief = briefForScan(buildResourceBriefs(db, [candidate.resourceId])[0]);
     try {
+      if (options.signal?.aborted || isJobCancelRequested(db, jobId)) {
+        break;
+      }
+      touchJobItemLease(db, item.id);
       const scan = await scanBatch(provider, [brief]);
+      touchJobItemLease(db, item.id);
+      if (options.signal?.aborted || isJobCancelRequested(db, jobId)) {
+        break;
+      }
       codexTurns += scan.usage.quotaTurns ?? 0;
       persistScanBatch(db, [brief], scan.value, new Map([[candidate.resourceId, candidate]]), item.id);
       processedItems += 1;
