@@ -13,6 +13,7 @@ export interface PersistedViewPlan {
 export interface PersistSemanticViewPlanOptions {
   origin?: string;
   parentRevisionId?: string;
+  viewIds?: string[];
 }
 
 export interface ViewPreview {
@@ -61,11 +62,11 @@ type MembershipPreviewRow = {
   reason: string | null;
 };
 
-export function createUserCommand(db: Database.Database, text: string, parsedIntent?: unknown): string {
-  const id = `cmd_${nanoid()}`;
+export function createUserCommand(db: Database.Database, text: string, parsedIntent?: unknown, id = `cmd_${nanoid()}`): string {
   db.prepare(`
     INSERT INTO user_commands (id, text, created_at, parsed_intent_json, status)
     VALUES (?, ?, ?, ?, 'proposed')
+    ON CONFLICT(id) DO NOTHING
   `).run(id, text, new Date().toISOString(), parsedIntent ? JSON.stringify(parsedIntent) : null);
   return id;
 }
@@ -83,8 +84,8 @@ export function persistSemanticViewPlan(
   const viewIds: string[] = [];
 
   const tx = db.transaction(() => {
-    for (const view of plan.views) {
-      const viewId = `view_${nanoid()}`;
+    for (const [index, view] of plan.views.entries()) {
+      const viewId = options.viewIds?.[index] ?? `view_${nanoid()}`;
       const specId = `spec_${nanoid()}`;
       viewIds.push(viewId);
 

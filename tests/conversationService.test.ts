@@ -12,6 +12,7 @@ import {
   createConversationThread,
   getConversationSnapshot,
   persistAgentTurnPlan,
+  runPersistedAgentAction,
   sendConversationMessage,
 } from '../src/agent/conversationService.js';
 import type { AgentTurnPlan } from '../src/agent/actionProtocol.js';
@@ -59,6 +60,30 @@ function queuedJsonProvider(outputs: unknown[], prompts: string[] = []): LlmProv
 
 function noActionPlan(reply = 'Done.'): AgentTurnPlan {
   return { reply, actions: [], questions: [], assumptions: [] };
+}
+
+function semanticPlanFor(resourceId: string, evidenceRef: string, name: string): SemanticViewPlan {
+  return {
+    commandText: 'Make a forest inspiration board',
+    views: [{
+      name,
+      goal: 'Collect forest inspiration resources.',
+      inclusionRules: ['Include forest inspiration.'],
+      exclusionRules: ['Exclude unrelated resources.'],
+      sections: [],
+      confidence: 0.91,
+      memberships: [{
+        targetKind: 'resource',
+        targetId: resourceId,
+        state: 'strong_include',
+        confidence: 0.91,
+        reason: 'Codex selected the forest moodboard resource.',
+        evidenceRefs: [evidenceRef],
+      }],
+    }],
+    reviewQueues: [],
+    explanation: 'Codex planned the conversational view.',
+  };
 }
 
 function createAcceptedCandidateView(db: ReturnType<typeof openDatabase>, resourceId: string) {
@@ -255,6 +280,95 @@ describe('persistent conversational agent actions', () => {
     expect(result.viewIds).toHaveLength(1);
     const view = db.prepare('SELECT origin FROM views WHERE id = ?').get(result.viewIds?.[0]) as { origin: string };
     expect(view.origin).toBe('codex');
+  });
+
+  it('concurrent plan_view execution creates one deterministic view set', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    let calls = 0;
+    const provider = queuedJsonProvider([semanticPlanFor(resourceId, evidenceRef, 'Concurrent view')]);
+    const originalComplete = provider.complete.bind(provider);
+    provider.complete = async (...args) => {
+      calls += 1;
+      return originalComplete(...args);
+    };
+    const persisted = persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'I can plan that.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_plan_concurrent',
+          kind: 'plan_view',
+          approval: 'preview',
+          rationale: 'Preview a view.',
+          commandText: 'Make a forest inspiration board',
+          candidateLimit: 50,
+        }],
+      },
+    });
+    const actionId = persisted.actions[0].id;
+
+    await Promise.all([
+      runPersistedAgentAction(db, actionId, { plannerProvider: provider }),
+      runPersistedAgentAction(db, actionId, { plannerProvider: provider }),
+    ]);
+
+    const viewRows = db.prepare('SELECT id FROM views').all() as Array<{ id: string }>;
+    expect(calls).toBe(1);
+    expect(viewRows).toHaveLength(1);
+    expect(viewRows[0].id).toMatch(/^view_agent_0_/);
+  });
+
+  it('plan_view replay after persisted views returns identical IDs without calling Codex again', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const provider = queuedJsonProvider([semanticPlanFor(resourceId, evidenceRef, 'Crash replay view')]);
+    const persisted = persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'I can plan that.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_plan_crash_replay',
+          kind: 'plan_view',
+          approval: 'preview',
+          rationale: 'Preview a view.',
+          commandText: 'Make a forest inspiration board',
+          candidateLimit: 50,
+        }],
+      },
+    });
+    const actionId = persisted.actions[0].id;
+    const first = await runPersistedAgentAction(db, actionId, { plannerProvider: provider });
+    const firstViewIds = (first.result as { viewIds: string[] }).viewIds;
+    db.prepare(`
+      UPDATE agent_actions
+      SET status = 'approved', result_json = NULL, error = NULL, finished_at = NULL,
+          execution_token = NULL, execution_started_at = NULL
+      WHERE id = ?
+    `).run(actionId);
+    db.prepare(`
+      UPDATE action_effects
+      SET status = 'running', result_json = NULL, completed_at = NULL, stale_after = ?
+      WHERE action_id = ?
+    `).run(new Date(Date.now() - 1000).toISOString(), actionId);
+    const throwingProvider: LlmProvider = {
+      async complete() {
+        throw new Error('Codex should not be called on replay');
+      },
+    };
+
+    const replayed = await runPersistedAgentAction(db, actionId, { plannerProvider: throwingProvider });
+    const replayViewIds = (replayed.result as { viewIds: string[]; replayed: boolean }).viewIds;
+
+    expect(replayViewIds).toEqual(firstViewIds);
+    expect((replayed.result as { replayed: boolean }).replayed).toBe(true);
+    expect((db.prepare('SELECT COUNT(*) AS count FROM views').get() as { count: number }).count).toBe(1);
   });
 
   it('keeps annotation actions proposed until confirmed', async () => {

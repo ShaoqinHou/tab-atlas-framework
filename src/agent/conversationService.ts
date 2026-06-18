@@ -11,15 +11,21 @@ import {
 } from './actionProtocol.js';
 import { runStructured } from '../llm/runStructured.js';
 import type { LlmProvider } from '../llm/types.js';
-import { runAgentCommand } from './commandService.js';
+import { runAgentCommand, type RunAgentCommandInput } from './commandService.js';
 import { createCodexScanJob } from './scanService.js';
 import { addUserAnnotation, getUserAnnotationById } from '../annotations/service.js';
 import { getReviewNext } from '../review/service.js';
 import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
-import { applyViewPlan, previewView } from '../views/service.js';
+import { applyViewPlan, createUserCommand, persistSemanticViewPlan, previewView } from '../views/service.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
 import { materializeAgentTurnPlan } from './actionIdentity.js';
+import {
+  claimActionEffect,
+  completeActionEffect,
+  failActionEffect,
+  type ActionEffectKind,
+} from './actionEffectLedger.js';
 
 export interface ConversationThreadRecord {
   id: string;
@@ -291,9 +297,8 @@ export async function executeAgentAction(
 ): Promise<unknown> {
   switch (action.kind) {
     case 'plan_view':
-      return runAgentCommand(db, requirePlannerProvider(options, action.kind), {
+      return runViewPlanningEffect(db, action, options, {
         text: action.commandText,
-        mode: 'codex',
         candidateLimit: action.candidateLimit,
       });
     case 'refine_view': {
@@ -304,13 +309,12 @@ export async function executeAgentAction(
         FROM memberships
         WHERE view_id = ? AND target_kind = 'resource'
       `).all(action.viewId).map((row: unknown) => (row as { id: string }).id);
-      return runAgentCommand(db, requirePlannerProvider(options, action.kind), {
+      return runViewPlanningEffect(db, action, options, {
         text: [
           `Refine existing view "${preview.name}".`,
           preview.goal ? `Existing goal: ${preview.goal}` : '',
           `User refinement: ${action.instruction}`,
         ].filter(Boolean).join(' '),
-        mode: 'codex',
         candidateLimit: 200,
         seedResourceIds,
         parentRevisionId: parentRevision?.id,
@@ -319,15 +323,23 @@ export async function executeAgentAction(
     case 'start_review':
       return getReviewNext(db, { queue: action.queue, preload: 2 });
     case 'scan_resources':
-      return createCodexScanJob(db, {
+      return runActionEffect(db, action.id, 'scan_job_create', {
+        resourceIds: action.resourceIds,
+        limit: action.limit,
+        force: action.force,
+      }, () => createCodexScanJob(db, {
         resourceIds: action.resourceIds,
         limit: action.limit,
         force: action.force,
       }, {
         jobId: idempotentActionObjectId('job_agent', action.id),
-      });
+      }));
     case 'add_annotation':
-      {
+      return runActionEffect(db, action.id, 'annotation_write', {
+        resourceId: action.resourceId,
+        tags: action.tags,
+        decision: action.decision,
+      }, () => {
         const annotationId = idempotentActionObjectId('ann_agent', action.id);
         const existing = getUserAnnotationById(db, annotationId);
         if (existing) return existing;
@@ -340,17 +352,101 @@ export async function executeAgentAction(
           decision: action.decision,
           source: 'agent_chat',
         });
-      }
+      });
     case 'explain_membership':
       return explainMembership(db, {
         resourceId: action.resourceId,
         viewId: action.viewId,
       });
     case 'accept_view':
-      if (action.revisionId) return acceptViewRevision(db, action.revisionId);
-      return applyViewPlan(db, action.viewId, 'accepted');
+      return runActionEffect(db, action.id, 'view_accept', {
+        viewId: action.viewId,
+        revisionId: action.revisionId,
+      }, () => {
+        if (action.revisionId) return acceptViewRevision(db, action.revisionId);
+        return applyViewPlan(db, action.viewId, 'accepted');
+      });
     default:
       return assertNever(action);
+  }
+}
+
+async function runViewPlanningEffect(
+  db: Database.Database,
+  action: Extract<AgentActionValue, { kind: 'plan_view' | 'refine_view' }>,
+  options: AgentActionExecutionOptions,
+  input: Omit<RunAgentCommandInput, 'mode' | 'dryRun'>,
+): Promise<unknown> {
+  const effectKind: ActionEffectKind = action.kind === 'refine_view' ? 'view_refinement_create' : 'view_plan_create';
+  const idempotencyKey = `${action.id}:${effectKind}`;
+  const commandId = idempotentActionObjectId('cmd_agent', action.id);
+  const existingViewIds = viewIdsForCommand(db, commandId);
+  if (existingViewIds.length) {
+    const result = replayedViewPlanningResult(db, commandId, existingViewIds);
+    try { completeActionEffect(db, idempotencyKey, result); } catch { /* effect may not exist yet */ }
+    return result;
+  }
+
+  const claim = claimActionEffect(db, {
+    actionId: action.id,
+    effectKind,
+    idempotencyKey,
+    effectInput: input,
+  });
+  if (!claim.claimed) return claim.effect.result ?? { status: claim.effect.status };
+
+  try {
+    const dryRun = await runAgentCommand(db, requirePlannerProvider(options, action.kind), {
+      ...input,
+      mode: 'codex',
+      dryRun: true,
+    });
+    createUserCommand(db, input.text, {
+      mode: dryRun.mode,
+      sourceActionId: action.id,
+      candidateLimit: input.candidateLimit,
+      seedResourceIds: input.seedResourceIds,
+      parentRevisionId: input.parentRevisionId,
+    }, commandId);
+    const viewIds = dryRun.plan.views.map((_view, index) => idempotentActionObjectId(`view_agent_${index}`, action.id));
+    const persisted = persistSemanticViewPlan(db, commandId, dryRun.plan, {
+      origin: dryRun.mode,
+      parentRevisionId: input.parentRevisionId,
+      viewIds,
+    });
+    const result = {
+      ...dryRun,
+      commandId,
+      viewIds: persisted.viewIds,
+      previews: persisted.viewIds.map(viewId => previewView(db, viewId)),
+      dryRun: false,
+      replayed: false,
+    };
+    completeActionEffect(db, idempotencyKey, result);
+    return result;
+  } catch (error) {
+    failActionEffect(db, idempotencyKey, error);
+    throw error;
+  }
+}
+
+function runActionEffect<T>(
+  db: Database.Database,
+  actionId: string,
+  effectKind: ActionEffectKind,
+  input: unknown,
+  fn: () => T,
+): T | unknown {
+  const idempotencyKey = `${actionId}:${effectKind}`;
+  const claim = claimActionEffect(db, { actionId, effectKind, idempotencyKey, effectInput: input });
+  if (!claim.claimed) return claim.effect.result ?? { status: claim.effect.status };
+  try {
+    const result = fn();
+    completeActionEffect(db, idempotencyKey, result);
+    return result;
+  } catch (error) {
+    failActionEffect(db, idempotencyKey, error);
+    throw error;
   }
 }
 
@@ -460,6 +556,29 @@ function finishClaimedAgentAction(
 function idempotentActionObjectId(prefix: string, actionId: string): string {
   const digest = crypto.createHash('sha256').update(actionId).digest('hex').slice(0, 24);
   return `${prefix}_${digest}`;
+}
+
+function viewIdsForCommand(db: Database.Database, commandId: string): string[] {
+  const rows = db.prepare(`
+    SELECT view_id
+    FROM semantic_view_specs
+    WHERE command_id = ?
+    ORDER BY created_at, view_id
+  `).all(commandId) as Array<{ view_id: string }>;
+  return rows.map(row => row.view_id);
+}
+
+function replayedViewPlanningResult(db: Database.Database, commandId: string, viewIds: string[]): unknown {
+  return {
+    commandId,
+    viewIds,
+    previews: viewIds.map(viewId => previewView(db, viewId)),
+    mode: 'codex',
+    codexTurnSpent: false,
+    validationStatus: 'passed',
+    dryRun: false,
+    replayed: true,
+  };
 }
 
 export function listConversationMessages(
