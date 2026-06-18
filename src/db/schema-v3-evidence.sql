@@ -74,7 +74,3 @@ CREATE TABLE IF NOT EXISTS agent_actions (
 
 CREATE INDEX IF NOT EXISTS idx_agent_actions_thread_status
   ON agent_actions(thread_id, status, created_at);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_idempotency_key
-  ON agent_actions(idempotency_key)
-  WHERE idempotency_key <> '';
