@@ -25,20 +25,20 @@ export function validatePublicHttpUrl(raw: string): NetworkPolicyDecision {
     return { allowed: false, reason: 'embedded_credentials' };
   }
   const host = url.hostname.toLowerCase().replace(/\.$/, '');
+  const ipLiteral = stripIpv6Brackets(host);
   if (!host) return { allowed: false, reason: 'missing_host' };
   if (isBlockedHostname(host)) return { allowed: false, reason: 'blocked_hostname' };
-  if (net.isIP(host) && !isPublicIpAddress(host)) {
+  if (net.isIP(ipLiteral) && !isPublicIpAddress(ipLiteral)) {
     return { allowed: false, reason: 'non_public_ip' };
   }
 
-  url.hostname = host;
   url.hash = '';
   return { allowed: true, normalizedUrl: url.toString() };
 }
 
 export function validateResolvedAddresses(addresses: string[]): NetworkPolicyDecision {
   if (!addresses.length) return { allowed: false, reason: 'dns_no_addresses' };
-  if (addresses.some(address => !isPublicIpAddress(address))) {
+  if (addresses.some(address => !isPublicIpAddress(stripIpv6Brackets(address)))) {
     return { allowed: false, reason: 'dns_resolved_non_public_ip' };
   }
   return { allowed: true };
@@ -53,10 +53,15 @@ export function safeExtractionHeaders(userAgent = 'TabAtlas/0.1 local evidence e
 }
 
 export function isPublicIpAddress(address: string): boolean {
-  const version = net.isIP(address);
-  if (version === 4) return isPublicIpv4(address);
-  if (version === 6) return isPublicIpv6(address);
+  const normalized = stripIpv6Brackets(address);
+  const version = net.isIP(normalized);
+  if (version === 4) return isPublicIpv4(normalized);
+  if (version === 6) return isPublicIpv6(normalized);
   return false;
+}
+
+function stripIpv6Brackets(value: string): string {
+  return value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
 }
 
 function isBlockedHostname(host: string): boolean {
@@ -77,7 +82,6 @@ function isPublicIpv4(address: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return false;
   if (a === 192 && b === 168) return false;
   if (a === 192 && b === 0) return false;
-  if (a === 192 && b === 0 && octets[2] === 2) return false;
   if (a === 198 && (b === 18 || b === 19)) return false;
   if (a === 198 && b === 51 && octets[2] === 100) return false;
   if (a === 203 && b === 0 && octets[2] === 113) return false;
