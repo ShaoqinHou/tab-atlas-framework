@@ -1,6 +1,22 @@
 import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
-import { validateAgentTurnPlan, type AgentAction, type AgentTurnPlan } from './actionProtocol.js';
+import {
+  AgentAction,
+  AgentTurnPlan,
+  actionsReadyWithoutConfirmation,
+  validateAgentTurnPlan,
+  type AgentAction as AgentActionValue,
+  type AgentTurnPlan as AgentTurnPlanValue,
+} from './actionProtocol.js';
+import { runStructured } from '../llm/runStructured.js';
+import type { LlmProvider } from '../llm/types.js';
+import { runAgentCommand } from './commandService.js';
+import { createCodexScanJob } from './scanService.js';
+import { addUserAnnotation } from '../annotations/service.js';
+import { getReviewNext } from '../review/service.js';
+import { explainMembership } from './tools.js';
+import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
+import { applyViewPlan, previewView } from '../views/service.js';
 
 export interface ConversationThreadRecord {
   id: string;
@@ -19,6 +35,36 @@ export interface ConversationMessageRecord {
   createdAt: string;
 }
 
+export interface AgentActionRecord {
+  id: string;
+  threadId: string;
+  messageId?: string;
+  kind: AgentActionValue['kind'];
+  approval: AgentActionValue['approval'];
+  status: 'proposed' | 'approved' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  action: AgentActionValue;
+  result?: unknown;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+}
+
+export interface ConversationSnapshot {
+  thread: ConversationThreadRecord;
+  messages: ConversationMessageRecord[];
+  actions: AgentActionRecord[];
+}
+
+export interface SendConversationMessageInput {
+  threadId: string;
+  content: string;
+}
+
+export interface SendConversationMessageOptions {
+  plannerProvider: LlmProvider;
+}
+
 export function createConversationThread(
   db: Database.Database,
   title?: string,
@@ -32,6 +78,36 @@ export function createConversationThread(
   return { id, title, status: 'active', createdAt: now, updatedAt: now };
 }
 
+export function getConversationThread(db: Database.Database, threadId: string): ConversationThreadRecord {
+  const row = db.prepare(`
+    SELECT id, title, status, created_at, updated_at
+    FROM conversation_threads
+    WHERE id = ?
+  `).get(threadId) as {
+    id: string;
+    title: string | null;
+    status: string;
+    created_at: string;
+    updated_at: string;
+  } | undefined;
+  if (!row) throw new Error(`Conversation thread not found: ${threadId}`);
+  return {
+    id: row.id,
+    title: row.title ?? undefined,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getConversationSnapshot(db: Database.Database, threadId: string): ConversationSnapshot {
+  return {
+    thread: getConversationThread(db, threadId),
+    messages: listConversationMessages(db, threadId),
+    actions: listAgentActions(db, threadId),
+  };
+}
+
 export function appendConversationMessage(
   db: Database.Database,
   input: {
@@ -41,6 +117,7 @@ export function appendConversationMessage(
     context?: unknown;
   },
 ): ConversationMessageRecord {
+  getConversationThread(db, input.threadId);
   const id = `message_${nanoid()}`;
   const createdAt = new Date().toISOString();
   db.prepare(`
@@ -58,10 +135,67 @@ export function appendConversationMessage(
   return { id, threadId: input.threadId, role: input.role, content: input.content, context: input.context, createdAt };
 }
 
+export async function sendConversationMessage(
+  db: Database.Database,
+  input: SendConversationMessageInput,
+  options: SendConversationMessageOptions,
+): Promise<ConversationSnapshot> {
+  appendConversationMessage(db, {
+    threadId: input.threadId,
+    role: 'user',
+    content: input.content,
+  });
+  const history = listConversationMessages(db, input.threadId);
+  const context = buildConversationContext(db, input.content);
+  const plan = await planConversationTurn(options.plannerProvider, history, context);
+  const assistant = appendConversationMessage(db, {
+    threadId: input.threadId,
+    role: 'assistant',
+    content: plan.reply,
+    context: { questions: plan.questions, assumptions: plan.assumptions, retrievedContext: context },
+  });
+  persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
+  for (const action of actionsReadyWithoutConfirmation(plan)) {
+    await runPersistedAgentAction(db, action.id);
+  }
+  return getConversationSnapshot(db, input.threadId);
+}
+
+export async function planConversationTurn(
+  provider: LlmProvider,
+  history: ConversationMessageRecord[],
+  context: unknown,
+): Promise<AgentTurnPlanValue> {
+  const prompt = [
+    'You are the TabAtlas conversational agent.',
+    'Use only local TabAtlas context supplied here. Do not browse pages, mutate browser tabs, inspect cookies, parse sessions, run shell commands, or invent transcript content.',
+    'Return a JSON AgentTurnPlan with reply, actions, questions, and assumptions.',
+    'Allowed action kinds: plan_view, refine_view, start_review, scan_resources, add_annotation, explain_membership, accept_view.',
+    'Preview/read actions may use approval automatic or preview. Annotations, broad scans, and view acceptance must use approval confirm.',
+    '',
+    'Conversation history:',
+    JSON.stringify(history.map(message => ({
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt,
+    })), null, 2),
+    '',
+    'Retrieved local context:',
+    JSON.stringify(context, null, 2),
+  ].join('\n');
+
+  const planned = await runStructured(provider, prompt, AgentTurnPlan, {
+    maxRetries: 2,
+    semanticValidate: plan => validateActionPlan(plan),
+  });
+  return validateAgentTurnPlan(planned.value);
+}
+
 export function persistAgentTurnPlan(
   db: Database.Database,
-  input: { threadId: string; assistantMessageId?: string; plan: AgentTurnPlan },
-): AgentTurnPlan {
+  input: { threadId: string; assistantMessageId?: string; plan: AgentTurnPlanValue },
+): AgentTurnPlanValue {
+  getConversationThread(db, input.threadId);
   const plan = validateAgentTurnPlan(input.plan);
   const now = new Date().toISOString();
   const insert = db.prepare(`
@@ -71,6 +205,8 @@ export function persistAgentTurnPlan(
   `);
   const tx = db.transaction(() => {
     for (const action of plan.actions) {
+      const existing = db.prepare('SELECT id FROM agent_actions WHERE id = ?').get(action.id) as { id: string } | undefined;
+      if (existing) throw new Error(`Duplicate agent action id: ${action.id}`);
       insert.run(
         action.id,
         input.threadId,
@@ -87,17 +223,105 @@ export function persistAgentTurnPlan(
   return plan;
 }
 
+export async function confirmAgentAction(db: Database.Database, actionId: string): Promise<AgentActionRecord> {
+  const record = getAgentAction(db, actionId);
+  if (record.status === 'succeeded' || record.status === 'failed') return record;
+  if (record.status === 'cancelled') return record;
+  if (record.action.approval !== 'confirm') return runPersistedAgentAction(db, actionId);
+  updateAgentAction(db, { actionId, status: 'approved' });
+  return runPersistedAgentAction(db, actionId);
+}
+
+export function cancelAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
+  const record = getAgentAction(db, actionId);
+  if (record.status === 'succeeded' || record.status === 'failed' || record.status === 'cancelled') return record;
+  updateAgentAction(db, { actionId, status: 'cancelled', result: { cancelled: true } });
+  return getAgentAction(db, actionId);
+}
+
+export async function runPersistedAgentAction(db: Database.Database, actionId: string): Promise<AgentActionRecord> {
+  const record = getAgentAction(db, actionId);
+  if (record.status === 'succeeded' || record.status === 'failed' || record.status === 'cancelled') return record;
+  try {
+    updateAgentAction(db, { actionId, status: 'running' });
+    const result = await executeAgentAction(db, record.action);
+    updateAgentAction(db, { actionId, status: 'succeeded', result });
+  } catch (error) {
+    updateAgentAction(db, { actionId, status: 'failed', error: error instanceof Error ? error.message : String(error) });
+  }
+  return getAgentAction(db, actionId);
+}
+
+export async function executeAgentAction(db: Database.Database, action: AgentActionValue): Promise<unknown> {
+  switch (action.kind) {
+    case 'plan_view':
+      return runAgentCommand(db, 'heuristic', {
+        text: action.commandText,
+        mode: 'heuristic',
+        candidateLimit: action.candidateLimit,
+      });
+    case 'refine_view': {
+      const preview = previewView(db, action.viewId);
+      const parentRevision = getLatestViewRevision(db, action.viewId);
+      const seedResourceIds = db.prepare(`
+        SELECT DISTINCT target_id AS id
+        FROM memberships
+        WHERE view_id = ? AND target_kind = 'resource'
+      `).all(action.viewId).map((row: unknown) => (row as { id: string }).id);
+      return runAgentCommand(db, 'heuristic', {
+        text: [
+          `Refine existing view "${preview.name}".`,
+          preview.goal ? `Existing goal: ${preview.goal}` : '',
+          `User refinement: ${action.instruction}`,
+        ].filter(Boolean).join(' '),
+        mode: 'heuristic',
+        candidateLimit: 200,
+        seedResourceIds,
+        parentRevisionId: parentRevision?.id,
+      });
+    }
+    case 'start_review':
+      return getReviewNext(db, { queue: action.queue, preload: 2 });
+    case 'scan_resources':
+      return createCodexScanJob(db, {
+        resourceIds: action.resourceIds,
+        limit: action.limit,
+        force: action.force,
+      });
+    case 'add_annotation':
+      return addUserAnnotation(db, {
+        targetKind: 'resource',
+        targetId: action.resourceId,
+        tags: action.tags,
+        description: action.description,
+        decision: action.decision,
+        source: 'agent_chat',
+      });
+    case 'explain_membership':
+      return explainMembership(db, {
+        resourceId: action.resourceId,
+        viewId: action.viewId,
+      });
+    case 'accept_view':
+      if (action.revisionId) return acceptViewRevision(db, action.revisionId);
+      return applyViewPlan(db, action.viewId, 'accepted');
+    default:
+      return assertNever(action);
+  }
+}
+
 export function updateAgentAction(
   db: Database.Database,
   input: {
     actionId: string;
-    status: 'approved' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+    status: AgentActionRecord['status'];
     result?: unknown;
     error?: string;
   },
-): AgentAction {
+): AgentActionValue {
   const row = db.prepare(`SELECT action_json FROM agent_actions WHERE id = ?`).get(input.actionId) as { action_json: string } | undefined;
   if (!row) throw new Error(`Agent action not found: ${input.actionId}`);
+  const action = AgentAction.parse(parseJson(row.action_json));
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE agent_actions
@@ -111,7 +335,7 @@ export function updateAgentAction(
     input.status === 'succeeded' || input.status === 'failed' || input.status === 'cancelled' ? now : null,
     input.actionId,
   );
-  return JSON.parse(row.action_json) as AgentAction;
+  return action;
 }
 
 export function listConversationMessages(
@@ -143,6 +367,106 @@ export function listConversationMessages(
   }));
 }
 
+export function listAgentActions(db: Database.Database, threadId: string): AgentActionRecord[] {
+  const rows = db.prepare(`
+    SELECT id, thread_id, message_id, action_kind, approval, status, action_json, result_json, error, created_at, updated_at, finished_at
+    FROM agent_actions
+    WHERE thread_id = ?
+    ORDER BY created_at, id
+  `).all(threadId) as AgentActionRow[];
+  return rows.map(actionFromRow);
+}
+
+export function getAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
+  const row = db.prepare(`
+    SELECT id, thread_id, message_id, action_kind, approval, status, action_json, result_json, error, created_at, updated_at, finished_at
+    FROM agent_actions
+    WHERE id = ?
+  `).get(actionId) as AgentActionRow | undefined;
+  if (!row) throw new Error(`Agent action not found: ${actionId}`);
+  return actionFromRow(row);
+}
+
+type AgentActionRow = {
+  id: string;
+  thread_id: string;
+  message_id: string | null;
+  action_kind: AgentActionValue['kind'];
+  approval: AgentActionValue['approval'];
+  status: AgentActionRecord['status'];
+  action_json: string;
+  result_json: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+};
+
+function actionFromRow(row: AgentActionRow): AgentActionRecord {
+  return {
+    id: row.id,
+    threadId: row.thread_id,
+    messageId: row.message_id ?? undefined,
+    kind: row.action_kind,
+    approval: row.approval,
+    status: row.status,
+    action: AgentAction.parse(parseJson(row.action_json)),
+    result: row.result_json ? parseJson(row.result_json) : undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    finishedAt: row.finished_at ?? undefined,
+  };
+}
+
+function buildConversationContext(db: Database.Database, message: string): unknown {
+  const terms = message.toLowerCase().split(/[^a-z0-9]+/).filter(term => term.length >= 3).slice(0, 8);
+  const likeClauses = terms.map(() => 'LOWER(COALESCE(title_best, \'\') || \' \' || host || \' \' || redacted_url) LIKE ?');
+  const params = terms.map(term => `%${term}%`);
+  const resources = db.prepare(`
+    SELECT id, title_best, url_kind, host, redacted_url
+    FROM resources
+    ${likeClauses.length ? `WHERE ${likeClauses.join(' OR ')}` : ''}
+    ORDER BY last_seen_at DESC
+    LIMIT 12
+  `).all(...params) as Array<{ id: string; title_best: string | null; url_kind: string; host: string; redacted_url: string }>;
+  const views = db.prepare(`
+    SELECT id, name, status, created_at
+    FROM views
+    ORDER BY created_at DESC
+    LIMIT 8
+  `).all() as Array<{ id: string; name: string; status: string; created_at: string }>;
+  return {
+    resources: resources.map(resource => ({
+      id: resource.id,
+      title: resource.title_best,
+      urlKind: resource.url_kind,
+      host: resource.host,
+      redactedUrl: resource.redacted_url,
+    })),
+    views: views.map(view => ({
+      id: view.id,
+      name: view.name,
+      status: view.status,
+      createdAt: view.created_at,
+    })),
+  };
+}
+
+function validateActionPlan(plan: AgentTurnPlanValue): string[] {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  for (const action of plan.actions) {
+    if (ids.has(action.id)) errors.push(`duplicate action id ${action.id}`);
+    ids.add(action.id);
+  }
+  return errors;
+}
+
 function parseJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return undefined; }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported agent action: ${JSON.stringify(value)}`);
 }

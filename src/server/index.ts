@@ -2,6 +2,13 @@ import fs from 'node:fs/promises';
 import Fastify from 'fastify';
 import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
 import {
+  cancelAgentAction,
+  confirmAgentAction,
+  createConversationThread,
+  getConversationSnapshot,
+  sendConversationMessage,
+} from '../agent/conversationService.js';
+import {
   countAtomicItems,
   countCodexScanArtifacts,
   createCodexScanJob,
@@ -176,6 +183,43 @@ app.post('/api/agent/command', async (request, reply) => {
   };
   const result = await runAgentCommand(db, provider, input);
   return reply.send(result);
+});
+
+app.post('/api/conversations', async (request, reply) => {
+  const body = asRecord(request.body);
+  const thread = createConversationThread(db, typeof body.title === 'string' ? body.title : undefined);
+  return reply.code(201).send(getConversationSnapshot(db, thread.id));
+});
+
+app.get('/api/conversations/:threadId', async (request, reply) => {
+  const params = request.params as { threadId: string };
+  return reply.send(getConversationSnapshot(db, params.threadId));
+});
+
+app.post('/api/conversations/:threadId/messages', async (request, reply) => {
+  const params = request.params as { threadId: string };
+  const body = asRecord(request.body);
+  const content = typeof body.content === 'string' ? body.content : '';
+  if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = getCodexProvider({ reasoningEffort });
+  const snapshot = await sendConversationMessage(db, {
+    threadId: params.threadId,
+    content,
+  }, {
+    plannerProvider: provider,
+  });
+  return reply.send(snapshot);
+});
+
+app.post('/api/agent-actions/:actionId/confirm', async (request, reply) => {
+  const params = request.params as { actionId: string };
+  return reply.send(await confirmAgentAction(db, params.actionId));
+});
+
+app.post('/api/agent-actions/:actionId/cancel', async (request, reply) => {
+  const params = request.params as { actionId: string };
+  return reply.send(cancelAgentAction(db, params.actionId));
 });
 
 app.post('/api/agent/refine', async (request, reply) => {

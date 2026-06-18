@@ -165,6 +165,26 @@
       font-size: 12px;
       padding: 3px 8px;
     }
+    .message {
+      border-left: 3px solid #d8dee4;
+      padding: 8px 10px;
+      background: #fbfcfd;
+      margin-bottom: 8px;
+      white-space: pre-wrap;
+    }
+    .message.user {
+      border-left-color: #0969da;
+    }
+    .message.assistant {
+      border-left-color: #1a7f37;
+    }
+    .action-card {
+      border: 1px solid #d8dee4;
+      border-radius: 6px;
+      padding: 10px;
+      margin-top: 8px;
+      background: #ffffff;
+    }
     @media (max-width: 900px) {
       main, .metrics {
         grid-template-columns: 1fr;
@@ -179,6 +199,17 @@
   </header>
   <main>
     <div class="stack">
+      <section>
+        <h2>Agent Conversation</h2>
+        <div id="conversationTranscript" class="muted">No conversation loaded.</div>
+        <textarea id="conversationText" placeholder="Ask TabAtlas"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button id="newConversationButton">New thread</button>
+          <button class="primary" id="sendConversationButton">Send</button>
+        </div>
+        <div id="actionCards"></div>
+      </section>
+
       <section>
         <h2>Ask TabAtlas</h2>
         <textarea id="commandText">Make a loose group mainly game inspiration but welcome all marked inspiration</textarea>
@@ -238,6 +269,8 @@
     let activeSampleStates = new Set(sampleStates);
     let currentReview = null;
     let currentCommandResult = null;
+    let activeThreadId = null;
+    let conversationSnapshot = null;
 
     const $ = (id) => document.getElementById(id);
 
@@ -316,6 +349,76 @@
       });
       showCommandResult(result);
       await refreshStatus();
+    }
+
+    async function newConversation() {
+      conversationSnapshot = await api('/api/conversations', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'TabAtlas agent thread' }),
+      });
+      activeThreadId = conversationSnapshot.thread.id;
+      renderConversation();
+    }
+
+    async function sendConversation() {
+      const text = $('conversationText').value.trim();
+      if (!text) return;
+      if (!activeThreadId) await newConversation();
+      $('conversationTranscript').innerHTML = '<div class="notice">Thinking...</div>';
+      conversationSnapshot = await api(`/api/conversations/${activeThreadId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          content: text,
+          reasoningEffort: $('reasoningEffort').value,
+        }),
+      });
+      $('conversationText').value = '';
+      renderConversation();
+      await refreshStatus();
+    }
+
+    function renderConversation() {
+      if (!conversationSnapshot) {
+        $('conversationTranscript').textContent = 'No conversation loaded.';
+        $('actionCards').innerHTML = '';
+        return;
+      }
+      $('conversationTranscript').innerHTML = conversationSnapshot.messages.map(message => `
+        <div class="message ${escapeAttribute(message.role)}">
+          <strong>${escapeHtml(message.role)}</strong><br>${escapeHtml(message.content)}
+        </div>
+      `).join('') || '<div class="muted">No messages yet.</div>';
+      $('actionCards').innerHTML = conversationSnapshot.actions.length ? conversationSnapshot.actions.map(renderActionCard).join('') : '';
+    }
+
+    function renderActionCard(action) {
+      const result = action.result ? `<div class="muted">${escapeHtml(JSON.stringify(action.result).slice(0, 280))}</div>` : '';
+      const controls = action.status === 'proposed' && action.approval === 'confirm'
+        ? `<button class="primary" onclick="confirmAction('${escapeAttribute(action.id)}')">Confirm</button><button onclick="cancelAction('${escapeAttribute(action.id)}')">Cancel</button>`
+        : action.status === 'proposed'
+          ? `<button onclick="cancelAction('${escapeAttribute(action.id)}')">Cancel</button>`
+          : '';
+      return `
+        <div class="action-card">
+          <div><strong>${escapeHtml(action.kind)}</strong> <span class="badge">${escapeHtml(action.status)}</span> <span class="badge">${escapeHtml(action.approval)}</span></div>
+          <div class="muted">${escapeHtml(action.action.rationale || '')}</div>
+          ${result}
+          <div class="row" style="margin-top:8px">${controls}</div>
+        </div>
+      `;
+    }
+
+    async function confirmAction(actionId) {
+      await api(`/api/agent-actions/${actionId}/confirm`, { method: 'POST', body: '{}' });
+      if (activeThreadId) conversationSnapshot = await api(`/api/conversations/${activeThreadId}`);
+      renderConversation();
+      await refreshStatus();
+    }
+
+    async function cancelAction(actionId) {
+      await api(`/api/agent-actions/${actionId}/cancel`, { method: 'POST', body: '{}' });
+      if (activeThreadId) conversationSnapshot = await api(`/api/conversations/${activeThreadId}`);
+      renderConversation();
     }
 
     function showCommandResult(result) {
@@ -610,6 +713,8 @@
     $('extractButton').addEventListener('click', () => runExtraction().catch(showError));
     $('scanButton').addEventListener('click', () => runScan().catch(showCommandError));
     $('planButton').addEventListener('click', () => planCommand().catch(showCommandError));
+    $('newConversationButton').addEventListener('click', () => newConversation().catch(showError));
+    $('sendConversationButton').addEventListener('click', () => sendConversation().catch(showError));
 
     function showError(error) {
       $('commandResult').innerHTML = `<div class="notice">${escapeHtml(error.message || error)}</div>`;
