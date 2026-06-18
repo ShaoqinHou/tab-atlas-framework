@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
-import { createCapability, revokeCapability } from '../src/security/localCapability.js';
+import { createCapability, createPairingCode, exchangePairingCode, revokeCapability } from '../src/security/localCapability.js';
 import { installLocalRequestGuard, requiredScopeFor } from '../src/security/localRequestGuard.js';
 import { openDatabase } from '../src/db/index.js';
 
@@ -14,6 +14,14 @@ function guardedApp() {
   app.post('/api/annotations', async () => ({ ok: true }));
   app.post('/api/jobs/codex-scan', async () => ({ ok: true }));
   app.post('/api/conversations', async () => ({ ok: true }));
+  app.post('/api/security/pairing-codes', async request => {
+    const body = typeof request.body === 'object' && request.body ? request.body as { ttlMs?: number } : {};
+    return createPairingCode(db, { ttlMs: body.ttlMs });
+  });
+  app.post('/api/security/pairing-codes/exchange', async request => {
+    const body = typeof request.body === 'object' && request.body ? request.body as { code?: string } : {};
+    return exchangePairingCode(db, body.code ?? '', 'Test extension');
+  });
   return { app, db };
 }
 
@@ -87,6 +95,64 @@ describe('local request guard', () => {
 
     expect(snapshot.statusCode).toBe(200);
     expect(generalApi.statusCode).toBe(401);
+  });
+
+  it('pairs extensions with short-lived single-use snapshot tokens', async () => {
+    const { app, db } = guardedApp();
+    const admin = createCapability(db, { kind: 'ui', scopes: ['admin'] });
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes',
+      headers: { ...localHeaders, 'x-tab-atlas-token': admin.token },
+      payload: { ttlMs: 60_000 },
+    });
+    const code = (created.json() as { code: string }).code;
+
+    const paired = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes/exchange',
+      headers: { ...localHeaders, origin: 'chrome-extension://abc' },
+      payload: { code },
+    });
+    const payload = paired.json() as { token: string; capability: { scopes: string[] } };
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes/exchange',
+      headers: { ...localHeaders, origin: 'chrome-extension://abc' },
+      payload: { code },
+    });
+    const snapshot = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      headers: { ...localHeaders, 'x-tab-atlas-token': payload.token },
+      payload: { capturedAt: '2026-06-18T00:00:00.000Z', tabs: [] },
+    });
+    const generalApi = await app.inject({
+      method: 'POST',
+      url: '/api/jobs/codex-scan',
+      headers: { ...localHeaders, 'x-tab-atlas-token': payload.token },
+    });
+
+    expect(created.statusCode).toBe(200);
+    expect(paired.statusCode).toBe(200);
+    expect(payload.capability.scopes).toEqual(['snapshot:write']);
+    expect(replay.statusCode).toBeGreaterThanOrEqual(400);
+    expect(snapshot.statusCode).toBe(200);
+    expect(generalApi.statusCode).toBe(401);
+    expect(JSON.stringify(db.prepare('SELECT * FROM snapshots').all())).not.toContain(payload.token);
+  });
+
+  it('rejects expired pairing codes', async () => {
+    const { app, db } = guardedApp();
+    const expired = createPairingCode(db, { ttlMs: -1 });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes/exchange',
+      headers: localHeaders,
+      payload: { code: expired.code },
+    });
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
   });
 
   it('denies cross-site mutation and writes a redacted audit row', async () => {

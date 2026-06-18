@@ -31,7 +31,10 @@ import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkPr
 import { buildResourceBrief } from '../resources/briefs.js';
 import {
   createCapability,
+  createPairingCode,
+  exchangePairingCode,
   listCapabilities,
+  listPairingCodes,
   revokeCapability,
   rotateCapability,
   type CapabilityKind,
@@ -111,6 +114,7 @@ app.get('/api/security/status', async () => {
   return {
     bound: { host, port },
     capabilities: listCapabilities(db),
+    pairingCodes: listPairingCodes(db),
     deniedRequests: denied.count,
   };
 });
@@ -134,6 +138,28 @@ app.post('/api/security/capabilities/:id/revoke', async (request, reply) => {
 app.post('/api/security/capabilities/:id/rotate', async (request, reply) => {
   const params = request.params as { id: string };
   return reply.send(rotateCapability(db, params.id));
+});
+
+app.post('/api/security/pairing-codes', async (request, reply) => {
+  const body = asRecord(request.body);
+  const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
+  const created = createPairingCode(db, {
+    kind: 'extension',
+    scopes: ['snapshot:write'],
+    ttlMs,
+  });
+  return reply.code(201).send(created);
+});
+
+app.post('/api/security/pairing-codes/exchange', async (request, reply) => {
+  const body = asRecord(request.body);
+  const code = typeof body.code === 'string' ? body.code : '';
+  if (!code.trim()) return reply.status(400).send({ ok: false, error: 'code is required' });
+  try {
+    return reply.send(exchangePairingCode(db, code, typeof body.label === 'string' ? body.label : 'Browser extension'));
+  } catch {
+    return reply.status(400).send({ ok: false, error: 'invalid pairing code' });
+  }
 });
 
 app.post('/api/extract/run', async (request, reply) => {

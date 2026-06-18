@@ -67,6 +67,7 @@ export function requiredScopeFor(method: string, rawUrl: string): GuardScope {
   const pathname = pathnameFor(rawUrl);
   const normalizedMethod = method.toUpperCase();
   if (pathname === '/' || pathname === '/health') return 'local_only';
+  if (pathname === '/api/security/pairing-codes/exchange' && normalizedMethod === 'POST') return 'local_only';
   if (pathname === '/api/security/capabilities' && normalizedMethod === 'POST') return 'bootstrap_admin';
   if (pathname.startsWith('/api/security')) return 'admin';
   if (pathname === '/snapshot' && normalizedMethod === 'POST') return 'snapshot:write';
