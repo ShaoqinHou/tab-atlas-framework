@@ -18,6 +18,7 @@ import { getReviewNext } from '../review/service.js';
 import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
 import { applyViewPlan, previewView } from '../views/service.js';
+import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
 
 export interface ConversationThreadRecord {
   id: string;
@@ -184,7 +185,7 @@ export async function planConversationTurn(
     'Conversation history:',
     JSON.stringify(history.map(message => ({
       role: message.role,
-      content: message.content,
+      content: redactSensitiveText(message.content),
       createdAt: message.createdAt,
     })), null, 2),
     '',
@@ -560,10 +561,10 @@ function buildConversationContext(db: Database.Database, message: string): unkno
   return {
     resources: resources.map(resource => ({
       id: resource.id,
-      title: resource.title_best,
+      title: resource.title_best ? redactSensitiveText(resource.title_best) : null,
       urlKind: resource.url_kind,
       host: resource.host,
-      redactedUrl: resource.redacted_url,
+      redactedUrl: redactUrlForPrompt(resource.redacted_url),
     })),
     views: views.map(view => ({
       id: view.id,

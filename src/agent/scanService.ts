@@ -8,6 +8,7 @@ import type { LlmProvider } from '../llm/types.js';
 import type { ResourceBrief } from '../shared/schemas.js';
 import { computeResourceKnowledgeDependencyHash } from '../knowledge/dependencyHash.js';
 import { isDetailedAtomicItemSupportedByEvidence } from '../extract/youtube.js';
+import { projectResourceBriefsForPrompt } from '../security/urlPrivacy.js';
 import {
   beginNextJobItem,
   createJob,
@@ -402,6 +403,7 @@ function getKnowledgeState(db: Database.Database, resourceId: string): {
 }
 
 async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
+  const promptBriefs = projectResourceBriefsForPrompt(briefs);
   const prompt = [
     'Scan these TabAtlas resources into reusable local knowledge.',
     'Use only supplied resource briefs and evidence. Do not browse, fetch pages, inspect cookies, parse sessions, or mutate browser tabs.',
@@ -412,7 +414,7 @@ async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
     '',
     'Return exactly one analysis for every resource in this batch.',
     '',
-    JSON.stringify({ resources: briefs }, null, 2),
+    JSON.stringify({ resources: promptBriefs }, null, 2),
   ].join('\n');
 
   const expectedIds = new Set(briefs.map(brief => brief.resourceId));

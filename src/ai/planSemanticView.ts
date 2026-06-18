@@ -1,6 +1,7 @@
 import { SemanticViewPlan, type ResourceBrief } from '../shared/schemas.js';
 import type { LlmProvider } from '../llm/types.js';
 import { runStructured } from '../llm/runStructured.js';
+import { projectResourceBriefsForPrompt, redactSensitiveText } from '../security/urlPrivacy.js';
 import fs from 'node:fs/promises';
 
 export interface PlanSemanticViewOptions {
@@ -19,7 +20,7 @@ export async function planSemanticView(
   const prompt = [
     'Plan semantic TabAtlas views for this user command. Use only the supplied resource briefs.',
     '',
-    `Command: ${commandText}`,
+    `Command: ${redactSensitiveText(commandText)}`,
     '',
     'Options:',
     JSON.stringify({
@@ -29,7 +30,7 @@ export async function planSemanticView(
     }, null, 2),
     '',
     'Resource briefs. User annotations are primary evidence:',
-    JSON.stringify({ resources: briefs }, null, 2),
+    JSON.stringify({ resources: projectResourceBriefsForPrompt(briefs) }, null, 2),
   ].join('\n');
 
   const targetIds = new Set<string>();
