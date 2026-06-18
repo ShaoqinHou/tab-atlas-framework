@@ -1,12 +1,18 @@
 import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import { SemanticViewPlan, type MembershipState } from '../shared/schemas.js';
+import { acceptViewRevision, createViewRevision, getLatestViewRevision } from './feedbackService.js';
 
 export type ApplyViewMode = 'proposed' | 'accepted';
 
 export interface PersistedViewPlan {
   commandId: string;
   viewIds: string[];
+}
+
+export interface PersistSemanticViewPlanOptions {
+  origin?: string;
+  parentRevisionId?: string;
 }
 
 export interface ViewPreview {
@@ -19,6 +25,7 @@ export interface ViewPreview {
   countsByState: Record<MembershipState, number>;
   countsBySection: Record<string, number>;
   samples: Array<{
+    membershipId: string;
     resourceId: string;
     title: string;
     host: string;
@@ -43,6 +50,7 @@ type SpecRow = {
 };
 
 type MembershipPreviewRow = {
+  id: string;
   target_id: string;
   title_best: string | null;
   host: string;
@@ -66,9 +74,11 @@ export function persistSemanticViewPlan(
   db: Database.Database,
   commandId: string,
   rawPlan: unknown,
-  origin = 'heuristic',
+  optionsOrOrigin: PersistSemanticViewPlanOptions | string = 'heuristic',
 ): PersistedViewPlan {
   const plan = SemanticViewPlan.parse(rawPlan);
+  const options = typeof optionsOrOrigin === 'string' ? { origin: optionsOrOrigin } : optionsOrOrigin;
+  const origin = options.origin ?? 'heuristic';
   const now = new Date().toISOString();
   const viewIds: string[] = [];
 
@@ -125,6 +135,17 @@ export function persistSemanticViewPlan(
           JSON.stringify(membership.evidenceRefs),
         );
       }
+
+      createViewRevision(db, {
+        viewId,
+        parentRevisionId: options.parentRevisionId,
+        commandId,
+        status: 'proposed',
+        snapshot: {
+          commandText: plan.commandText,
+          view,
+        },
+      });
     }
 
     for (const queue of plan.reviewQueues) {
@@ -180,6 +201,7 @@ export function previewView(db: Database.Database, viewId: string): ViewPreview 
 
   const sampleRows = db.prepare(`
     SELECT
+      m.id,
       m.target_id,
       r.title_best,
       r.host,
@@ -213,6 +235,7 @@ export function previewView(db: Database.Database, viewId: string): ViewPreview 
     countsByState: countsByState(stateRows),
     countsBySection: Object.fromEntries(sectionRows.map(row => [row.section, row.count])),
     samples: sampleRows.map(row => ({
+      membershipId: row.id,
       resourceId: row.target_id,
       title: row.title_best ?? '(untitled)',
       host: row.host,
@@ -232,8 +255,12 @@ export function applyViewPlan(db: Database.Database, viewId: string, mode: Apply
   }
   if (mode !== 'accepted') throw new Error(`Unsupported apply mode: ${mode}`);
   const tx = db.transaction(() => {
-    db.prepare('UPDATE views SET status = ? WHERE id = ?').run('accepted', viewId);
-    db.prepare('UPDATE memberships SET accepted_by_user = 1 WHERE view_id = ?').run(viewId);
+    const revision = getLatestViewRevision(db, viewId);
+    if (revision) acceptViewRevision(db, revision.id);
+    else {
+      db.prepare('UPDATE views SET status = ? WHERE id = ?').run('accepted', viewId);
+      db.prepare('UPDATE memberships SET accepted_by_user = 1 WHERE view_id = ?').run(viewId);
+    }
   });
   tx();
   return previewView(db, viewId);

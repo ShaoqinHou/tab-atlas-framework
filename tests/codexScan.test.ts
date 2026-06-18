@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { addUserAnnotation } from '../src/annotations/service.js';
-import { runCodexResourceScan, CODEX_RESOURCE_ANALYSIS_RECIPE, type CodexResourceScanBatchOutput } from '../src/agent/scanService.js';
+import {
+  createCodexScanJob,
+  resumeCodexScanJob,
+  runCodexResourceScan,
+  CODEX_RESOURCE_ANALYSIS_RECIPE,
+  type CodexResourceScanBatchOutput,
+} from '../src/agent/scanService.js';
 import { searchResources } from '../src/agent/tools.js';
 import { planSemanticView } from '../src/ai/planSemanticView.js';
 import { openDatabase } from '../src/db/index.js';
@@ -207,6 +213,106 @@ describe('Codex resource scan', () => {
     expect(search.matches[0].resourceId).toBe(annotatedId);
     expect(search.matches[0].reasons).toContain('user annotation matches "project_reference"');
   });
+
+  it('uses dependency hashes so unchanged extraction does not rescan but changed notes do', async () => {
+    const { db, byTitle } = seedScanFixture();
+    const resourceId = byTitle['Fantasy equipment breakdown'];
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const provider = scanProvider({
+      [resourceId]: {
+        resourceId,
+        summary: 'Reusable game equipment reference.',
+        contentKind: 'article',
+        userPurposeGuess: 'reference',
+        topics: ['equipment'],
+        suggestedTags: ['reference'],
+        confidence: 0.7,
+        evidenceRefs: [evidenceRef],
+        missingEvidence: [],
+        reviewReason: '',
+        atomicItems: [],
+      },
+    });
+
+    const first = await runCodexResourceScan(db, provider, { resourceIds: [resourceId], limit: 1 });
+    expect(first.resourcesScanned).toBe(1);
+
+    runDeterministicExtraction(db, [resourceId]);
+    const unchanged = await runCodexResourceScan(db, provider, { resourceIds: [resourceId], limit: 1 });
+    expect(unchanged.resourcesScanned).toBe(0);
+    expect(unchanged.resourcesSkippedFresh).toBe(1);
+
+    addUserAnnotation(db, {
+      targetKind: 'resource',
+      targetId: resourceId,
+      tags: ['project_reference'],
+      description: 'Now treat this as project reference.',
+      decision: 'project_reference',
+      source: 'focused_review',
+    });
+    const changed = await runCodexResourceScan(db, provider, { resourceIds: [resourceId], limit: 1 });
+    expect(changed.resourcesScanned).toBe(1);
+  });
+
+  it('replaces stale Codex atomic items with the current scan generation', async () => {
+    const { db, byTitle } = seedScanFixture();
+    const resourceId = byTitle['Fantasy equipment breakdown'];
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const analysis = (names: string[]) => scanProvider({
+      [resourceId]: {
+        resourceId,
+        summary: 'Dense resource with atomic topics.',
+        contentKind: 'article',
+        userPurposeGuess: 'reference',
+        topics: ['dense'],
+        suggestedTags: ['reference'],
+        confidence: 0.8,
+        evidenceRefs: [evidenceRef],
+        missingEvidence: [],
+        reviewReason: '',
+        atomicItems: names.map(name => ({
+          itemKind: 'topic',
+          name,
+          summary: `${name} summary`,
+          evidenceRefs: [evidenceRef],
+          confidence: 0.7,
+        })),
+      },
+    });
+
+    await runCodexResourceScan(db, analysis(['One', 'Two', 'Three', 'Four']), { resourceIds: [resourceId], limit: 1, force: true });
+    expect((db.prepare('SELECT COUNT(*) AS count FROM atomic_items WHERE resource_id = ?').get(resourceId) as { count: number }).count).toBe(4);
+
+    await runCodexResourceScan(db, analysis(['One', 'Four']), { resourceIds: [resourceId], limit: 1, force: true });
+    const items = db.prepare('SELECT name FROM atomic_items WHERE resource_id = ? ORDER BY name').all(resourceId) as { name: string }[];
+    expect(items.map(item => item.name)).toEqual(['Four', 'One']);
+  });
+
+  it('resumes durable scan jobs without repeating completed items', async () => {
+    const db = openDatabase(':memory:');
+    importSnapshot(db, {
+      capturedAt: '2026-06-17T00:00:00.000Z',
+      tabs: Array.from({ length: 6 }, (_, index) => ({
+        browser: 'chrome',
+        title: `Resource ${index + 1}`,
+        url: `https://example.com/resource-${index + 1}`,
+      })),
+    }, 'test');
+    runDeterministicExtraction(db);
+    let calls = 0;
+    const provider = dynamicScanProvider(() => { calls += 1; });
+    const created = createCodexScanJob(db, { limit: 6, batchSize: 3 });
+    expect(created.resourcesQueued).toBe(6);
+
+    const partial = await resumeCodexScanJob(db, provider, created.job.id, { maxItems: 2 });
+    expect(partial.job.progress.succeeded).toBe(2);
+    expect(partial.job.progress.pending).toBe(4);
+
+    const resumed = await resumeCodexScanJob(db, provider, created.job.id, { maxItems: 10 });
+    expect(resumed.job.status).toBe('succeeded');
+    expect(resumed.job.progress.succeeded).toBe(6);
+    expect(calls).toBe(6);
+  });
 });
 
 function scanProvider(byResourceId: Record<string, CodexResourceScanBatchOutput['resources'][number]>): LlmProvider {
@@ -218,6 +324,33 @@ function scanProvider(byResourceId: Record<string, CodexResourceScanBatchOutput[
           resources: [...new Set(ids)].map(id => byResourceId[id]).filter(Boolean),
         }),
         usage: { quotaTurns: 1, inputTokens: 50, outputTokens: 100 },
+      };
+    },
+  };
+}
+
+function dynamicScanProvider(onCall?: () => void): LlmProvider {
+  return {
+    async complete(prompt) {
+      onCall?.();
+      const ids = [...prompt.matchAll(/"resourceId": "([^"]+)"/g)].map(match => match[1]);
+      return {
+        text: JSON.stringify({
+          resources: [...new Set(ids)].map(resourceId => ({
+            resourceId,
+            summary: `Scanned ${resourceId}.`,
+            contentKind: 'unknown',
+            userPurposeGuess: 'needs_review',
+            topics: [],
+            suggestedTags: [],
+            confidence: 0.5,
+            evidenceRefs: [],
+            missingEvidence: ['human review'],
+            reviewReason: 'Low-confidence test scan.',
+            atomicItems: [],
+          })),
+        }),
+        usage: { quotaTurns: 1 },
       };
     },
   };

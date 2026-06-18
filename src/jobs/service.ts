@@ -35,6 +35,22 @@ type ItemRow = {
   attempts: number;
 };
 
+type JobItemSnapshot = {
+  id: string;
+  jobId: string;
+  key: string;
+  resourceId?: string;
+  status: string;
+  attempts: number;
+  input: unknown;
+  result?: unknown;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
 export function createJob(db: Database.Database, input: CreateJobInputValue): JobSnapshotValue {
   const parsed = CreateJobInput.parse(input);
   const uniqueKeys = new Set(parsed.items.map(item => item.key));
@@ -82,6 +98,85 @@ export function getJobSnapshot(db: Database.Database, jobId: string): JobSnapsho
   });
 }
 
+export function listJobs(db: Database.Database, options: { kind?: string; limit?: number } = {}): JobSnapshotValue[] {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (options.kind) {
+    clauses.push('kind = ?');
+    params.push(options.kind);
+  }
+  params.push(options.limit ?? 50);
+  const rows = db.prepare(`
+    SELECT id
+    FROM jobs
+    ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(...params) as { id: string }[];
+  return rows.map(row => getJobSnapshot(db, row.id));
+}
+
+export function listJobItems(db: Database.Database, jobId: string): JobItemSnapshot[] {
+  const rows = db.prepare(`
+    SELECT id, job_id, item_key, resource_id, status, attempts, input_json, result_json, error,
+           created_at, updated_at, started_at, finished_at
+    FROM job_items
+    WHERE job_id = ?
+    ORDER BY created_at, id
+  `).all(jobId) as Array<{
+    id: string;
+    job_id: string;
+    item_key: string;
+    resource_id: string | null;
+    status: string;
+    attempts: number;
+    input_json: string;
+    result_json: string | null;
+    error: string | null;
+    created_at: string;
+    updated_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+  }>;
+  return rows.map(row => ({
+    id: row.id,
+    jobId: row.job_id,
+    key: row.item_key,
+    resourceId: row.resource_id ?? undefined,
+    status: row.status,
+    attempts: row.attempts,
+    input: parseJson(row.input_json, {}),
+    result: row.result_json ? parseJson(row.result_json, undefined) : undefined,
+    error: row.error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at ?? undefined,
+    finishedAt: row.finished_at ?? undefined,
+  }));
+}
+
+export function prepareJobResume(db: Database.Database, jobId: string): JobSnapshotValue {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const job = db.prepare('SELECT status, cancel_requested FROM jobs WHERE id = ?').get(jobId) as { status: string; cancel_requested: number } | undefined;
+    if (!job) throw new Error(`Job not found: ${jobId}`);
+    if (['succeeded', 'failed', 'cancelled'].includes(job.status)) return;
+    if (job.cancel_requested === 1) {
+      requestJobCancel(db, jobId);
+      return;
+    }
+    db.prepare(`
+      UPDATE job_items
+      SET status = 'pending', updated_at = ?, started_at = NULL
+      WHERE job_id = ? AND status = 'running'
+    `).run(now, jobId);
+    db.prepare(`UPDATE jobs SET status = 'queued', updated_at = ? WHERE id = ? AND status IN ('running', 'paused')`).run(now, jobId);
+    refreshJobProgress(db, jobId);
+  });
+  tx();
+  return getJobSnapshot(db, jobId);
+}
+
 export function beginNextJobItem(db: Database.Database, jobId: string): ClaimedJobItem | null {
   const tx = db.transaction(() => {
     const job = db.prepare('SELECT status, cancel_requested FROM jobs WHERE id = ?').get(jobId) as { status: string; cancel_requested: number } | undefined;
@@ -90,7 +185,7 @@ export function beginNextJobItem(db: Database.Database, jobId: string): ClaimedJ
     const item = db.prepare(`
       SELECT id, job_id, item_key, resource_id, input_json, attempts
       FROM job_items WHERE job_id = ? AND status = 'pending'
-      ORDER BY created_at, id LIMIT 1
+      ORDER BY rowid LIMIT 1
     `).get(jobId) as ItemRow | undefined;
     if (!item) {
       finalizeJob(db, jobId);
@@ -129,11 +224,44 @@ export function finishJobItem(db: Database.Database, itemId: string, outcome: { 
   return getJobSnapshot(db, tx());
 }
 
+export function requeueJobItem(db: Database.Database, itemId: string, error?: string): JobSnapshotValue {
+  const tx = db.transaction(() => {
+    const item = db.prepare('SELECT job_id FROM job_items WHERE id = ?').get(itemId) as { job_id: string } | undefined;
+    if (!item) throw new Error(`Job item not found: ${itemId}`);
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE job_items
+      SET status = 'pending', error = ?, started_at = NULL, finished_at = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(error ?? null, now, itemId);
+    refreshJobProgress(db, item.job_id);
+    return item.job_id;
+  });
+  return getJobSnapshot(db, tx());
+}
+
+export function skipJobItem(db: Database.Database, itemId: string, result?: unknown): JobSnapshotValue {
+  const tx = db.transaction(() => {
+    const item = db.prepare('SELECT job_id FROM job_items WHERE id = ?').get(itemId) as { job_id: string } | undefined;
+    if (!item) throw new Error(`Job item not found: ${itemId}`);
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE job_items
+      SET status = 'skipped', result_json = ?, error = NULL, finished_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(result === undefined ? null : JSON.stringify(result), now, now, itemId);
+    refreshJobProgress(db, item.job_id);
+    finalizeJob(db, item.job_id);
+    return item.job_id;
+  });
+  return getJobSnapshot(db, tx());
+}
+
 export function requestJobCancel(db: Database.Database, jobId: string): JobSnapshotValue {
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     db.prepare(`UPDATE jobs SET cancel_requested = 1, updated_at = ? WHERE id = ?`).run(now, jobId);
-    db.prepare(`UPDATE job_items SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE job_id = ? AND status = 'pending'`).run(now, now, jobId);
+    db.prepare(`UPDATE job_items SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE job_id = ? AND status IN ('pending', 'running')`).run(now, now, jobId);
     refreshJobProgress(db, jobId);
     finalizeJob(db, jobId);
   });

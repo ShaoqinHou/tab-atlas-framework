@@ -6,6 +6,17 @@ import { refreshResourceSearchText } from '../resources/searchIndex.js';
 import { runStructured, StructuredOutputError } from '../llm/runStructured.js';
 import type { LlmProvider } from '../llm/types.js';
 import type { ResourceBrief } from '../shared/schemas.js';
+import { computeResourceKnowledgeDependencyHash } from '../knowledge/dependencyHash.js';
+import {
+  beginNextJobItem,
+  createJob,
+  finishJobItem,
+  getJobSnapshot,
+  prepareJobResume,
+  requeueJobItem,
+  skipJobItem,
+} from '../jobs/service.js';
+import type { JobSnapshot as JobSnapshotValue } from '../jobs/contracts.js';
 import { logAgentRun } from './runLog.js';
 
 export const CODEX_RESOURCE_ANALYSIS_RECIPE = 'codex_resource_analysis.v1';
@@ -15,6 +26,7 @@ const ReasoningEffort = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']);
 export const RunCodexResourceScanInput = z.object({
   limit: z.number().int().positive().max(1000).default(100),
   batchSize: z.number().int().positive().max(50).default(20),
+  maxBatchBytes: z.number().int().positive().max(1_000_000).default(80_000),
   resourceIds: z.array(z.string()).default([]),
   reasoningEffort: ReasoningEffort.default('medium'),
   force: z.boolean().default(false),
@@ -73,6 +85,7 @@ export type CodexResourceScanBatchOutput = z.infer<typeof CodexResourceScanBatch
 export interface RunCodexResourceScanResult {
   resourcesConsidered: number;
   resourcesScanned: number;
+  resourcesSkippedFresh: number;
   artifactsWritten: number;
   atomicItemsWritten: number;
   batches: number;
@@ -85,29 +98,65 @@ type ResourceIdRow = {
   id: string;
 };
 
+const ResourceScanCandidateInput = z.object({
+  resourceId: z.string(),
+  dependencyHash: z.string(),
+  previousHash: z.string().optional(),
+  artifactId: z.string().optional(),
+  generation: z.number().int().positive(),
+  status: z.string().optional(),
+});
+
+export interface ResourceScanCandidate {
+  resourceId: string;
+  dependencyHash: string;
+  previousHash?: string;
+  artifactId?: string;
+  generation: number;
+  status?: string;
+}
+
+export interface CodexScanJobCreateResult {
+  job: JobSnapshotValue;
+  resourcesConsidered: number;
+  resourcesQueued: number;
+  resourcesSkippedFresh: number;
+}
+
+export interface CodexScanJobResumeResult {
+  job: JobSnapshotValue;
+  processedItems: number;
+  scannedResources: number;
+  skippedItems: number;
+  failedItems: number;
+  codexTurns: number;
+}
+
 export async function runCodexResourceScan(
   db: Database.Database,
   provider: LlmProvider,
   input: RunCodexResourceScanInput,
 ): Promise<RunCodexResourceScanResult> {
   const parsed = RunCodexResourceScanInput.parse(input);
-  const resourceIds = selectResourcesForScan(db, parsed);
-  const skippedResourceIds = parsed.resourceIds.filter(id => !resourceIds.includes(id));
-  const batches = chunk(resourceIds, parsed.batchSize);
+  const selection = selectResourcesForScan(db, parsed);
+  const resourceIds = selection.candidates.map(candidate => candidate.resourceId);
+  const candidateByResourceId = new Map(selection.candidates.map(candidate => [candidate.resourceId, candidate]));
+  const batches = chunkByBriefPayload(db, resourceIds, parsed.batchSize, parsed.maxBatchBytes);
   const result: RunCodexResourceScanResult = {
-    resourcesConsidered: resourceIds.length,
+    resourcesConsidered: selection.resourcesConsidered,
     resourcesScanned: 0,
+    resourcesSkippedFresh: selection.resourcesSkippedFresh,
     artifactsWritten: 0,
     atomicItemsWritten: 0,
     batches: batches.length,
     codexTurns: 0,
     agentRunIds: [],
-    skippedResourceIds,
+    skippedResourceIds: selection.skippedResourceIds,
   };
 
   for (const ids of batches) {
     const startedAt = new Date().toISOString();
-    const briefs = buildResourceBriefs(db, ids);
+    const briefs = buildResourceBriefs(db, ids).map(briefForScan);
     const inputSummary = {
       recipeId: CODEX_RESOURCE_ANALYSIS_RECIPE,
       resourceIds: ids,
@@ -118,7 +167,7 @@ export async function runCodexResourceScan(
 
     try {
       const scan = await scanBatch(provider, briefs);
-      const written = persistScanBatch(db, briefs, scan.value);
+      const written = persistScanBatch(db, briefs, scan.value, candidateByResourceId);
       result.resourcesScanned += scan.value.resources.length;
       result.artifactsWritten += written.artifactsWritten;
       result.atomicItemsWritten += written.atomicItemsWritten;
@@ -161,49 +210,178 @@ export async function runCodexResourceScan(
   return result;
 }
 
+export function createCodexScanJob(db: Database.Database, input: RunCodexResourceScanInput): CodexScanJobCreateResult {
+  const parsed = RunCodexResourceScanInput.parse(input);
+  const selection = selectResourcesForScan(db, parsed);
+  const job = createJob(db, {
+    kind: 'codex_scan',
+    requestedBy: 'user',
+    input: {
+      ...parsed,
+      recipeId: CODEX_RESOURCE_ANALYSIS_RECIPE,
+    },
+    items: selection.candidates.map(candidate => ({
+      key: `${CODEX_RESOURCE_ANALYSIS_RECIPE}:${candidate.resourceId}:${candidate.dependencyHash}`,
+      resourceId: candidate.resourceId,
+      input: candidate,
+    })),
+  });
+  return {
+    job,
+    resourcesConsidered: selection.resourcesConsidered,
+    resourcesQueued: selection.candidates.length,
+    resourcesSkippedFresh: selection.resourcesSkippedFresh,
+  };
+}
+
+export async function resumeCodexScanJob(
+  db: Database.Database,
+  provider: LlmProvider,
+  jobId: string,
+  options: { maxItems?: number; maxRetries?: number } = {},
+): Promise<CodexScanJobResumeResult> {
+  const maxItems = options.maxItems ?? 20;
+  const maxRetries = options.maxRetries ?? 3;
+  prepareJobResume(db, jobId);
+  let processedItems = 0;
+  let scannedResources = 0;
+  let skippedItems = 0;
+  let failedItems = 0;
+  let codexTurns = 0;
+
+  while (processedItems < maxItems) {
+    const item = beginNextJobItem(db, jobId);
+    if (!item) break;
+    const candidate = ResourceScanCandidateInput.parse(item.input);
+    if (!shouldScanCandidate(db, candidate, false)) {
+      skipJobItem(db, item.id, { reason: 'fresh', resourceId: candidate.resourceId });
+      processedItems += 1;
+      skippedItems += 1;
+      continue;
+    }
+
+    const brief = briefForScan(buildResourceBriefs(db, [candidate.resourceId])[0]);
+    try {
+      const scan = await scanBatch(provider, [brief]);
+      codexTurns += scan.usage.quotaTurns ?? 0;
+      persistScanBatch(db, [brief], scan.value, new Map([[candidate.resourceId, candidate]]), item.id);
+      processedItems += 1;
+      scannedResources += scan.value.resources.length;
+    } catch (error) {
+      const usage = error instanceof StructuredOutputError ? error.usage : undefined;
+      codexTurns += usage?.quotaTurns ?? 0;
+      if (item.attempts < maxRetries) {
+        requeueJobItem(db, item.id, error instanceof Error ? error.message : String(error));
+      } else {
+        finishJobItem(db, item.id, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        processedItems += 1;
+        failedItems += 1;
+      }
+    }
+  }
+
+  return {
+    job: getJobSnapshot(db, jobId),
+    processedItems,
+    scannedResources,
+    skippedItems,
+    failedItems,
+    codexTurns,
+  };
+}
+
 function selectResourcesForScan(
   db: Database.Database,
   input: z.infer<typeof RunCodexResourceScanInput>,
-): string[] {
-  const params: unknown[] = [CODEX_RESOURCE_ANALYSIS_RECIPE];
-  const clauses: string[] = [];
+): {
+  candidates: ResourceScanCandidate[];
+  resourcesConsidered: number;
+  resourcesSkippedFresh: number;
+  skippedResourceIds: string[];
+} {
+  const resourceIds = selectCandidateResourceIds(db, input.resourceIds);
+  const candidates: ResourceScanCandidate[] = [];
+  const skippedResourceIds: string[] = [];
+  let resourcesSkippedFresh = 0;
 
-  if (input.resourceIds.length) {
-    clauses.push(`r.id IN (${input.resourceIds.map(() => '?').join(', ')})`);
-    params.push(...input.resourceIds);
+  for (const resourceId of resourceIds) {
+    const brief = buildResourceBriefs(db, [resourceId])[0];
+    const dependencyHash = computeResourceKnowledgeDependencyHash(brief);
+    const state = getKnowledgeState(db, resourceId);
+    const candidate: ResourceScanCandidate = {
+      resourceId,
+      dependencyHash,
+      previousHash: state?.dependency_hash,
+      artifactId: state?.artifact_id ?? undefined,
+      generation: (state?.generation ?? 0) + 1,
+      status: state?.status,
+    };
+    if (shouldScanCandidate(db, candidate, input.force)) {
+      candidates.push(candidate);
+      if (candidates.length >= input.limit) break;
+    } else {
+      resourcesSkippedFresh += 1;
+      skippedResourceIds.push(resourceId);
+    }
   }
 
-  clauses.push(`(
-    ? = 1
-    OR scan.id IS NULL
-    OR EXISTS (
-      SELECT 1
-      FROM user_annotations ua
-      WHERE ua.target_kind = 'resource'
-        AND ua.target_id = r.id
-        AND COALESCE(ua.updated_at, ua.created_at) > scan.extracted_at
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM extraction_artifacts ea
-      WHERE ea.resource_id = r.id
-        AND ea.recipe_id <> ?
-        AND ea.extracted_at > scan.extracted_at
-    )
-  )`);
-  params.push(input.force ? 1 : 0, CODEX_RESOURCE_ANALYSIS_RECIPE);
-  params.push(input.limit);
+  return {
+    candidates,
+    resourcesConsidered: resourceIds.length,
+    resourcesSkippedFresh,
+    skippedResourceIds,
+  };
+}
 
+function selectCandidateResourceIds(db: Database.Database, resourceIds: string[]): string[] {
+  if (resourceIds.length) {
+    const rows = db.prepare(`
+      SELECT id
+      FROM resources
+      WHERE id IN (${resourceIds.map(() => '?').join(', ')})
+      ORDER BY last_seen_at DESC
+    `).all(...resourceIds) as ResourceIdRow[];
+    return rows.map(row => row.id);
+  }
   const rows = db.prepare(`
-    SELECT r.id
-    FROM resources r
-    LEFT JOIN extraction_artifacts scan
-      ON scan.resource_id = r.id AND scan.recipe_id = ?
-    WHERE ${clauses.join(' AND ')}
-    ORDER BY r.last_seen_at DESC
-    LIMIT ?
-  `).all(...params) as ResourceIdRow[];
+    SELECT id
+    FROM resources
+    ORDER BY last_seen_at DESC
+  `).all() as ResourceIdRow[];
   return rows.map(row => row.id);
+}
+
+function shouldScanCandidate(db: Database.Database, candidate: ResourceScanCandidate, force: boolean): boolean {
+  if (force) return true;
+  const state = getKnowledgeState(db, candidate.resourceId);
+  if (!state) return true;
+  if (state.status !== 'fresh') return true;
+  if (!state.artifact_id) return true;
+  if (state.dependency_hash !== candidate.dependencyHash) return true;
+  const artifact = db.prepare(`
+    SELECT id
+    FROM extraction_artifacts
+    WHERE id = ? AND resource_id = ? AND recipe_id = ?
+  `).get(state.artifact_id, candidate.resourceId, CODEX_RESOURCE_ANALYSIS_RECIPE) as { id: string } | undefined;
+  return !artifact;
+}
+
+function getKnowledgeState(db: Database.Database, resourceId: string): {
+  dependency_hash: string;
+  artifact_id: string | null;
+  status: string;
+  generation: number;
+} | undefined {
+  return db.prepare(`
+    SELECT dependency_hash, artifact_id, status, generation
+    FROM resource_knowledge_state
+    WHERE resource_id = ? AND recipe_id = ?
+  `).get(resourceId, CODEX_RESOURCE_ANALYSIS_RECIPE) as {
+    dependency_hash: string;
+    artifact_id: string | null;
+    status: string;
+    generation: number;
+  } | undefined;
 }
 
 async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
@@ -230,29 +408,81 @@ async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
   });
 }
 
+function briefForScan(brief: ResourceBrief): ResourceBrief {
+  return {
+    ...brief,
+    atomicItems: [],
+    evidence: brief.evidence.filter(evidence => !isCodexScanEvidence(evidence.kind, evidence.provenance)),
+  };
+}
+
+function isCodexScanEvidence(kind: string, provenance: string): boolean {
+  return kind === 'codex_resource_analysis' || provenance.toLowerCase().startsWith('codex');
+}
+
+function chunkByBriefPayload(
+  db: Database.Database,
+  resourceIds: string[],
+  maxItems: number,
+  maxBytes: number,
+): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let currentBytes = 0;
+
+  for (const resourceId of resourceIds) {
+    const brief = briefForScan(buildResourceBriefs(db, [resourceId])[0]);
+    const bytes = Buffer.byteLength(JSON.stringify(brief), 'utf8');
+    if (current.length && (current.length >= maxItems || currentBytes + bytes > maxBytes)) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(resourceId);
+    currentBytes += bytes;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
 function persistScanBatch(
   db: Database.Database,
   briefs: ResourceBrief[],
   scan: CodexResourceScanBatchOutput,
+  candidates: Map<string, ResourceScanCandidate>,
+  jobItemId?: string,
 ): { artifactsWritten: number; atomicItemsWritten: number } {
   const briefById = new Map(briefs.map(brief => [brief.resourceId, brief]));
   let artifactsWritten = 0;
   let atomicItemsWritten = 0;
 
-  const tx = db.transaction(() => {
-    for (const analysis of scan.resources) {
-      const brief = briefById.get(analysis.resourceId);
-      if (!brief) continue;
-      upsertScanArtifact(db, brief, analysis);
+  for (const analysis of scan.resources) {
+    const brief = briefById.get(analysis.resourceId);
+    const candidate = candidates.get(analysis.resourceId);
+    if (!brief || !candidate) continue;
+    const tx = db.transaction(() => {
+      const artifactId = upsertScanArtifact(db, brief, analysis);
       artifactsWritten += 1;
+      deleteCodexAtomicItems(db, analysis.resourceId);
       for (const item of analysis.atomicItems.filter(item => item.evidenceRefs.length > 0)) {
         upsertAtomicItem(db, analysis.resourceId, item);
         atomicItemsWritten += 1;
       }
       refreshResourceSearchText(db, analysis.resourceId);
-    }
-  });
-  tx();
+      markKnowledgeFresh(db, candidate, artifactId);
+      if (jobItemId) {
+        finishJobItem(db, jobItemId, {
+          ok: true,
+          result: {
+            resourceId: analysis.resourceId,
+            artifactId,
+            atomicItemCount: analysis.atomicItems.filter(item => item.evidenceRefs.length > 0).length,
+          },
+        });
+      }
+    });
+    tx();
+  }
 
   return { artifactsWritten, atomicItemsWritten };
 }
@@ -261,7 +491,7 @@ function upsertScanArtifact(
   db: Database.Database,
   brief: ResourceBrief,
   analysis: CodexResourceScanBatchOutput['resources'][number],
-): void {
+): string {
   const id = scanArtifactId(analysis.resourceId);
   const textExcerpt = [
     analysis.summary,
@@ -303,6 +533,14 @@ function upsertScanArtifact(
     status,
     new Date().toISOString(),
   );
+  return id;
+}
+
+function deleteCodexAtomicItems(db: Database.Database, resourceId: string): void {
+  db.prepare(`
+    DELETE FROM atomic_items
+    WHERE resource_id = ? AND created_by = 'codex_scan'
+  `).run(resourceId);
 }
 
 function upsertAtomicItem(
@@ -331,6 +569,31 @@ function upsertAtomicItem(
     JSON.stringify(item.evidenceRefs),
     item.confidence,
     new Date().toISOString(),
+  );
+}
+
+function markKnowledgeFresh(db: Database.Database, candidate: ResourceScanCandidate, artifactId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO resource_knowledge_state
+      (resource_id, recipe_id, dependency_hash, artifact_id, status, generation, last_scanned_at, last_error, updated_at)
+    VALUES (?, ?, ?, ?, 'fresh', ?, ?, NULL, ?)
+    ON CONFLICT(resource_id, recipe_id) DO UPDATE SET
+      dependency_hash = excluded.dependency_hash,
+      artifact_id = excluded.artifact_id,
+      status = 'fresh',
+      generation = excluded.generation,
+      last_scanned_at = excluded.last_scanned_at,
+      last_error = NULL,
+      updated_at = excluded.updated_at
+  `).run(
+    candidate.resourceId,
+    CODEX_RESOURCE_ANALYSIS_RECIPE,
+    candidate.dependencyHash,
+    artifactId,
+    candidate.generation,
+    now,
+    now,
   );
 }
 
@@ -398,12 +661,6 @@ function atomicItemId(resourceId: string, itemKind: string, name: string): strin
 
 function providerLabelFor(provider: LlmProvider): string {
   return provider.constructor?.name ?? 'codex-provider';
-}
-
-function chunk<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
-  return chunks;
 }
 
 function scanSystemPrompt(): string {

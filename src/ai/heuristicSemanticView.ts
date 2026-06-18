@@ -50,6 +50,8 @@ export function planSemanticViewHeuristic(commandText: string, briefs: ResourceB
 function classifyBrief(brief: ResourceBrief, intent: { loose: boolean; game: boolean; art: boolean }) {
   const user = userEvidenceText(brief);
   const system = systemEvidenceText(brief);
+  const feedback = feedbackEvidenceText(brief);
+  const feedbackRefs = feedbackEvidenceRefs(brief);
   const userRefs = userEvidenceRefs(brief);
   const systemRefs = brief.evidence.map(item => item.id);
   const userMentionsInspiration = has(user, ['inspiration', 'moodboard', 'reference', 'idea']);
@@ -111,6 +113,19 @@ function classifyBrief(brief: ResourceBrief, intent: { loose: boolean; game: boo
     }
   }
 
+  if (feedback.includes('pin include')) {
+    state = 'strong_include';
+    confidence = 0.98;
+    reason = 'User previously pinned this target into a semantic view.';
+    conflict = undefined;
+  } else if (feedback.includes('pin exclude') || feedback.includes('user reject')) {
+    const previousReason = reason;
+    state = state === 'strong_include' || state === 'weak_include' ? 'conflict' : 'exclude';
+    confidence = 0.96;
+    reason = 'User previous feedback says this target should not be included for a similar semantic view.';
+    conflict = state === 'conflict' ? previousReason : undefined;
+  }
+
   return {
     targetKind: 'resource' as const,
     targetId: brief.resourceId,
@@ -118,7 +133,9 @@ function classifyBrief(brief: ResourceBrief, intent: { loose: boolean; game: boo
     state,
     confidence,
     reason,
-    evidenceRefs: state === 'exclude' && evidence.source === 'none' ? [] : evidence.refs,
+    evidenceRefs: feedbackRefs.length && (state === 'strong_include' || state === 'conflict' || confidence >= 0.9)
+      ? feedbackRefs
+      : state === 'exclude' && evidence.source === 'none' ? [] : evidence.refs,
     conflict,
   };
 }
@@ -138,6 +155,20 @@ function systemEvidenceText(brief: ResourceBrief): string {
     ...brief.systemTags,
     ...brief.evidence.map(item => item.text),
   ].join(' ').toLowerCase();
+}
+
+function feedbackEvidenceText(brief: ResourceBrief): string {
+  return brief.evidence
+    .filter(item => item.kind === 'membership_feedback')
+    .map(item => item.text)
+    .join(' ')
+    .toLowerCase();
+}
+
+function feedbackEvidenceRefs(brief: ResourceBrief): string[] {
+  return brief.evidence
+    .filter(item => item.kind === 'membership_feedback')
+    .map(item => item.id);
 }
 
 function userEvidenceRefs(brief: ResourceBrief): string[] {

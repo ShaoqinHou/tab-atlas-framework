@@ -48,6 +48,18 @@ export interface MembershipFeedbackRecord {
   createdAt: string;
 }
 
+type ViewRevisionRow = {
+  id: string;
+  lineage_id: string;
+  view_id: string;
+  parent_revision_id: string | null;
+  command_id: string | null;
+  revision_number: number;
+  status: z.infer<typeof ViewRevisionStatus>;
+  snapshot_json: string;
+  created_at: string;
+};
+
 export function createViewRevision(
   db: Database.Database,
   input: z.input<typeof CreateViewRevisionInput>,
@@ -98,6 +110,77 @@ export function createViewRevision(
     status: parsed.status,
     snapshot: parsed.snapshot,
     createdAt,
+  };
+}
+
+export function listViewRevisions(db: Database.Database, viewId: string): ViewRevisionRecord[] {
+  const rows = db.prepare(`
+    SELECT id, lineage_id, view_id, parent_revision_id, command_id, revision_number, status, snapshot_json, created_at
+    FROM view_revisions
+    WHERE view_id = ?
+    ORDER BY revision_number DESC
+  `).all(viewId) as ViewRevisionRow[];
+  return rows.map(revisionFromRow);
+}
+
+export function getLatestViewRevision(db: Database.Database, viewId: string): ViewRevisionRecord | null {
+  const row = db.prepare(`
+    SELECT id, lineage_id, view_id, parent_revision_id, command_id, revision_number, status, snapshot_json, created_at
+    FROM view_revisions
+    WHERE view_id = ?
+    ORDER BY revision_number DESC
+    LIMIT 1
+  `).get(viewId) as ViewRevisionRow | undefined;
+  return row ? revisionFromRow(row) : null;
+}
+
+export function getViewRevision(db: Database.Database, revisionId: string): ViewRevisionRecord {
+  const row = db.prepare(`
+    SELECT id, lineage_id, view_id, parent_revision_id, command_id, revision_number, status, snapshot_json, created_at
+    FROM view_revisions
+    WHERE id = ?
+  `).get(revisionId) as ViewRevisionRow | undefined;
+  if (!row) throw new Error(`View revision not found: ${revisionId}`);
+  return revisionFromRow(row);
+}
+
+export function acceptViewRevision(db: Database.Database, revisionId: string): ViewRevisionRecord {
+  const revision = getViewRevision(db, revisionId);
+  const tx = db.transaction(() => {
+    const acceptedRows = db.prepare(`
+      SELECT id, view_id
+      FROM view_revisions
+      WHERE lineage_id = ? AND status = 'accepted' AND id <> ?
+    `).all(revision.lineageId, revision.id) as { id: string; view_id: string }[];
+    for (const row of acceptedRows) {
+      db.prepare(`UPDATE view_revisions SET status = 'superseded' WHERE id = ?`).run(row.id);
+      db.prepare(`UPDATE views SET status = 'superseded' WHERE id = ?`).run(row.view_id);
+    }
+    db.prepare(`UPDATE view_revisions SET status = 'accepted' WHERE id = ?`).run(revision.id);
+    db.prepare(`UPDATE views SET status = 'accepted' WHERE id = ?`).run(revision.viewId);
+    db.prepare(`UPDATE memberships SET accepted_by_user = 1 WHERE view_id = ?`).run(revision.viewId);
+  });
+  tx();
+  return getViewRevision(db, revisionId);
+}
+
+export function rejectViewRevision(db: Database.Database, revisionId: string): ViewRevisionRecord {
+  const revision = getViewRevision(db, revisionId);
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE view_revisions SET status = 'rejected' WHERE id = ?`).run(revision.id);
+    db.prepare(`UPDATE views SET status = 'rejected' WHERE id = ?`).run(revision.viewId);
+  });
+  tx();
+  return getViewRevision(db, revisionId);
+}
+
+export function compareViewRevisions(db: Database.Database, leftRevisionId: string, rightRevisionId: string): {
+  left: ViewRevisionRecord;
+  right: ViewRevisionRecord;
+} {
+  return {
+    left: getViewRevision(db, leftRevisionId),
+    right: getViewRevision(db, rightRevisionId),
   };
 }
 
@@ -190,4 +273,18 @@ export function buildPreferenceEvidence(
 
 function parseJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return undefined; }
+}
+
+function revisionFromRow(row: ViewRevisionRow): ViewRevisionRecord {
+  return {
+    id: row.id,
+    lineageId: row.lineage_id,
+    viewId: row.view_id,
+    parentRevisionId: row.parent_revision_id ?? undefined,
+    commandId: row.command_id ?? undefined,
+    revisionNumber: row.revision_number,
+    status: ViewRevisionStatus.parse(row.status),
+    snapshot: parseJson(row.snapshot_json),
+    createdAt: row.created_at,
+  };
 }

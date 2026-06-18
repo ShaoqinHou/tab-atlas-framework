@@ -1,14 +1,30 @@
 import fs from 'node:fs/promises';
 import Fastify from 'fastify';
 import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
-import { countAtomicItems, countCodexScanArtifacts, runCodexResourceScan, type RunCodexResourceScanInput } from '../agent/scanService.js';
+import {
+  countAtomicItems,
+  countCodexScanArtifacts,
+  createCodexScanJob,
+  resumeCodexScanJob,
+  runCodexResourceScan,
+  type RunCodexResourceScanInput,
+} from '../agent/scanService.js';
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
+import { getJobSnapshot, listJobItems, listJobs, requestJobCancel } from '../jobs/service.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
 import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { buildResourceBrief } from '../resources/briefs.js';
 import { applyViewPlan, previewView } from '../views/service.js';
+import {
+  acceptViewRevision,
+  compareViewRevisions,
+  getLatestViewRevision,
+  listViewRevisions,
+  recordMembershipFeedback,
+  rejectViewRevision,
+} from '../views/feedbackService.js';
 
 const host = '127.0.0.1';
 const port = Number(process.env.TABATLAS_PORT ?? 9787);
@@ -116,6 +132,7 @@ app.post('/api/agent/refine', async (request, reply) => {
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = mode === 'codex' ? getCodexProvider({ reasoningEffort }) : 'heuristic';
   const preview = previewView(db, viewId);
+  const parentRevision = getLatestViewRevision(db, viewId);
   const seedResourceIds = db.prepare(`
     SELECT DISTINCT target_id AS id
     FROM memberships
@@ -131,6 +148,7 @@ app.post('/api/agent/refine', async (request, reply) => {
     candidateLimit: typeof body.candidateLimit === 'number' ? body.candidateLimit : undefined,
     reasoningEffort,
     seedResourceIds,
+    parentRevisionId: parentRevision?.id,
   };
   const result = await runAgentCommand(db, provider, input);
   return reply.send(result);
@@ -140,14 +158,47 @@ app.post('/api/agent/scan', async (request, reply) => {
   const body = asRecord(request.body);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = getCodexProvider({ reasoningEffort });
-  const input: RunCodexResourceScanInput = {
-    limit: typeof body.limit === 'number' ? body.limit : undefined,
-    batchSize: typeof body.batchSize === 'number' ? body.batchSize : undefined,
-    resourceIds: Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === 'string') : undefined,
-    reasoningEffort,
-    force: Boolean(body.force),
-  };
+  const input = readCodexScanInput(body, reasoningEffort);
   const result = await runCodexResourceScan(db, provider, input);
+  return reply.send(result);
+});
+
+app.get('/api/jobs', async () => {
+  return listJobs(db, { limit: 25 });
+});
+
+app.post('/api/jobs/codex-scan', async (request, reply) => {
+  const body = asRecord(request.body);
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const result = createCodexScanJob(db, readCodexScanInput(body, reasoningEffort));
+  return reply.code(202).send(result);
+});
+
+app.get('/api/jobs/:jobId', async (request, reply) => {
+  const params = request.params as { jobId: string };
+  return reply.send({
+    job: getJobSnapshot(db, params.jobId),
+    items: listJobItems(db, params.jobId),
+  });
+});
+
+app.post('/api/jobs/:jobId/cancel', async (request, reply) => {
+  const params = request.params as { jobId: string };
+  return reply.send(requestJobCancel(db, params.jobId));
+});
+
+app.post('/api/jobs/:jobId/resume', async (request, reply) => {
+  const params = request.params as { jobId: string };
+  const body = asRecord(request.body);
+  const job = getJobSnapshot(db, params.jobId);
+  if (job.kind !== 'codex_scan') return reply.status(400).send({ ok: false, error: `Unsupported job kind: ${job.kind}` });
+  const input = asRecord(job.input);
+  const reasoningEffort = readReasoningEffort(input.reasoningEffort);
+  const provider = getCodexProvider({ reasoningEffort });
+  const result = await resumeCodexScanJob(db, provider, params.jobId, {
+    maxItems: typeof body.maxItems === 'number' ? body.maxItems : undefined,
+    maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
+  });
   return reply.send(result);
 });
 
@@ -242,11 +293,37 @@ app.get('/api/views/:viewId/preview', async (request, reply) => {
   return reply.send(previewView(db, params.viewId));
 });
 
+app.get('/api/views/:viewId/revisions', async (request, reply) => {
+  const params = request.params as { viewId: string };
+  return reply.send(listViewRevisions(db, params.viewId));
+});
+
+app.post('/api/views/:viewId/revisions/:revisionId/accept', async (request, reply) => {
+  const params = request.params as { revisionId: string };
+  return reply.send(acceptViewRevision(db, params.revisionId));
+});
+
+app.post('/api/views/:viewId/revisions/:revisionId/reject', async (request, reply) => {
+  const params = request.params as { revisionId: string };
+  return reply.send(rejectViewRevision(db, params.revisionId));
+});
+
+app.get('/api/views/:viewId/revisions/:revisionId/compare', async (request, reply) => {
+  const params = request.params as { revisionId: string };
+  const query = request.query as { otherRevisionId?: string };
+  if (!query.otherRevisionId) return reply.status(400).send({ ok: false, error: 'otherRevisionId is required' });
+  return reply.send(compareViewRevisions(db, params.revisionId, query.otherRevisionId));
+});
+
 app.post('/api/views/:viewId/apply', async (request, reply) => {
   const params = request.params as { viewId: string };
   const body = asRecord(request.body);
   const mode = body.mode === 'accepted' ? 'accepted' : 'proposed';
   return reply.send(applyViewPlan(db, params.viewId, mode));
+});
+
+app.post('/api/membership-feedback', async (request, reply) => {
+  return reply.send(recordMembershipFeedback(db, asRecord(request.body) as Parameters<typeof recordMembershipFeedback>[1]));
 });
 
 app.listen({ host, port }).catch(err => {
@@ -265,6 +342,20 @@ function parseJsonArray(value: string): string[] {
   } catch {
     return [];
   }
+}
+
+function readCodexScanInput(
+  body: Record<string, unknown>,
+  reasoningEffort: CodexSdkProviderConfig['reasoningEffort'],
+): RunCodexResourceScanInput {
+  return {
+    limit: typeof body.limit === 'number' ? body.limit : undefined,
+    batchSize: typeof body.batchSize === 'number' ? body.batchSize : undefined,
+    maxBatchBytes: typeof body.maxBatchBytes === 'number' ? body.maxBatchBytes : undefined,
+    resourceIds: Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === 'string') : undefined,
+    reasoningEffort,
+    force: Boolean(body.force),
+  };
 }
 
 function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'>): CodexSdkProvider {

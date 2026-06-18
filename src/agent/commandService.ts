@@ -17,6 +17,7 @@ export const RunAgentCommandInput = z.object({
   dryRun: z.boolean().default(false),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).default('medium'),
   seedResourceIds: z.array(z.string()).default([]),
+  parentRevisionId: z.string().optional(),
 });
 
 export type RunAgentCommandInput = z.input<typeof RunAgentCommandInput>;
@@ -73,6 +74,7 @@ export async function runAgentCommand(
       candidateCount: candidateResourceIds.length,
       candidateResourceIds,
       seedResourceIds: parsed.seedResourceIds,
+      parentRevisionId: parsed.parentRevisionId,
       reasoningEffort: parsed.reasoningEffort,
       dryRun: parsed.dryRun,
     };
@@ -134,7 +136,10 @@ export async function runAgentCommand(
   }
 
   const commandId = createUserCommand(db, parsed.text, { mode, query, candidateResourceIds });
-  const persisted = persistSemanticViewPlan(db, commandId, plan, mode);
+  const persisted = persistSemanticViewPlan(db, commandId, plan, {
+    origin: mode,
+    parentRevisionId: parsed.parentRevisionId,
+  });
   const previews = persisted.viewIds.map(viewId => previewView(db, viewId));
   return {
     commandId,

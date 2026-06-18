@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { getUserAnnotations } from '../annotations/service.js';
 import { ResourceBrief, type AtomicItemBrief, type UrlKind } from '../shared/schemas.js';
+import { buildPreferenceEvidence } from '../views/feedbackService.js';
 
 type ResourceRow = {
   id: string;
@@ -43,10 +44,18 @@ export function buildResourceBrief(db: Database.Database, resourceId: string): R
 
   const browserGroupTitles = getBrowserGroupTitles(db, resourceId);
   const userAnnotations = getUserAnnotations(db, 'resource', resourceId);
+  const preferenceEvidence = buildPreferenceEvidence(db, 'resource', resourceId);
   const artifacts = getArtifacts(db, resourceId);
   const atomicItems = getAtomicItems(db, resourceId);
   const systemTags = systemTagsFor(resource.url_kind, resource.host);
   const evidence = [
+    ...preferenceEvidence.map(item => ({
+      id: `feedback:${item.feedbackId}`,
+      kind: item.kind,
+      text: item.text,
+      provenance: 'user_feedback',
+      confidence: item.confidence,
+    })),
     ...browserGroupTitles.map((title, index) => ({
       id: `ev_group_${shortId(resource.id)}_${index}`,
       kind: 'browser_group',
