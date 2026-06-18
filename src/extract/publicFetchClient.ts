@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 import { safeExtractionHeaders, validatePublicHttpUrl, validateResolvedAddresses } from './networkPolicy.js';
 import type { ExtractionArtifactStatus } from './adapterContracts.js';
 
@@ -19,11 +20,47 @@ export interface PublicFetchResult {
   bytesRead: number;
   text: string;
   contentHash: string;
+  network: PublicFetchNetworkMetadata;
 }
 
+export interface PublicFetchNetworkMetadata {
+  originalHostname: string;
+  connectedAddress: string;
+  addressFamily: 4 | 6;
+  validatedAddresses: string[];
+  tlsServername?: string;
+  redirectCount: number;
+}
+
+export interface ResolvedAddress {
+  address: string;
+  family?: 4 | 6;
+}
+
+export interface ValidatedPublicDestination {
+  normalizedUrl: string;
+  originalHostname: string;
+  selectedAddress: string;
+  addressFamily: 4 | 6;
+  validatedAddresses: string[];
+  tlsServername?: string;
+}
+
+export type PublicFetchResolver = (hostname: string) => Promise<Array<string | ResolvedAddress>>;
+export type PublicFetchImplementation = (input: string, init?: PublicFetchRequestInit) => Promise<Response>;
+export type PublicFetchRequestInit = RequestInit & { dispatcher?: Dispatcher };
+
+export interface PinnedDispatcherHandle {
+  dispatcher: Dispatcher;
+  close: () => Promise<void>;
+}
+
+export type PinnedDispatcherFactory = (destination: ValidatedPublicDestination) => PinnedDispatcherHandle;
+
 export interface PublicFetchClientOptions {
-  fetchImpl?: typeof fetch;
-  resolver?: (hostname: string) => Promise<string[]>;
+  fetchImpl?: PublicFetchImplementation;
+  resolver?: PublicFetchResolver;
+  dispatcherFactory?: PinnedDispatcherFactory;
   limiter?: PerHostLimiter;
   maxRedirects?: number;
   maxResponseBytes?: number;
@@ -101,8 +138,9 @@ export class PerHostLimiter {
 }
 
 export class PublicFetchClient {
-  private readonly fetchImpl: typeof fetch;
-  private readonly resolver: (hostname: string) => Promise<string[]>;
+  private readonly fetchImpl: PublicFetchImplementation;
+  private readonly resolver: PublicFetchResolver;
+  private readonly dispatcherFactory: PinnedDispatcherFactory;
   private readonly limiter: PerHostLimiter;
   private readonly maxRedirects: number;
   private readonly maxResponseBytes: number;
@@ -111,8 +149,9 @@ export class PublicFetchClient {
   private readonly userAgent: string;
 
   constructor(options: PublicFetchClientOptions = {}) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? (undiciFetch as unknown as PublicFetchImplementation);
     this.resolver = options.resolver ?? defaultResolver;
+    this.dispatcherFactory = options.dispatcherFactory ?? createPinnedAddressDispatcher;
     this.limiter = options.limiter ?? new PerHostLimiter(2);
     this.maxRedirects = options.maxRedirects ?? 5;
     this.maxResponseBytes = options.maxResponseBytes ?? 1_000_000;
@@ -154,73 +193,96 @@ export class PublicFetchClient {
   private async fetchTextWithRedirects(rawUrl: string, signal: AbortSignal): Promise<PublicFetchResult> {
     let current = await this.validateUrlAndDns(rawUrl);
     for (let redirectCount = 0; redirectCount <= this.maxRedirects; redirectCount += 1) {
-      const url = new URL(current);
-      const response = await this.limiter.run(url.hostname, async () => this.fetchImpl(current, {
-        method: 'GET',
-        redirect: 'manual',
-        signal,
-        headers: safeExtractionHeaders(this.userAgent),
-      }));
+      const dispatcher = this.dispatcherFactory(current);
+      try {
+        const response = await this.limiter.run(current.originalHostname, async () => this.fetchImpl(current.normalizedUrl, {
+          method: 'GET',
+          redirect: 'manual',
+          signal,
+          headers: safeExtractionHeaders(this.userAgent),
+          dispatcher: dispatcher.dispatcher,
+        }));
 
-      if (isRedirect(response.status)) {
-        if (redirectCount >= this.maxRedirects) {
-          throw new PublicFetchError({ status: 'blocked_policy', reason: 'too_many_redirects', url: current, statusCode: response.status });
+        if (isRedirect(response.status)) {
+          if (redirectCount >= this.maxRedirects) {
+            throw new PublicFetchError({
+              status: 'blocked_policy',
+              reason: 'too_many_redirects',
+              url: current.normalizedUrl,
+              statusCode: response.status,
+            });
+          }
+          const location = response.headers.get('location');
+          if (!location) {
+            throw new PublicFetchError({
+              status: 'failed_network',
+              reason: 'redirect_without_location',
+              url: current.normalizedUrl,
+              statusCode: response.status,
+            });
+          }
+          current = await this.validateUrlAndDns(new URL(location, current.normalizedUrl).toString());
+          continue;
         }
-        const location = response.headers.get('location');
-        if (!location) {
-          throw new PublicFetchError({ status: 'failed_network', reason: 'redirect_without_location', url: current, statusCode: response.status });
+
+        const contentType = response.headers.get('content-type') ?? '';
+        const contentLength = parseContentLength(response.headers.get('content-length'));
+        if (response.status === 401 || response.status === 403) {
+          throw new PublicFetchError({
+            status: 'blocked_auth_required',
+            reason: 'auth_required',
+            url: current.normalizedUrl,
+            statusCode: response.status,
+            contentType,
+          });
         }
-        current = await this.validateUrlAndDns(new URL(location, current).toString());
-        continue;
-      }
+        if (!isAllowedContentType(contentType, this.allowedContentTypes)) {
+          throw new PublicFetchError({
+            status: 'not_available',
+            reason: 'unsupported_content_type',
+            url: current.normalizedUrl,
+            statusCode: response.status,
+            contentType,
+          });
+        }
+        if (contentLength !== undefined && contentLength > this.maxResponseBytes) {
+          throw new PublicFetchError({
+            status: 'blocked_size_limit',
+            reason: 'content_length_exceeds_limit',
+            url: current.normalizedUrl,
+            statusCode: response.status,
+            contentType,
+            bytesRead: 0,
+          });
+        }
 
-      const contentType = response.headers.get('content-type') ?? '';
-      const contentLength = parseContentLength(response.headers.get('content-length'));
-      if (response.status === 401 || response.status === 403) {
-        throw new PublicFetchError({
-          status: 'blocked_auth_required',
-          reason: 'auth_required',
-          url: current,
+        const body = await readBoundedResponse(response, this.maxResponseBytes);
+        return {
+          finalUrl: current.normalizedUrl,
           statusCode: response.status,
           contentType,
-        });
+          contentLength,
+          bytesRead: body.bytesRead,
+          text: body.text,
+          contentHash: crypto.createHash('sha256').update(body.bytes).digest('hex'),
+          network: {
+            originalHostname: current.originalHostname,
+            connectedAddress: current.selectedAddress,
+            addressFamily: current.addressFamily,
+            validatedAddresses: current.validatedAddresses,
+            tlsServername: current.tlsServername,
+            redirectCount,
+          },
+        };
+      } finally {
+        await dispatcher.close();
       }
-      if (!isAllowedContentType(contentType, this.allowedContentTypes)) {
-        throw new PublicFetchError({
-          status: 'not_available',
-          reason: 'unsupported_content_type',
-          url: current,
-          statusCode: response.status,
-          contentType,
-        });
-      }
-      if (contentLength !== undefined && contentLength > this.maxResponseBytes) {
-        throw new PublicFetchError({
-          status: 'blocked_size_limit',
-          reason: 'content_length_exceeds_limit',
-          url: current,
-          statusCode: response.status,
-          contentType,
-          bytesRead: 0,
-        });
-      }
-
-      const body = await readBoundedResponse(response, this.maxResponseBytes);
-      return {
-        finalUrl: current,
-        statusCode: response.status,
-        contentType,
-        contentLength,
-        bytesRead: body.bytesRead,
-        text: body.text,
-        contentHash: crypto.createHash('sha256').update(body.bytes).digest('hex'),
-      };
     }
 
-    throw new PublicFetchError({ status: 'blocked_policy', reason: 'too_many_redirects', url: current });
+    throw new PublicFetchError({ status: 'blocked_policy', reason: 'too_many_redirects', url: current.normalizedUrl });
   }
 
-  private async validateUrlAndDns(rawUrl: string): Promise<string> {
+  private async validateUrlAndDns(rawUrl: string): Promise<ValidatedPublicDestination> {
     const decision = validatePublicHttpUrl(rawUrl);
     if (!decision.allowed || !decision.normalizedUrl) {
       throw new PublicFetchError({ status: 'blocked_policy', reason: decision.reason ?? 'blocked_url', url: rawUrl });
@@ -228,7 +290,10 @@ export class PublicFetchClient {
 
     const url = new URL(decision.normalizedUrl);
     const ipLiteral = stripIpv6Brackets(url.hostname);
-    const addresses = net.isIP(ipLiteral) ? [ipLiteral] : await this.resolver(url.hostname);
+    const resolved = net.isIP(ipLiteral)
+      ? [{ address: ipLiteral, family: net.isIP(ipLiteral) as 4 | 6 }]
+      : normalizeResolvedAddresses(await this.resolver(url.hostname));
+    const addresses = resolved.map(row => row.address);
     const dnsDecision = validateResolvedAddresses(addresses);
     if (!dnsDecision.allowed) {
       throw new PublicFetchError({
@@ -238,13 +303,57 @@ export class PublicFetchClient {
       });
     }
 
-    return decision.normalizedUrl;
+    const selected = resolved[0];
+    if (!selected) {
+      throw new PublicFetchError({ status: 'blocked_policy', reason: 'dns_no_addresses', url: decision.normalizedUrl });
+    }
+    const addressFamily = selected.family ?? net.isIP(selected.address);
+    if (addressFamily !== 4 && addressFamily !== 6) {
+      throw new PublicFetchError({ status: 'blocked_policy', reason: 'dns_resolved_non_public_ip', url: decision.normalizedUrl });
+    }
+    return {
+      normalizedUrl: decision.normalizedUrl,
+      originalHostname: url.hostname,
+      selectedAddress: selected.address,
+      addressFamily,
+      validatedAddresses: addresses,
+      tlsServername: url.protocol === 'https:' ? url.hostname : undefined,
+    };
   }
 }
 
-async function defaultResolver(hostname: string): Promise<string[]> {
+async function defaultResolver(hostname: string): Promise<ResolvedAddress[]> {
   const rows = await dns.lookup(hostname, { all: true, verbatim: true });
-  return rows.map(row => row.address);
+  return rows.map(row => ({
+    address: row.address,
+    family: row.family as 4 | 6,
+  }));
+}
+
+export function createPinnedAddressDispatcher(destination: ValidatedPublicDestination): PinnedDispatcherHandle {
+  const dispatcher = new Agent({
+    connect: {
+      lookup: (_hostname, _options, callback) => {
+        callback(null, destination.selectedAddress, destination.addressFamily);
+      },
+      servername: destination.tlsServername,
+    },
+  });
+  return {
+    dispatcher,
+    close: async () => {
+      await dispatcher.close();
+    },
+  };
+}
+
+function normalizeResolvedAddresses(addresses: Array<string | ResolvedAddress>): ResolvedAddress[] {
+  return addresses.map(row => {
+    const address = typeof row === 'string' ? stripIpv6Brackets(row) : stripIpv6Brackets(row.address);
+    const family = typeof row === 'string' ? net.isIP(address) : row.family ?? net.isIP(address);
+    if (family !== 4 && family !== 6) return { address, family: 4 };
+    return { address, family };
+  });
 }
 
 function isRedirect(status: number): boolean {

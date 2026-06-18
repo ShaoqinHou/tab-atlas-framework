@@ -21,6 +21,7 @@
     "fastify": "latest",
     "jsdom": "^29.1.1",
     "nanoid": "latest",
+    "undici": "^7.28.0",
     "zod": "latest"
   },
   "devDependencies": {
