@@ -77,6 +77,14 @@ export function countCapabilities(db: Database.Database): number {
   return row.count;
 }
 
+export function countActiveAdminCapabilities(db: Database.Database): number {
+  const rows = listCapabilities(db);
+  const now = Date.now();
+  return rows.filter(capability => capability.status === 'active'
+    && capability.scopes.includes('admin')
+    && (!capability.expiresAt || Date.parse(capability.expiresAt) > now)).length;
+}
+
 export function getCapability(db: Database.Database, id: string): CapabilityRecord {
   const row = db.prepare(`
     SELECT id, kind, label, scopes_json, status, created_at, expires_at, last_used_at, revoked_at

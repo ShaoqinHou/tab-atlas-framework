@@ -2,11 +2,12 @@ import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
-  countCapabilities,
+  countActiveAdminCapabilities,
   verifyCapabilityToken,
   type CapabilityRecord,
   type CapabilityScope,
 } from './localCapability.js';
+import { readSessionTokenFromCookie, verifyLocalSessionToken } from './localSession.js';
 
 export interface LocalRequestGuardOptions {
   host: string;
@@ -55,11 +56,16 @@ export function authorizeLocalRequest(
     return { allowed: false, statusCode: 403, reason: 'untrusted_origin' };
   }
   if (routeScope === null || routeScope === 'local_only') return { allowed: true, scope: routeScope };
-  if (routeScope === 'bootstrap_admin' && countCapabilities(db) === 0) return { allowed: true, scope: routeScope };
+  if (routeScope === 'bootstrap_admin' && countActiveAdminCapabilities(db) === 0) return { allowed: true, scope: routeScope };
   const token = readToken(request.headers);
   const requiredScope: CapabilityScope = routeScope === 'bootstrap_admin' ? 'admin' : routeScope;
   const verification = verifyCapabilityToken(db, token, requiredScope);
-  if (!verification.ok) return { allowed: false, statusCode: 401, reason: verification.reason };
+  if (!verification.ok) {
+    const sessionToken = readSessionTokenFromCookie(request.headers.cookie);
+    const sessionVerification = verifyLocalSessionToken(db, sessionToken, requiredScope);
+    if (sessionVerification.ok) return { allowed: true, scope: routeScope };
+    return { allowed: false, statusCode: 401, reason: verification.reason };
+  }
   return { allowed: true, scope: routeScope, capability: verification.capability };
 }
 
@@ -68,6 +74,9 @@ export function requiredScopeFor(method: string, rawUrl: string): GuardScope {
   const normalizedMethod = method.toUpperCase();
   if (pathname === '/' || pathname === '/health') return 'local_only';
   if (pathname === '/api/security/pairing-codes/exchange' && normalizedMethod === 'POST') return 'local_only';
+  if (pathname === '/api/onboarding' && normalizedMethod === 'GET') return 'local_only';
+  if (pathname === '/api/onboarding/bootstrap' && normalizedMethod === 'POST') return 'local_only';
+  if (pathname === '/api/onboarding/recover-admin' && normalizedMethod === 'POST') return 'local_only';
   if (pathname === '/api/security/capabilities' && normalizedMethod === 'POST') return 'bootstrap_admin';
   if (pathname.startsWith('/api/security')) return 'admin';
   if (pathname === '/snapshot' && normalizedMethod === 'POST') return 'snapshot:write';

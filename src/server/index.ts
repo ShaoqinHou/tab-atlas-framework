@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import Fastify from 'fastify';
 import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
 import {
@@ -31,13 +32,23 @@ import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
 import { buildResourceBrief } from '../resources/briefs.js';
 import {
+  completeOnboardingStep,
+  consumeBootstrapSecret,
+  ensureBootstrapSecret,
+  getOnboardingSnapshot,
+  recoverAdminSession,
+} from '../onboarding/service.js';
+import { OnboardingStepId } from '../onboarding/contracts.js';
+import {
   createCapability,
+  countActiveAdminCapabilities,
   listCapabilities,
   revokeCapability,
   rotateCapability,
   type CapabilityKind,
   type CapabilityScope,
 } from '../security/localCapability.js';
+import { countActiveDashboardSessions, sessionCookie } from '../security/localSession.js';
 import {
   createPairingChallenge,
   exchangePairingChallenge,
@@ -63,6 +74,14 @@ const app = Fastify({ logger: true });
 installLocalRequestGuard(app, db, { host, port });
 const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
+const bootstrapSecret = (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0)
+  ? ensureBootstrapSecret(db, {
+    directory: process.env.TABATLAS_BOOTSTRAP_DIR ?? path.join(process.cwd(), 'data'),
+  })
+  : null;
+if (bootstrapSecret) {
+  app.log.info({ filePath: bootstrapSecret.filePath, expiresAt: bootstrapSecret.expiresAt }, 'TabAtlas bootstrap secret file ready');
+}
 const codexProviders = createCodexProviderRegistry(db, {
   maxTurnsPerThread: Number(process.env.TABATLAS_CODEX_MAX_TURNS_PER_THREAD ?? 20),
   workingDirectory: process.cwd(),
@@ -102,6 +121,7 @@ app.get('/', async (_request, reply) => {
 
 app.post('/snapshot', async (request, reply) => {
   const result = importSnapshot(db, request.body, 'extension_snapshot');
+  completeOnboardingStep(db, 'snapshot_captured', { source: 'extension_snapshot' });
   return reply.send(result);
 });
 
@@ -117,7 +137,79 @@ app.post('/api/import-file', async (request, reply) => {
   }
   const json = JSON.parse(await fs.readFile(validated.path, 'utf8'));
   const result = importSnapshot(db, json, 'manual_file_import');
+  completeOnboardingStep(db, 'snapshot_captured', { source: 'manual_file_import' });
   return reply.send({ ok: true, ...result });
+});
+
+app.get('/api/onboarding', async () => {
+  return {
+    ...getOnboardingSnapshot(db),
+    bootstrapFilePath: bootstrapSecret?.filePath,
+  };
+});
+
+app.post('/api/onboarding/bootstrap', async (request, reply) => {
+  const body = asRecord(request.body);
+  const secret = typeof body.secret === 'string' ? body.secret : '';
+  if (!secret.trim()) return reply.status(400).send({ ok: false, error: 'secret is required' });
+  try {
+    const session = consumeBootstrapSecret(db, secret);
+    writeSecurityAuditRecord(db, {
+      eventType: 'onboarding_bootstrap',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      details: { sessionId: session.sessionId },
+    });
+    return reply
+      .header('set-cookie', sessionCookie(session.token))
+      .send({ ok: true, session: { id: session.sessionId, expiresAt: session.expiresAt }, onboarding: getOnboardingSnapshot(db) });
+  } catch (error) {
+    writeSecurityAuditRecord(db, {
+      eventType: 'onboarding_bootstrap',
+      method: request.method,
+      route: request.url,
+      outcome: 'denied',
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return reply.status(400).send({ ok: false, error: 'invalid bootstrap secret' });
+  }
+});
+
+app.post('/api/onboarding/:stepId/complete', async (request, reply) => {
+  const params = request.params as { stepId: string };
+  const parsed = OnboardingStepId.safeParse(params.stepId);
+  if (!parsed.success) return reply.status(400).send({ ok: false, error: 'invalid onboarding step' });
+  completeOnboardingStep(db, parsed.data, asRecord(request.body));
+  return reply.send({ ok: true, onboarding: getOnboardingSnapshot(db) });
+});
+
+app.post('/api/onboarding/recover-admin', async (request, reply) => {
+  const body = asRecord(request.body);
+  const secret = typeof body.secret === 'string' ? body.secret : '';
+  if (!secret.trim()) return reply.status(400).send({ ok: false, error: 'secret is required' });
+  try {
+    const session = recoverAdminSession(db, secret);
+    writeSecurityAuditRecord(db, {
+      eventType: 'onboarding_recover_admin',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      details: { sessionId: session.sessionId },
+    });
+    return reply
+      .header('set-cookie', sessionCookie(session.token))
+      .send({ ok: true, session: { id: session.sessionId, expiresAt: session.expiresAt }, onboarding: getOnboardingSnapshot(db) });
+  } catch (error) {
+    writeSecurityAuditRecord(db, {
+      eventType: 'onboarding_recover_admin',
+      method: request.method,
+      route: request.url,
+      outcome: 'denied',
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return reply.status(400).send({ ok: false, error: 'recovery unavailable' });
+  }
 });
 
 app.get('/api/security/status', async () => {

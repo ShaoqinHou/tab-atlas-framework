@@ -220,11 +220,16 @@
       <section>
         <h2>Local Trust</h2>
         <div id="securityNotice" class="notice">Local token not loaded.</div>
+        <input id="bootstrapSecret" class="secret-input" type="password" placeholder="One-time bootstrap secret" autocomplete="off">
+        <div class="row" style="margin-top:10px">
+          <button class="primary" id="bootstrapSessionButton">Start dashboard session</button>
+          <button id="refreshOnboardingButton">Refresh onboarding</button>
+        </div>
         <input id="securityToken" class="secret-input" type="password" placeholder="Local dashboard token" autocomplete="off">
         <div class="row" style="margin-top:10px">
           <button id="saveSecurityTokenButton">Save token</button>
           <button id="clearSecurityTokenButton">Clear</button>
-          <button class="primary" id="bootstrapAdminButton">Create admin token</button>
+          <button id="bootstrapAdminButton">Create admin token</button>
           <button id="refreshSecurityButton">Refresh trust</button>
         </div>
         <div class="row" style="margin-top:10px">
@@ -329,10 +334,6 @@
     async function refreshSecurityStatus(options = {}) {
       const token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
       $('securityToken').value = token;
-      if (!token && options.silent) {
-        renderSecurityLocked('No local dashboard token is saved.');
-        return false;
-      }
       try {
         const status = await api('/api/security/status');
         renderSecurityStatus(status);
@@ -350,6 +351,23 @@
         : message;
       $('securityStatus').innerHTML = '<div class="muted">Create the first admin token after starting the receiver, or paste an existing local token.</div>';
       $('pairingCode').innerHTML = '';
+    }
+
+    async function refreshOnboarding() {
+      const onboarding = await api('/api/onboarding');
+      const next = onboarding.steps.find(step => step.id === onboarding.nextStepId);
+      $('securityNotice').textContent = next
+        ? `Next setup step: ${next.title}`
+        : 'Onboarding complete.';
+      const file = onboarding.bootstrapFilePath ? `<div class="muted">Bootstrap file: ${escapeHtml(onboarding.bootstrapFilePath)}</div>` : '';
+      $('securityStatus').insertAdjacentHTML('afterbegin', `
+        <div class="sample">
+          <div><strong>Onboarding</strong></div>
+          <div class="muted">${onboarding.steps.map(step => `${step.status === 'completed' ? 'done' : 'todo'} ${step.title}`).map(escapeHtml).join('<br>')}</div>
+          ${file}
+        </div>
+      `);
+      return onboarding;
     }
 
     function renderSecurityStatus(status) {
@@ -396,6 +414,25 @@
       localStorage.setItem(TOKEN_STORAGE_KEY, created.token);
       $('securityToken').value = created.token;
       $('pairingCode').innerHTML = '<div class="notice">Admin token created and saved locally.</div>';
+      await refreshSecurityStatus({ silent: true });
+      await refreshStatus();
+      await loadReview();
+    }
+
+    async function bootstrapDashboardSession() {
+      const secret = $('bootstrapSecret').value.trim();
+      if (!secret) {
+        renderSecurityLocked('Paste the one-time bootstrap secret from the receiver file.');
+        return;
+      }
+      const result = await api('/api/onboarding/bootstrap', {
+        method: 'POST',
+        body: JSON.stringify({ secret }),
+      });
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      $('securityToken').value = '';
+      $('bootstrapSecret').value = '';
+      $('pairingCode').innerHTML = `<div class="notice">Dashboard session ready until ${escapeHtml(result.session.expiresAt)}.</div>`;
       await refreshSecurityStatus({ silent: true });
       await refreshStatus();
       await loadReview();
@@ -885,7 +922,9 @@
     $('saveSecurityTokenButton').addEventListener('click', () => saveSecurityToken());
     $('clearSecurityTokenButton').addEventListener('click', () => clearSecurityToken());
     $('bootstrapAdminButton').addEventListener('click', () => bootstrapAdminToken().catch(showError));
+    $('bootstrapSessionButton').addEventListener('click', () => bootstrapDashboardSession().catch(showError));
     $('refreshSecurityButton').addEventListener('click', () => refreshSecurityStatus().catch(showError));
+    $('refreshOnboardingButton').addEventListener('click', () => refreshOnboarding().catch(showError));
     $('createPairingCodeButton').addEventListener('click', () => createExtensionPairingCode().catch(showError));
 
     function showError(error) {
@@ -916,6 +955,7 @@
       } else {
         $('metrics').innerHTML = '<div class="metric"><span>Status</span><strong>Locked</strong></div>';
         $('reviewCard').innerHTML = '<div class="muted">Local token required.</div>';
+        await refreshOnboarding();
       }
     }
 
