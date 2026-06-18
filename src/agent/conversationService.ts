@@ -19,6 +19,7 @@ import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
 import { applyViewPlan, previewView } from '../views/service.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
+import { materializeAgentTurnPlan } from './actionIdentity.js';
 
 export interface ConversationThreadRecord {
   id: string;
@@ -41,6 +42,8 @@ export interface AgentActionRecord {
   id: string;
   threadId: string;
   messageId?: string;
+  modelActionKey?: string;
+  actionOrdinal?: number;
   kind: AgentActionValue['kind'];
   approval: AgentActionValue['approval'];
   status: 'proposed' | 'approved' | 'running' | 'succeeded' | 'failed' | 'cancelled';
@@ -163,8 +166,8 @@ export async function sendConversationMessage(
     content: plan.reply,
     context: { questions: plan.questions, assumptions: plan.assumptions, retrievedContext: context },
   });
-  persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
-  for (const action of actionsReadyWithoutConfirmation(plan)) {
+  const persistedPlan = persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
+  for (const action of actionsReadyWithoutConfirmation(persistedPlan)) {
     await runPersistedAgentAction(db, action.id, { plannerProvider: options.plannerProvider });
   }
   return getConversationSnapshot(db, input.threadId);
@@ -206,23 +209,30 @@ export function persistAgentTurnPlan(
 ): AgentTurnPlanValue {
   getConversationThread(db, input.threadId);
   const plan = validateAgentTurnPlan(input.plan);
+  const materialized = materializeAgentTurnPlan({
+    threadId: input.threadId,
+    assistantMessageId: input.assistantMessageId,
+    plan,
+  });
   const now = new Date().toISOString();
   const insert = db.prepare(`
     INSERT INTO agent_actions
-      (id, thread_id, message_id, action_kind, approval, status, idempotency_key, action_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?)
+      (id, thread_id, message_id, model_action_key, action_ordinal, action_kind, approval, status, idempotency_key, action_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?)
+    ON CONFLICT(id) DO NOTHING
   `);
   const tx = db.transaction(() => {
-    for (const action of plan.actions) {
-      const existing = db.prepare('SELECT id FROM agent_actions WHERE id = ?').get(action.id) as { id: string } | undefined;
-      if (existing) throw new Error(`Duplicate agent action id: ${action.id}`);
+    for (const materializedAction of materialized.actions) {
+      const { action } = materializedAction;
       insert.run(
         action.id,
         input.threadId,
         input.assistantMessageId ?? null,
+        materializedAction.modelActionKey,
+        materializedAction.actionOrdinal,
         action.kind,
         action.approval,
-        action.id,
+        materializedAction.idempotencyKey,
         JSON.stringify(action),
         now,
         now,
@@ -230,7 +240,7 @@ export function persistAgentTurnPlan(
     }
   });
   tx();
-  return plan;
+  return materialized.plan;
 }
 
 export async function confirmAgentAction(
@@ -483,7 +493,7 @@ export function listConversationMessages(
 
 export function listAgentActions(db: Database.Database, threadId: string): AgentActionRecord[] {
   const rows = db.prepare(`
-    SELECT id, thread_id, message_id, action_kind, approval, status, idempotency_key, execution_token,
+    SELECT id, thread_id, message_id, model_action_key, action_ordinal, action_kind, approval, status, idempotency_key, execution_token,
            execution_started_at, action_json, result_json, error, created_at, updated_at, finished_at
     FROM agent_actions
     WHERE thread_id = ?
@@ -494,7 +504,7 @@ export function listAgentActions(db: Database.Database, threadId: string): Agent
 
 export function getAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
   const row = db.prepare(`
-    SELECT id, thread_id, message_id, action_kind, approval, status, idempotency_key, execution_token,
+    SELECT id, thread_id, message_id, model_action_key, action_ordinal, action_kind, approval, status, idempotency_key, execution_token,
            execution_started_at, action_json, result_json, error, created_at, updated_at, finished_at
     FROM agent_actions
     WHERE id = ?
@@ -507,6 +517,8 @@ type AgentActionRow = {
   id: string;
   thread_id: string;
   message_id: string | null;
+  model_action_key: string | null;
+  action_ordinal: number | null;
   action_kind: AgentActionValue['kind'];
   approval: AgentActionValue['approval'];
   status: AgentActionRecord['status'];
@@ -526,6 +538,8 @@ function actionFromRow(row: AgentActionRow): AgentActionRecord {
     id: row.id,
     threadId: row.thread_id,
     messageId: row.message_id ?? undefined,
+    modelActionKey: row.model_action_key ?? undefined,
+    actionOrdinal: row.action_ordinal ?? undefined,
     kind: row.action_kind,
     approval: row.approval,
     status: row.status,

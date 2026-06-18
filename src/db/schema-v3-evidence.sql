@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS agent_actions (
   id TEXT PRIMARY KEY,
   thread_id TEXT NOT NULL REFERENCES conversation_threads(id) ON DELETE CASCADE,
   message_id TEXT REFERENCES conversation_messages(id) ON DELETE SET NULL,
+  model_action_key TEXT,
+  action_ordinal INTEGER,
   action_kind TEXT NOT NULL,
   approval TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'proposed',

@@ -22,15 +22,31 @@ function runLightweightMigrations(db: Database.Database): void {
   ensureColumn(db, 'agent_actions', 'idempotency_key', "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, 'agent_actions', 'execution_token', 'TEXT');
   ensureColumn(db, 'agent_actions', 'execution_started_at', 'TEXT');
+  ensureColumn(db, 'agent_actions', 'model_action_key', 'TEXT');
+  ensureColumn(db, 'agent_actions', 'action_ordinal', 'INTEGER');
   db.exec(`
     UPDATE agent_actions
     SET idempotency_key = id
     WHERE idempotency_key = ''
   `);
   db.exec(`
+    UPDATE agent_actions
+    SET model_action_key = id
+    WHERE model_action_key IS NULL
+  `);
+  db.exec(`
+    UPDATE agent_actions
+    SET action_ordinal = 0
+    WHERE action_ordinal IS NULL
+  `);
+  db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_idempotency_key
       ON agent_actions(idempotency_key)
       WHERE idempotency_key <> ''
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agent_actions_model_key
+      ON agent_actions(thread_id, message_id, model_action_key)
   `);
 }
 

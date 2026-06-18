@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -141,6 +142,49 @@ describe('persistent conversational agent actions', () => {
     })).toThrow(/Duplicate agent action id/);
   });
 
+  it('materializes repeated model action IDs into distinct server action IDs across assistant turns', () => {
+    const { db } = seed();
+    const thread = createConversationThread(db);
+    const firstAssistant = appendConversationMessage(db, { threadId: thread.id, role: 'assistant', content: 'First.' });
+    const secondAssistant = appendConversationMessage(db, { threadId: thread.id, role: 'assistant', content: 'Second.' });
+    const plan: AgentTurnPlan = {
+      reply: 'Review.',
+      questions: [],
+      assumptions: [],
+      actions: [{ id: 'action_1', kind: 'start_review', approval: 'automatic', rationale: 'Review.', queue: 'unmarked' }],
+    };
+
+    const first = persistAgentTurnPlan(db, { threadId: thread.id, assistantMessageId: firstAssistant.id, plan });
+    const second = persistAgentTurnPlan(db, { threadId: thread.id, assistantMessageId: secondAssistant.id, plan });
+    const actions = getConversationSnapshot(db, thread.id).actions;
+
+    expect(first.actions[0].id).toMatch(/^action_[a-f0-9]{24}$/);
+    expect(second.actions[0].id).toMatch(/^action_[a-f0-9]{24}$/);
+    expect(first.actions[0].id).not.toBe('action_1');
+    expect(first.actions[0].id).not.toBe(second.actions[0].id);
+    expect(actions.map(action => action.modelActionKey)).toEqual(['action_1', 'action_1']);
+  });
+
+  it('retries the same assistant turn without duplicating actions', () => {
+    const { db } = seed();
+    const thread = createConversationThread(db);
+    const assistant = appendConversationMessage(db, { threadId: thread.id, role: 'assistant', content: 'Retryable.' });
+    const plan: AgentTurnPlan = {
+      reply: 'Review.',
+      questions: [],
+      assumptions: [],
+      actions: [{ id: 'action_retry_model', kind: 'start_review', approval: 'automatic', rationale: 'Review.', queue: 'unmarked' }],
+    };
+
+    const first = persistAgentTurnPlan(db, { threadId: thread.id, assistantMessageId: assistant.id, plan });
+    const second = persistAgentTurnPlan(db, { threadId: thread.id, assistantMessageId: assistant.id, plan });
+    const actions = getConversationSnapshot(db, thread.id).actions;
+
+    expect(first.actions[0].id).toBe(second.actions[0].id);
+    expect(actions).toHaveLength(1);
+    expect(actions[0].modelActionKey).toBe('action_retry_model');
+  });
+
   it('executes read actions without confirmation', async () => {
     const { db } = seed();
     const thread = createConversationThread(db);
@@ -238,7 +282,7 @@ describe('persistent conversational agent actions', () => {
     expect(snapshot.actions[0].status).toBe('proposed');
     expect(before.count).toBe(0);
 
-    await confirmAgentAction(db, 'action_annotation');
+    await confirmAgentAction(db, snapshot.actions[0].id);
     const after = db.prepare('SELECT COUNT(*) AS count FROM user_annotations').get() as { count: number };
     expect(after.count).toBe(1);
   });
@@ -261,10 +305,10 @@ describe('persistent conversational agent actions', () => {
       }],
     }]);
 
-    await sendConversationMessage(db, { threadId: thread.id, content: 'Scan it' }, { plannerProvider: provider });
+    const snapshot = await sendConversationMessage(db, { threadId: thread.id, content: 'Scan it' }, { plannerProvider: provider });
     expect((db.prepare('SELECT COUNT(*) AS count FROM jobs').get() as { count: number }).count).toBe(0);
 
-    await confirmAgentAction(db, 'action_scan');
+    await confirmAgentAction(db, snapshot.actions[0].id);
     expect((db.prepare('SELECT COUNT(*) AS count FROM jobs WHERE kind = ?').get('codex_scan') as { count: number }).count).toBe(1);
   });
 
@@ -285,17 +329,17 @@ describe('persistent conversational agent actions', () => {
       }],
     }]);
 
-    await sendConversationMessage(db, { threadId: thread.id, content: 'Accept it' }, { plannerProvider: provider });
+    const snapshot = await sendConversationMessage(db, { threadId: thread.id, content: 'Accept it' }, { plannerProvider: provider });
     expect((db.prepare('SELECT status FROM views WHERE id = ?').get(viewId) as { status: string }).status).toBe('proposed');
 
-    await confirmAgentAction(db, 'action_accept');
+    await confirmAgentAction(db, snapshot.actions[0].id);
     expect((db.prepare('SELECT status FROM views WHERE id = ?').get(viewId) as { status: string }).status).toBe('accepted');
   });
 
   it('cancelling an action does not execute it', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
-    persistAgentTurnPlan(db, {
+    const persisted = persistAgentTurnPlan(db, {
       threadId: thread.id,
       plan: {
         reply: 'Proposed annotation.',
@@ -313,8 +357,9 @@ describe('persistent conversational agent actions', () => {
       },
     });
 
-    cancelAgentAction(db, 'action_cancel_annotation');
-    await confirmAgentAction(db, 'action_cancel_annotation');
+    const actionId = persisted.actions[0].id;
+    cancelAgentAction(db, actionId);
+    await confirmAgentAction(db, actionId);
 
     expect((db.prepare('SELECT COUNT(*) AS count FROM user_annotations').get() as { count: number }).count).toBe(0);
     expect(getConversationSnapshot(db, thread.id).actions[0].status).toBe('cancelled');
@@ -323,7 +368,7 @@ describe('persistent conversational agent actions', () => {
   it('confirming an action executes exactly once and replay is idempotent', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
-    persistAgentTurnPlan(db, {
+    const persisted = persistAgentTurnPlan(db, {
       threadId: thread.id,
       plan: {
         reply: 'Proposed annotation.',
@@ -341,8 +386,9 @@ describe('persistent conversational agent actions', () => {
       },
     });
 
-    await confirmAgentAction(db, 'action_once');
-    await confirmAgentAction(db, 'action_once');
+    const actionId = persisted.actions[0].id;
+    await confirmAgentAction(db, actionId);
+    await confirmAgentAction(db, actionId);
 
     expect((db.prepare('SELECT COUNT(*) AS count FROM user_annotations').get() as { count: number }).count).toBe(1);
     expect(getConversationSnapshot(db, thread.id).actions[0].status).toBe('succeeded');
@@ -351,7 +397,7 @@ describe('persistent conversational agent actions', () => {
   it('claims confirmed action execution atomically under concurrent confirmation', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
-    persistAgentTurnPlan(db, {
+    const persisted = persistAgentTurnPlan(db, {
       threadId: thread.id,
       plan: {
         reply: 'Proposed annotation.',
@@ -369,23 +415,24 @@ describe('persistent conversational agent actions', () => {
       },
     });
 
+    const actionId = persisted.actions[0].id;
     await Promise.all([
-      confirmAgentAction(db, 'action_concurrent_once'),
-      confirmAgentAction(db, 'action_concurrent_once'),
+      confirmAgentAction(db, actionId),
+      confirmAgentAction(db, actionId),
     ]);
 
     const annotations = db.prepare('SELECT COUNT(*) AS count FROM user_annotations').get() as { count: number };
     const action = getConversationSnapshot(db, thread.id).actions[0];
     expect(annotations.count).toBe(1);
     expect(action.status).toBe('succeeded');
-    expect(action.idempotencyKey).toBe('action_concurrent_once');
+    expect(action.idempotencyKey).toBe(actionId);
     expect(action.executionToken).toBeTruthy();
   });
 
   it('replays annotation action side effects by action id after an interrupted status reset', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
-    persistAgentTurnPlan(db, {
+    const persisted = persistAgentTurnPlan(db, {
       threadId: thread.id,
       plan: {
         reply: 'Proposed annotation.',
@@ -403,26 +450,27 @@ describe('persistent conversational agent actions', () => {
       },
     });
 
-    await confirmAgentAction(db, 'action_replay_annotation');
+    const actionId = persisted.actions[0].id;
+    await confirmAgentAction(db, actionId);
     db.prepare(`
       UPDATE agent_actions
       SET status = 'approved', result_json = NULL, error = NULL, finished_at = NULL,
           execution_token = NULL, execution_started_at = NULL
       WHERE id = ?
-    `).run('action_replay_annotation');
-    await confirmAgentAction(db, 'action_replay_annotation');
+    `).run(actionId);
+    await confirmAgentAction(db, actionId);
 
     const annotations = db.prepare('SELECT id FROM user_annotations').all() as Array<{ id: string }>;
     const action = getConversationSnapshot(db, thread.id).actions[0];
     expect(annotations).toHaveLength(1);
-    expect(annotations[0].id).toMatch(/^ann_agent_/);
+    expect(annotations[0].id).toBe(idempotentActionObjectIdForTest('ann_agent', actionId));
     expect(action.status).toBe('succeeded');
   });
 
   it('replays scan action job creation by action id after an interrupted status reset', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
-    persistAgentTurnPlan(db, {
+    const persisted = persistAgentTurnPlan(db, {
       threadId: thread.id,
       plan: {
         reply: 'Proposed scan.',
@@ -440,19 +488,20 @@ describe('persistent conversational agent actions', () => {
       },
     });
 
-    await confirmAgentAction(db, 'action_replay_scan');
+    const actionId = persisted.actions[0].id;
+    await confirmAgentAction(db, actionId);
     db.prepare(`
       UPDATE agent_actions
       SET status = 'approved', result_json = NULL, error = NULL, finished_at = NULL,
           execution_token = NULL, execution_started_at = NULL
       WHERE id = ?
-    `).run('action_replay_scan');
-    await confirmAgentAction(db, 'action_replay_scan');
+    `).run(actionId);
+    await confirmAgentAction(db, actionId);
 
     const jobs = db.prepare('SELECT id FROM jobs WHERE kind = ?').all('codex_scan') as Array<{ id: string }>;
     const action = getConversationSnapshot(db, thread.id).actions[0];
     expect(jobs).toHaveLength(1);
-    expect(jobs[0].id).toMatch(/^job_agent_/);
+    expect(jobs[0].id).toBe(idempotentActionObjectIdForTest('job_agent', actionId));
     expect(action.status).toBe('succeeded');
   });
 
@@ -474,3 +523,8 @@ describe('persistent conversational agent actions', () => {
     await expect(confirmAgentAction(db, 'action_bad')).rejects.toThrow();
   });
 });
+
+function idempotentActionObjectIdForTest(prefix: string, actionId: string): string {
+  const digest = crypto.createHash('sha256').update(actionId).digest('hex').slice(0, 24);
+  return `${prefix}_${digest}`;
+}
