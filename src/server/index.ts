@@ -11,6 +11,7 @@ import {
 } from '../agent/scanService.js';
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
+import { createExtractionJob, ExtractionAdapterRegistry, resumeExtractionJob } from '../extract/runtime.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
 import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
 import { startInProcessJobWorker } from '../jobs/worker.js';
@@ -33,6 +34,7 @@ const db = openDatabase(process.env.TABATLAS_DB);
 const app = Fastify({ logger: true });
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
 const codexProviders = new Map<string, CodexSdkProvider>();
+const extractionRegistry = new ExtractionAdapterRegistry();
 const jobWorker = startInProcessJobWorker(db, {
   codex_scan: async (jobId, context) => {
     const job = getJobSnapshot(db, jobId);
@@ -40,6 +42,13 @@ const jobWorker = startInProcessJobWorker(db, {
     const reasoningEffort = readReasoningEffort(input.reasoningEffort);
     const provider = getCodexProvider({ reasoningEffort });
     await resumeCodexScanJob(db, provider, jobId, {
+      maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
+      maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
+      signal: context.signal,
+    });
+  },
+  metadata_fetch: async (jobId, context) => {
+    await resumeExtractionJob(db, extractionRegistry, jobId, {
       maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
       maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
       signal: context.signal,
@@ -77,6 +86,18 @@ app.post('/api/extract/run', async (request, reply) => {
     ? body.resourceIds.filter((item): item is string => typeof item === 'string')
     : undefined;
   return reply.send(runDeterministicExtraction(db, resourceIds));
+});
+
+app.post('/api/jobs/extraction', async (request, reply) => {
+  const body = asRecord(request.body);
+  const result = createExtractionJob(db, {
+    resourceIds: Array.isArray(body.resourceIds) ? body.resourceIds.filter((item): item is string => typeof item === 'string') : undefined,
+    recipeIds: Array.isArray(body.recipeIds) ? body.recipeIds.filter((item): item is string => typeof item === 'string') : undefined,
+    force: Boolean(body.force),
+    limit: typeof body.limit === 'number' ? body.limit : undefined,
+    requestedBy: typeof body.requestedBy === 'string' ? body.requestedBy : undefined,
+  });
+  return reply.code(202).send(result);
 });
 
 app.get('/api/status', async () => {
@@ -208,6 +229,13 @@ app.post('/api/jobs/:jobId/resume', async (request, reply) => {
   const params = request.params as { jobId: string };
   const body = asRecord(request.body);
   const job = getJobSnapshot(db, params.jobId);
+  if (job.kind === 'metadata_fetch') {
+    const result = await resumeExtractionJob(db, extractionRegistry, params.jobId, {
+      maxItems: typeof body.maxItems === 'number' ? body.maxItems : undefined,
+      maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
+    });
+    return reply.send(result);
+  }
   if (job.kind !== 'codex_scan') return reply.status(400).send({ ok: false, error: `Unsupported job kind: ${job.kind}` });
   const input = asRecord(job.input);
   const reasoningEffort = readReasoningEffort(input.reasoningEffort);
