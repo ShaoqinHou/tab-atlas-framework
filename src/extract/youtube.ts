@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type Database from 'better-sqlite3';
 import { normalizeUrl } from '../normalize/url.js';
 import { refreshResourceSearchText } from '../resources/searchIndex.js';
@@ -52,6 +54,8 @@ type YouTubeTranscriptSegmentValue = {
   text: string;
 };
 
+type YtDlpRunner = (executable: string, args: string[], context: ExtractionAdapterContext) => Promise<unknown>;
+
 export function parseYouTubeUrl(rawUrl: string): ParsedYouTubeUrl | null {
   const n = normalizeUrl(rawUrl);
   if (!n.kind.startsWith('youtube_')) return null;
@@ -75,6 +79,76 @@ export function buildYouTubeMetadataOnlyArtifact(rawUrl: string, title?: string)
     transcript,
     extractionQuality: deriveYouTubeQuality({ transcript }),
   });
+}
+
+export function createYouTubeLayeredEvidenceAdapter(
+  policyInput: Partial<YouTubeAdapterPolicyValue> = {},
+  fetchOptions: Omit<YouTubeOfficialMetadataFetchOptions, 'apiKey'> = {},
+  runner: YtDlpRunner = runYtDlpJson,
+): ExtractionAdapter {
+  const policy = YouTubeAdapterPolicy.parse(policyInput);
+  return {
+    id: 'youtube.layered-evidence',
+    version: '1.0.0',
+    recipeIds: [EXTRACTION_RECIPES.youtubeStandard],
+    supports: request => request.urlKind.startsWith('youtube_') && Boolean(parseYouTubeUrl(request.canonicalUrl)?.videoId),
+    async run(request, context) {
+      const parsed = parseYouTubeUrl(request.canonicalUrl);
+      if (!parsed?.videoId) return notAvailableResult(request, this.id, this.version, 'missing video ID');
+      if (!policy.officialDataApi.enabled && !policy.localYtDlp.enabled) {
+        return disabledAdapterResult(request, this.id, this.version, 'all YouTube evidence adapters disabled');
+      }
+
+      let metadata = buildYouTubeMetadataOnlyArtifact(request.canonicalUrl, request.title);
+      const warnings: string[] = [];
+      if (!metadata) return notAvailableResult(request, this.id, this.version, 'invalid YouTube URL');
+
+      if (policy.officialDataApi.enabled) {
+        const apiKey = process.env[policy.officialDataApi.apiKeyEnvironmentVariable];
+        if (!apiKey) {
+          warnings.push('official Data API missing YouTube API key');
+        } else {
+          const batch = await fetchYouTubeVideoMetadataBatch([parsed.videoId], { ...fetchOptions, apiKey });
+          warnings.push(...batch.warnings);
+          const official = batch.videos.get(parsed.videoId);
+          if (batch.status === 'complete' && official) {
+            metadata = mergeYouTubeMetadata(official, metadata);
+            warnings.push('official metadata layer complete');
+          } else if (batch.status !== 'complete') {
+            warnings.push(`official metadata layer ${batch.status}`);
+          }
+        }
+      } else {
+        warnings.push('official metadata layer disabled');
+      }
+
+      if (policy.localYtDlp.enabled) {
+        try {
+          const args = buildYtDlpMetadataArgs(request.canonicalUrl, policy);
+          const info = await runner(policy.localYtDlp.executable, args, context);
+          const local = mapYtDlpMetadata(request, info, policy);
+          metadata = mergeYouTubeMetadata(metadata, local);
+          warnings.push(local.transcript.status === 'available_artifact'
+            ? 'local yt-dlp transcript layer complete'
+            : `local yt-dlp transcript layer ${local.transcript.status}`);
+        } catch (error) {
+          warnings.push(`local yt-dlp layer failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (metadata.extractionQuality === 'metadata_only' && !metadata.title && !metadata.descriptionText) {
+            return {
+              adapterId: this.id,
+              status: 'failed_adapter',
+              artifacts: [],
+              warnings,
+            };
+          }
+        }
+      } else {
+        warnings.push('local yt-dlp transcript layer disabled');
+      }
+
+      return metadataResult(request, this.id, this.version, metadata, warnings);
+    },
+  };
 }
 
 export function createYouTubeOfficialMetadataAdapter(
@@ -172,7 +246,7 @@ export function mapYouTubeDataApiItem(raw: unknown): YouTubeMetadataArtifactValu
 
 export function createYouTubeYtDlpAdapter(
   policyInput: Partial<YouTubeAdapterPolicyValue> = {},
-  runner: (executable: string, args: string[], context: ExtractionAdapterContext) => Promise<unknown> = runYtDlpJson,
+  runner: YtDlpRunner = runYtDlpJson,
 ): ExtractionAdapter {
   const policy = YouTubeAdapterPolicy.parse(policyInput);
   return {
@@ -193,12 +267,15 @@ export function createYouTubeYtDlpAdapter(
 export function buildYtDlpMetadataArgs(url: string, policyInput: Partial<YouTubeAdapterPolicyValue> = {}): string[] {
   const policy = YouTubeAdapterPolicy.parse(policyInput);
   const args = [
+    '--ignore-config',
     '--dump-single-json',
     '--skip-download',
     '--no-playlist',
     '--write-sub',
     '--sub-langs',
     policy.localYtDlp.preferredLanguages.join(','),
+    '--sub-format',
+    'json3/vtt/srv3/best',
   ];
   if (policy.localYtDlp.allowAutomaticCaptions) args.push('--write-auto-sub');
   args.push(url);
@@ -208,6 +285,7 @@ export function buildYtDlpMetadataArgs(url: string, policyInput: Partial<YouTube
 
 export function assertNoMediaDownloadArgs(args: string[]): void {
   const forbidden = new Set(['--extract-audio', '--audio-format', '--recode-video', '--download-sections', '-f', '--format']);
+  if (!args.includes('--ignore-config')) throw new Error('yt-dlp args must include --ignore-config');
   if (!args.includes('--skip-download')) throw new Error('yt-dlp args must include --skip-download');
   for (const arg of args) {
     if (forbidden.has(arg)) throw new Error(`yt-dlp media download argument is not allowed: ${arg}`);
@@ -247,10 +325,12 @@ export function selectYtDlpTranscript(
   policyInput: Partial<YouTubeAdapterPolicyValue> = {},
 ): YouTubeTranscriptArtifactValue {
   const policy = YouTubeAdapterPolicy.parse(policyInput);
-  const manual = selectTranscriptFromCollection(asRecord(info.subtitles), false);
+  const manual = selectTranscriptFromCollection(asRecord(info.subtitles), false, policy)
+    ?? selectTranscriptFromCollection(asRecord(info.requested_subtitles), false, policy);
   if (manual) return manual;
   if (policy.localYtDlp.allowAutomaticCaptions) {
-    const automatic = selectTranscriptFromCollection(asRecord(info.automatic_captions), true);
+    const automatic = selectTranscriptFromCollection(asRecord(info.automatic_captions), true, policy)
+      ?? selectTranscriptFromCollection(asRecord(info.requested_subtitles), true, policy);
     if (automatic) return automatic;
   }
   return {
@@ -371,7 +451,9 @@ function metadataResult(
       jsonPayload: metadata,
       confidence: metadata.transcript.status === 'available_artifact' ? 0.95 : 0.82,
       provenance: {
-        trust: adapterId === 'youtube.official-data-api' ? 'official_api' : 'local_adapter',
+        trust: adapterId === 'youtube.official-data-api'
+          ? 'official_api'
+          : metadata.transcript.provenance === 'optional_local_ytdlp' ? 'local_adapter' : 'public_metadata',
         adapterId,
         adapterVersion,
         fetchedAt: new Date().toISOString(),
@@ -380,6 +462,31 @@ function metadataResult(
       },
     }],
   };
+}
+
+function mergeYouTubeMetadata(
+  base: YouTubeMetadataArtifactValue,
+  layer: YouTubeMetadataArtifactValue,
+): YouTubeMetadataArtifactValue {
+  const transcript = layer.transcript.status === 'available_artifact' ? layer.transcript : base.transcript;
+  const descriptionText = base.descriptionText ?? layer.descriptionText;
+  return YouTubeMetadataArtifact.parse({
+    videoId: base.videoId || layer.videoId,
+    playlistId: base.playlistId ?? layer.playlistId,
+    canonicalUrl: base.canonicalUrl || layer.canonicalUrl,
+    title: base.title ?? layer.title,
+    channelId: base.channelId ?? layer.channelId,
+    channelTitle: base.channelTitle ?? layer.channelTitle,
+    descriptionText,
+    durationSeconds: base.durationSeconds ?? layer.durationSeconds,
+    publishedAt: base.publishedAt ?? layer.publishedAt,
+    thumbnailUrl: base.thumbnailUrl ?? layer.thumbnailUrl,
+    tags: base.tags.length ? base.tags : layer.tags,
+    chapters: base.chapters.length ? base.chapters : layer.chapters,
+    linksMentioned: [...new Set([...base.linksMentioned, ...layer.linksMentioned])],
+    transcript,
+    extractionQuality: deriveYouTubeQuality({ descriptionText, transcript }),
+  });
 }
 
 function disabledAdapterResult(
@@ -500,13 +607,20 @@ export function extractLinks(text: string): string[] {
   return [...links];
 }
 
-function selectTranscriptFromCollection(collection: Record<string, unknown>, isAutoGenerated: boolean): YouTubeTranscriptArtifactValue | null {
-  for (const [language, value] of Object.entries(collection)) {
+function selectTranscriptFromCollection(
+  collection: Record<string, unknown>,
+  isAutoGenerated: boolean,
+  policy: YouTubeAdapterPolicyValue,
+): YouTubeTranscriptArtifactValue | null {
+  for (const [language, value] of orderedTranscriptEntries(collection, policy.localYtDlp.preferredLanguages)) {
     const candidates = Array.isArray(value) ? value : [value];
     for (const candidate of candidates) {
       const record = asRecord(candidate);
-      const segments = readSegments(record.segments);
-      const plainText = normalizeTranscriptText(readString(record.data) ?? readString(record.text) ?? segments.map(segment => segment.text).join(' '));
+      const ext = readString(record.ext) ?? readString(record.format) ?? '';
+      const parsed = parseSubtitlePayload(readString(record.data) ?? readString(record.text), ext);
+      const explicitSegments = readSegments(record.segments);
+      const segments = parsed.length ? parsed : explicitSegments;
+      const plainText = normalizeTranscriptText(segments.map(segment => segment.text).join(' ') || readString(record.data) || readString(record.text) || '');
       if (!plainText) continue;
       return {
         status: 'available_artifact',
@@ -519,6 +633,98 @@ function selectTranscriptFromCollection(collection: Record<string, unknown>, isA
     }
   }
   return null;
+}
+
+function orderedTranscriptEntries(
+  collection: Record<string, unknown>,
+  preferredLanguages: string[],
+): Array<[string, unknown]> {
+  const entries = Object.entries(collection);
+  const rank = (language: string): number => {
+    const index = preferredLanguages.findIndex(pattern => languageMatches(pattern, language));
+    return index === -1 ? preferredLanguages.length : index;
+  };
+  return entries.sort(([left], [right]) => rank(left) - rank(right) || left.localeCompare(right));
+}
+
+function languageMatches(pattern: string, language: string): boolean {
+  if (pattern === language) return true;
+  if (pattern.endsWith('.*')) return language === pattern.slice(0, -2) || language.startsWith(pattern.slice(0, -1));
+  return false;
+}
+
+function parseSubtitlePayload(value: string | undefined, ext: string): YouTubeTranscriptSegmentValue[] {
+  if (!value) return [];
+  const normalizedExt = ext.toLowerCase();
+  if (normalizedExt.includes('json3')) return parseJson3Subtitle(value);
+  if (normalizedExt.includes('vtt') || value.includes('-->')) return parseTimedTextSubtitle(value);
+  if (normalizedExt.includes('srv') || value.includes('<text ')) return parseSrvSubtitle(value);
+  return [];
+}
+
+function parseJson3Subtitle(value: string): YouTubeTranscriptSegmentValue[] {
+  try {
+    const payload = JSON.parse(value) as { events?: unknown[] };
+    return (payload.events ?? []).flatMap(event => {
+      const record = asRecord(event);
+      const startMs = typeof record.tStartMs === 'number' ? record.tStartMs : undefined;
+      const durationMs = typeof record.dDurationMs === 'number' ? record.dDurationMs : undefined;
+      const segs = Array.isArray(record.segs) ? record.segs : [];
+      const text = normalizeTranscriptText(segs.map(seg => {
+        const value = asRecord(seg).utf8;
+        return typeof value === 'string' ? value : '';
+      }).join(''));
+      if (startMs === undefined || !text) return [];
+      return [{
+        startSeconds: startMs / 1000,
+        durationSeconds: durationMs === undefined ? undefined : durationMs / 1000,
+        text,
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function parseTimedTextSubtitle(value: string): YouTubeTranscriptSegmentValue[] {
+  const lines = value.replace(/\r/g, '').split('\n');
+  const segments: YouTubeTranscriptSegmentValue[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const timing = lines[index].match(/^\s*([\d:.]+)\s+-->\s+([\d:.]+).*$/);
+    if (!timing) continue;
+    const textLines: string[] = [];
+    index += 1;
+    while (index < lines.length && lines[index].trim()) {
+      const line = lines[index].trim();
+      if (!/^\d+$/.test(line)) textLines.push(stripSubtitleTags(line));
+      index += 1;
+    }
+    const text = normalizeTranscriptText(textLines.join(' '));
+    if (!text) continue;
+    const startSeconds = parseSubtitleTimestamp(timing[1]);
+    const endSeconds = parseSubtitleTimestamp(timing[2]);
+    segments.push({
+      startSeconds,
+      durationSeconds: endSeconds > startSeconds ? endSeconds - startSeconds : undefined,
+      text: decodeHtmlEntities(text),
+    });
+  }
+  return segments;
+}
+
+function parseSrvSubtitle(value: string): YouTubeTranscriptSegmentValue[] {
+  return [...value.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi)].flatMap(match => {
+    const attrs = match[1];
+    const start = Number(readXmlAttribute(attrs, 'start'));
+    const duration = Number(readXmlAttribute(attrs, 'dur'));
+    const text = normalizeTranscriptText(decodeHtmlEntities(stripSubtitleTags(match[2])));
+    if (!Number.isFinite(start) || !text) return [];
+    return [{
+      startSeconds: start,
+      durationSeconds: Number.isFinite(duration) ? duration : undefined,
+      text,
+    }];
+  });
 }
 
 function readSegments(value: unknown): YouTubeTranscriptSegmentValue[] {
@@ -546,6 +752,31 @@ function parseTimestamp(value: string): number {
   return value.split(':').map(Number).reduce((total, part) => total * 60 + part, 0);
 }
 
+function parseSubtitleTimestamp(value: string): number {
+  const parts = value.replace(',', '.').split(':').map(Number);
+  if (parts.some(part => !Number.isFinite(part))) return 0;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
+
+function stripSubtitleTags(value: string): string {
+  return value.replace(/<[^>]+>/g, ' ');
+}
+
+function readXmlAttribute(attrs: string, name: string): string | undefined {
+  const match = attrs.match(new RegExp(`\\b${name}=["']([^"']+)["']`, 'i'));
+  return match?.[1];
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)));
+}
+
 function missingIds(ids: string[], videos: Map<string, YouTubeMetadataArtifactValue>): string[] {
   return ids.filter(id => !videos.has(id)).map(id => `video not returned: ${id}`);
 }
@@ -564,6 +795,40 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function isListLikeTitle(title: string): boolean {
   return /\b(\d+\s+|top\s+\d+|list of|papers|tools|resources|chapters|lessons)\b/i.test(title);
+}
+
+async function attachYtDlpSubtitleFiles(raw: unknown, scratchDirectory: string): Promise<unknown> {
+  if (typeof raw !== 'object' || raw === null) return raw;
+  const info = raw as Record<string, unknown>;
+  for (const key of ['requested_subtitles', 'subtitles', 'automatic_captions']) {
+    const collection = asRecord(info[key]);
+    for (const value of Object.values(collection)) {
+      const candidates = Array.isArray(value) ? value : [value];
+      for (const candidate of candidates) {
+        const record = asRecord(candidate);
+        if (readString(record.data) || readString(record.text)) continue;
+        const filePath = readString(record.filepath) ?? readString(record.filename) ?? readString(record._filename);
+        if (!filePath) continue;
+        const resolved = resolveScratchFile(scratchDirectory, filePath);
+        if (!resolved) continue;
+        try {
+          record.data = await fs.readFile(resolved, 'utf8');
+          record.ext ??= path.extname(resolved).replace(/^\./, '');
+        } catch {
+          // A missing optional subtitle file should not fail the metadata layer.
+        }
+      }
+    }
+  }
+  return info;
+}
+
+function resolveScratchFile(scratchDirectory: string, filePath: string): string | null {
+  const scratch = path.resolve(scratchDirectory);
+  const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(scratch, filePath);
+  const relative = path.relative(scratch, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  return resolved;
 }
 
 async function runYtDlpJson(executable: string, args: string[], context: ExtractionAdapterContext): Promise<unknown> {
@@ -596,7 +861,7 @@ async function runYtDlpJson(executable: string, args: string[], context: Extract
         return;
       }
       try {
-        resolve(JSON.parse(stdout));
+        void attachYtDlpSubtitleFiles(JSON.parse(stdout), context.scratchDirectory).then(resolve, reject);
       } catch (error) {
         reject(error);
       }

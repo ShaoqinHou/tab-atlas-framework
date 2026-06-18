@@ -22,7 +22,7 @@ import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { createExtractionJob, ExtractionAdapterRegistry, resumeExtractionJob } from '../extract/runtime.js';
 import { createGenericWebpageAdapter } from '../extract/webpage.js';
-import { createYouTubeOfficialMetadataAdapter, createYouTubeYtDlpAdapter, importManualYouTubeTranscript } from '../extract/youtube.js';
+import { createYouTubeLayeredEvidenceAdapter, importManualYouTubeTranscript } from '../extract/youtube.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
 import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
 import { startInProcessJobWorker } from '../jobs/worker.js';
@@ -513,22 +513,16 @@ function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningE
 
 function registerExtractionAdapters(registry: ExtractionAdapterRegistry): void {
   registry.register(createGenericWebpageAdapter());
-  if (process.env.TABATLAS_YOUTUBE_DATA_API_ENABLED === '1') {
-    registry.register(createYouTubeOfficialMetadataAdapter({
-      officialDataApi: {
-        enabled: true,
-        apiKeyEnvironmentVariable: process.env.TABATLAS_YOUTUBE_API_KEY_ENV ?? 'YOUTUBE_API_KEY',
-      },
-    }));
-  }
-  if (process.env.TABATLAS_YTDLP_ENABLED === '1') {
-    registry.register(createYouTubeYtDlpAdapter({
-      localYtDlp: {
-        enabled: true,
-        executable: process.env.TABATLAS_YTDLP_EXECUTABLE ?? 'yt-dlp',
-        allowAutomaticCaptions: process.env.TABATLAS_YTDLP_AUTO_CAPTIONS === '1',
-        preferredLanguages: (process.env.TABATLAS_YTDLP_LANGS ?? 'en.*').split(',').map(item => item.trim()).filter(Boolean),
-      },
-    }));
-  }
+  registry.register(createYouTubeLayeredEvidenceAdapter({
+    officialDataApi: {
+      enabled: process.env.TABATLAS_YOUTUBE_DATA_API_ENABLED === '1',
+      apiKeyEnvironmentVariable: process.env.TABATLAS_YOUTUBE_API_KEY_ENV ?? 'YOUTUBE_API_KEY',
+    },
+    localYtDlp: {
+      enabled: process.env.TABATLAS_YTDLP_ENABLED === '1',
+      executable: process.env.TABATLAS_YTDLP_EXECUTABLE ?? 'yt-dlp',
+      allowAutomaticCaptions: process.env.TABATLAS_YTDLP_AUTO_CAPTIONS === '1',
+      preferredLanguages: (process.env.TABATLAS_YTDLP_LANGS ?? 'en.*').split(',').map(item => item.trim()).filter(Boolean),
+    },
+  }));
 }
