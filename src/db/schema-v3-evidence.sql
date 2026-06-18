@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS agent_actions (
   action_kind TEXT NOT NULL,
   approval TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'proposed',
+  idempotency_key TEXT NOT NULL DEFAULT '',
+  execution_token TEXT,
+  execution_started_at TEXT,
   action_json TEXT NOT NULL,
   result_json TEXT,
   error TEXT,
@@ -69,3 +72,7 @@ CREATE TABLE IF NOT EXISTS agent_actions (
 
 CREATE INDEX IF NOT EXISTS idx_agent_actions_thread_status
   ON agent_actions(thread_id, status, created_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_actions_idempotency_key
+  ON agent_actions(idempotency_key)
+  WHERE idempotency_key <> '';

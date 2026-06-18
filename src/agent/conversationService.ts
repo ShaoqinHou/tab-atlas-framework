@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import {
@@ -12,7 +13,7 @@ import { runStructured } from '../llm/runStructured.js';
 import type { LlmProvider } from '../llm/types.js';
 import { runAgentCommand } from './commandService.js';
 import { createCodexScanJob } from './scanService.js';
-import { addUserAnnotation } from '../annotations/service.js';
+import { addUserAnnotation, getUserAnnotationById } from '../annotations/service.js';
 import { getReviewNext } from '../review/service.js';
 import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
@@ -45,6 +46,9 @@ export interface AgentActionRecord {
   action: AgentActionValue;
   result?: unknown;
   error?: string;
+  idempotencyKey: string;
+  executionToken?: string;
+  executionStartedAt?: string;
   createdAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -204,8 +208,8 @@ export function persistAgentTurnPlan(
   const now = new Date().toISOString();
   const insert = db.prepare(`
     INSERT INTO agent_actions
-      (id, thread_id, message_id, action_kind, approval, status, action_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?)
+      (id, thread_id, message_id, action_kind, approval, status, idempotency_key, action_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?, ?, ?)
   `);
   const tx = db.transaction(() => {
     for (const action of plan.actions) {
@@ -217,6 +221,7 @@ export function persistAgentTurnPlan(
         input.assistantMessageId ?? null,
         action.kind,
         action.approval,
+        action.id,
         JSON.stringify(action),
         now,
         now,
@@ -236,7 +241,7 @@ export async function confirmAgentAction(
   if (record.status === 'succeeded' || record.status === 'failed') return record;
   if (record.status === 'cancelled') return record;
   if (record.action.approval !== 'confirm') return runPersistedAgentAction(db, actionId, options);
-  updateAgentAction(db, { actionId, status: 'approved' });
+  approveAgentAction(db, actionId);
   return runPersistedAgentAction(db, actionId, options);
 }
 
@@ -252,14 +257,18 @@ export async function runPersistedAgentAction(
   actionId: string,
   options: AgentActionExecutionOptions = {},
 ): Promise<AgentActionRecord> {
-  const record = getAgentAction(db, actionId);
-  if (record.status === 'succeeded' || record.status === 'failed' || record.status === 'cancelled') return record;
+  const claim = claimAgentActionForExecution(db, actionId);
+  if (!claim.claimed) return claim.record;
   try {
-    updateAgentAction(db, { actionId, status: 'running' });
-    const result = await executeAgentAction(db, record.action, options);
-    updateAgentAction(db, { actionId, status: 'succeeded', result });
+    const result = await executeAgentAction(db, claim.record.action, options);
+    finishClaimedAgentAction(db, { actionId, executionToken: claim.executionToken, status: 'succeeded', result });
   } catch (error) {
-    updateAgentAction(db, { actionId, status: 'failed', error: error instanceof Error ? error.message : String(error) });
+    finishClaimedAgentAction(db, {
+      actionId,
+      executionToken: claim.executionToken,
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   return getAgentAction(db, actionId);
 }
@@ -303,16 +312,24 @@ export async function executeAgentAction(
         resourceIds: action.resourceIds,
         limit: action.limit,
         force: action.force,
+      }, {
+        jobId: idempotentActionObjectId('job_agent', action.id),
       });
     case 'add_annotation':
-      return addUserAnnotation(db, {
-        targetKind: 'resource',
-        targetId: action.resourceId,
-        tags: action.tags,
-        description: action.description,
-        decision: action.decision,
-        source: 'agent_chat',
-      });
+      {
+        const annotationId = idempotentActionObjectId('ann_agent', action.id);
+        const existing = getUserAnnotationById(db, annotationId);
+        if (existing) return existing;
+        return addUserAnnotation(db, {
+          id: annotationId,
+          targetKind: 'resource',
+          targetId: action.resourceId,
+          tags: action.tags,
+          description: action.description,
+          decision: action.decision,
+          source: 'agent_chat',
+        });
+      }
     case 'explain_membership':
       return explainMembership(db, {
         resourceId: action.resourceId,
@@ -354,6 +371,86 @@ export function updateAgentAction(
   return action;
 }
 
+function approveAgentAction(db: Database.Database, actionId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE agent_actions
+    SET status = 'approved', updated_at = ?
+    WHERE id = ? AND approval = 'confirm' AND status = 'proposed'
+  `).run(now, actionId);
+}
+
+type AgentActionClaim =
+  | { claimed: true; record: AgentActionRecord; executionToken: string }
+  | { claimed: false; record: AgentActionRecord };
+
+function claimAgentActionForExecution(db: Database.Database, actionId: string): AgentActionClaim {
+  const tx = db.transaction((): AgentActionClaim => {
+    const before = getAgentAction(db, actionId);
+    if (before.status === 'succeeded' || before.status === 'failed' || before.status === 'cancelled' || before.status === 'running') {
+      return { claimed: false, record: before };
+    }
+    if (before.action.approval === 'confirm' && before.status !== 'approved') {
+      return { claimed: false, record: before };
+    }
+    if (before.status !== 'proposed' && before.status !== 'approved') {
+      return { claimed: false, record: before };
+    }
+    const now = new Date().toISOString();
+    const executionToken = crypto.randomUUID();
+    const changed = db.prepare(`
+      UPDATE agent_actions
+      SET status = 'running',
+          execution_token = ?,
+          execution_started_at = ?,
+          idempotency_key = CASE WHEN idempotency_key = '' THEN id ELSE idempotency_key END,
+          updated_at = ?
+      WHERE id = ?
+        AND status = ?
+        AND (
+          approval <> 'confirm'
+          OR status = 'approved'
+        )
+    `).run(executionToken, now, now, actionId, before.status).changes;
+    const after = getAgentAction(db, actionId);
+    return changed === 1
+      ? { claimed: true, record: after, executionToken }
+      : { claimed: false, record: after };
+  });
+  return tx();
+}
+
+function finishClaimedAgentAction(
+  db: Database.Database,
+  input: {
+    actionId: string;
+    executionToken: string;
+    status: 'succeeded' | 'failed';
+    result?: unknown;
+    error?: string;
+  },
+): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE agent_actions
+    SET status = ?, result_json = ?, error = ?, updated_at = ?, finished_at = ?
+    WHERE id = ? AND execution_token = ? AND status = 'running'
+  `).run(
+    input.status,
+    input.result === undefined ? null : JSON.stringify(input.result),
+    input.error ?? null,
+    now,
+    now,
+    input.actionId,
+    input.executionToken,
+  );
+}
+
+function idempotentActionObjectId(prefix: string, actionId: string): string {
+  const digest = crypto.createHash('sha256').update(actionId).digest('hex').slice(0, 24);
+  return `${prefix}_${digest}`;
+}
+
 export function listConversationMessages(
   db: Database.Database,
   threadId: string,
@@ -385,7 +482,8 @@ export function listConversationMessages(
 
 export function listAgentActions(db: Database.Database, threadId: string): AgentActionRecord[] {
   const rows = db.prepare(`
-    SELECT id, thread_id, message_id, action_kind, approval, status, action_json, result_json, error, created_at, updated_at, finished_at
+    SELECT id, thread_id, message_id, action_kind, approval, status, idempotency_key, execution_token,
+           execution_started_at, action_json, result_json, error, created_at, updated_at, finished_at
     FROM agent_actions
     WHERE thread_id = ?
     ORDER BY created_at, id
@@ -395,7 +493,8 @@ export function listAgentActions(db: Database.Database, threadId: string): Agent
 
 export function getAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
   const row = db.prepare(`
-    SELECT id, thread_id, message_id, action_kind, approval, status, action_json, result_json, error, created_at, updated_at, finished_at
+    SELECT id, thread_id, message_id, action_kind, approval, status, idempotency_key, execution_token,
+           execution_started_at, action_json, result_json, error, created_at, updated_at, finished_at
     FROM agent_actions
     WHERE id = ?
   `).get(actionId) as AgentActionRow | undefined;
@@ -410,6 +509,9 @@ type AgentActionRow = {
   action_kind: AgentActionValue['kind'];
   approval: AgentActionValue['approval'];
   status: AgentActionRecord['status'];
+  idempotency_key: string;
+  execution_token: string | null;
+  execution_started_at: string | null;
   action_json: string;
   result_json: string | null;
   error: string | null;
@@ -429,6 +531,9 @@ function actionFromRow(row: AgentActionRow): AgentActionRecord {
     action: AgentAction.parse(parseJson(row.action_json)),
     result: row.result_json ? parseJson(row.result_json) : undefined,
     error: row.error ?? undefined,
+    idempotencyKey: row.idempotency_key || row.id,
+    executionToken: row.execution_token ?? undefined,
+    executionStartedAt: row.execution_started_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     finishedAt: row.finished_at ?? undefined,

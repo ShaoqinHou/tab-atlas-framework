@@ -213,10 +213,15 @@ export async function runCodexResourceScan(
   return result;
 }
 
-export function createCodexScanJob(db: Database.Database, input: RunCodexResourceScanInput): CodexScanJobCreateResult {
+export function createCodexScanJob(
+  db: Database.Database,
+  input: RunCodexResourceScanInput,
+  options: { jobId?: string } = {},
+): CodexScanJobCreateResult {
   const parsed = RunCodexResourceScanInput.parse(input);
   const selection = selectResourcesForScan(db, parsed);
   const job = createJob(db, {
+    id: options.jobId,
     kind: 'codex_scan',
     requestedBy: 'user',
     input: {

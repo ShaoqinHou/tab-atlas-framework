@@ -65,6 +65,15 @@ export function getUserAnnotations(db: Database.Database, targetKind: 'resource'
   return rows.map(annotationFromRow);
 }
 
+export function getUserAnnotationById(db: Database.Database, id: string): UserAnnotation | null {
+  const row = db.prepare(`
+    SELECT id, target_kind, target_id, tags_json, description, decision, source, created_at, updated_at
+    FROM user_annotations
+    WHERE id = ?
+  `).get(id) as AnnotationRow | undefined;
+  return row ? annotationFromRow(row) : null;
+}
+
 export function normalizeTags(tags: string[]): string[] {
   return [...new Set(tags.map(tag => tag.trim().toLowerCase()).filter(Boolean))];
 }

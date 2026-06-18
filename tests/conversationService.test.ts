@@ -348,6 +348,114 @@ describe('persistent conversational agent actions', () => {
     expect(getConversationSnapshot(db, thread.id).actions[0].status).toBe('succeeded');
   });
 
+  it('claims confirmed action execution atomically under concurrent confirmation', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'Proposed annotation.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_concurrent_once',
+          kind: 'add_annotation',
+          approval: 'confirm',
+          rationale: 'Mark once under concurrent confirmation.',
+          resourceId,
+          tags: ['inspiration'],
+          decision: 'inspiration',
+        }],
+      },
+    });
+
+    await Promise.all([
+      confirmAgentAction(db, 'action_concurrent_once'),
+      confirmAgentAction(db, 'action_concurrent_once'),
+    ]);
+
+    const annotations = db.prepare('SELECT COUNT(*) AS count FROM user_annotations').get() as { count: number };
+    const action = getConversationSnapshot(db, thread.id).actions[0];
+    expect(annotations.count).toBe(1);
+    expect(action.status).toBe('succeeded');
+    expect(action.idempotencyKey).toBe('action_concurrent_once');
+    expect(action.executionToken).toBeTruthy();
+  });
+
+  it('replays annotation action side effects by action id after an interrupted status reset', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'Proposed annotation.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_replay_annotation',
+          kind: 'add_annotation',
+          approval: 'confirm',
+          rationale: 'Mark idempotently.',
+          resourceId,
+          tags: ['inspiration'],
+          decision: 'inspiration',
+        }],
+      },
+    });
+
+    await confirmAgentAction(db, 'action_replay_annotation');
+    db.prepare(`
+      UPDATE agent_actions
+      SET status = 'approved', result_json = NULL, error = NULL, finished_at = NULL,
+          execution_token = NULL, execution_started_at = NULL
+      WHERE id = ?
+    `).run('action_replay_annotation');
+    await confirmAgentAction(db, 'action_replay_annotation');
+
+    const annotations = db.prepare('SELECT id FROM user_annotations').all() as Array<{ id: string }>;
+    const action = getConversationSnapshot(db, thread.id).actions[0];
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0].id).toMatch(/^ann_agent_/);
+    expect(action.status).toBe('succeeded');
+  });
+
+  it('replays scan action job creation by action id after an interrupted status reset', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'Proposed scan.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_replay_scan',
+          kind: 'scan_resources',
+          approval: 'confirm',
+          rationale: 'Scan idempotently.',
+          resourceIds: [resourceId],
+          limit: 1,
+          force: false,
+        }],
+      },
+    });
+
+    await confirmAgentAction(db, 'action_replay_scan');
+    db.prepare(`
+      UPDATE agent_actions
+      SET status = 'approved', result_json = NULL, error = NULL, finished_at = NULL,
+          execution_token = NULL, execution_started_at = NULL
+      WHERE id = ?
+    `).run('action_replay_scan');
+    await confirmAgentAction(db, 'action_replay_scan');
+
+    const jobs = db.prepare('SELECT id FROM jobs WHERE kind = ?').all('codex_scan') as Array<{ id: string }>;
+    const action = getConversationSnapshot(db, thread.id).actions[0];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].id).toMatch(/^job_agent_/);
+    expect(action.status).toBe('succeeded');
+  });
+
   it('rejects unsupported arbitrary action operations', async () => {
     const { db } = seed();
     const thread = createConversationThread(db);

@@ -68,7 +68,9 @@ export function createJob(db: Database.Database, input: CreateJobInputValue): Jo
   const parsed = CreateJobInput.parse(input);
   const uniqueKeys = new Set(parsed.items.map(item => item.key));
   if (uniqueKeys.size !== parsed.items.length) throw new Error('Job item keys must be unique');
-  const id = `job_${nanoid()}`;
+  const id = parsed.id ?? `job_${nanoid()}`;
+  const existing = db.prepare('SELECT id FROM jobs WHERE id = ?').get(id) as { id: string } | undefined;
+  if (existing) return getJobSnapshot(db, id);
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     db.prepare(`

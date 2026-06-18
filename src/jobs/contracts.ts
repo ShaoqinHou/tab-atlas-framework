@@ -41,6 +41,7 @@ export const JobProgress = z.object({
 export type JobProgress = z.infer<typeof JobProgress>;
 
 export const CreateJobInput = z.object({
+  id: z.string().min(1).optional(),
   kind: JobKind,
   requestedBy: z.string().min(1).default('user'),
   input: z.unknown().default({}),
