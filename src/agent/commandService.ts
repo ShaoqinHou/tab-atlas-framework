@@ -9,6 +9,7 @@ import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
 import { createUserCommand, persistSemanticViewPlan, previewView, type ViewPreview } from '../views/service.js';
 import { logAgentRun } from './runLog.js';
 import { retrieveCandidatesForCommand } from '../retrieval/service.js';
+import { withPromptManifestRecorder } from '../security/promptManifest.js';
 
 export const RunAgentCommandInput = z.object({
   text: z.string().min(1),
@@ -82,7 +83,11 @@ export async function runAgentCommand(
       dryRun: parsed.dryRun,
     };
     try {
-      const result = await planSemanticView(provider, parsed.text, briefs, {
+      const result = await planSemanticView(withPromptManifestRecorder(db, provider, 'semantic_view_plan', {
+        candidateCount: candidateResourceIds.length,
+        retrievalRunId: retrieval.runId,
+        dryRun: parsed.dryRun,
+      }), parsed.text, briefs, {
         maxViews: 4,
         allowWeakMatches: true,
         askReviewForAmbiguous: true,

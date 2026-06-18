@@ -9,6 +9,7 @@ import type { ResourceBrief } from '../shared/schemas.js';
 import { computeResourceKnowledgeDependencyHash } from '../knowledge/dependencyHash.js';
 import { isDetailedAtomicItemSupportedByEvidence } from '../extract/youtube.js';
 import { projectResourceBriefsForPrompt } from '../security/urlPrivacy.js';
+import { withPromptManifestRecorder } from '../security/promptManifest.js';
 import {
   beginNextJobItem,
   createJob,
@@ -170,7 +171,7 @@ export async function runCodexResourceScan(
     };
 
     try {
-      const scan = await scanBatch(provider, briefs);
+      const scan = await scanBatch(db, provider, briefs);
       const written = persistScanBatch(db, briefs, scan.value, candidateByResourceId);
       result.resourcesScanned += scan.value.resources.length;
       result.artifactsWritten += written.artifactsWritten;
@@ -276,7 +277,7 @@ export async function resumeCodexScanJob(
         break;
       }
       touchJobItemLease(db, item.id);
-      const scan = await scanBatch(provider, [brief]);
+      const scan = await scanBatch(db, provider, [brief]);
       touchJobItemLease(db, item.id);
       if (options.signal?.aborted || isJobCancelRequested(db, jobId)) {
         break;
@@ -402,7 +403,7 @@ function getKnowledgeState(db: Database.Database, resourceId: string): {
   } | undefined;
 }
 
-async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
+async function scanBatch(db: Database.Database, provider: LlmProvider, briefs: ResourceBrief[]) {
   const promptBriefs = projectResourceBriefsForPrompt(briefs);
   const prompt = [
     'Scan these TabAtlas resources into reusable local knowledge.',
@@ -419,7 +420,10 @@ async function scanBatch(provider: LlmProvider, briefs: ResourceBrief[]) {
 
   const expectedIds = new Set(briefs.map(brief => brief.resourceId));
   const knownEvidenceRefs = knownEvidenceRefsFor(briefs);
-  return runStructured(provider, prompt, CodexResourceScanBatchOutput, {
+  return runStructured(withPromptManifestRecorder(db, provider, 'codex_resource_scan', {
+    resourceCount: briefs.length,
+    recipeId: CODEX_RESOURCE_ANALYSIS_RECIPE,
+  }), prompt, CodexResourceScanBatchOutput, {
     system: scanSystemPrompt(),
     maxRetries: 2,
     outputSchema: scanJsonSchema(),

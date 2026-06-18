@@ -7,7 +7,7 @@ import { openDatabase } from '../src/db/index.js';
 import { importSnapshot } from '../src/import/headlessSnapshot.js';
 import type { LlmProvider } from '../src/llm/types.js';
 import { buildResourceBrief } from '../src/resources/briefs.js';
-import { redactUrlForPrompt } from '../src/security/urlPrivacy.js';
+import { PROMPT_REDACTION_VERSION, redactUrlForPrompt } from '../src/security/urlPrivacy.js';
 
 const SECRET_MARKERS = [
   'SECRET123',
@@ -156,5 +156,75 @@ describe('Codex prompt privacy', () => {
     expect(redacted).not.toContain('si=');
     expect(redacted).not.toContain('SECRET123');
     expect(redacted).not.toContain('#frag');
+  });
+
+  it('redacts secret-looking URL path segments and malformed URL secrets', () => {
+    const redacted = redactUrlForPrompt('https://example.com/files/sk-pathSecret000000000000/report?token=SECRET123#frag');
+    expect(redacted).toContain('/files/REDACTED_PATH_SECRET/report');
+    expect(redacted).not.toContain('sk-pathSecret000000000000');
+    expect(redacted).not.toContain('SECRET123');
+    expect(redacted).not.toContain('#frag');
+
+    const malformed = redactUrlForPrompt('https://[::1/?api_key=abc sk-badSecret000000000000');
+    expect(malformed).not.toContain('api_key=abc');
+    expect(malformed).not.toContain('sk-badSecret000000000000');
+  });
+
+  it('supports explicit full-URL sharing while still stripping credentials', () => {
+    const projected = redactUrlForPrompt('https://user:pass@example.com/private/report?token=share_me#frag', {
+      allowFullUrl: true,
+    });
+
+    expect(projected).toBe('https://example.com/private/report?token=share_me#frag');
+  });
+
+  it('records prompt manifests without storing prompt text', async () => {
+    const { db, resourceId, annotationId } = seedPrivateFixture();
+    const provider: LlmProvider = {
+      async complete() {
+        return {
+          text: JSON.stringify({
+            commandText: 'Group inventory UI reference',
+            views: [{
+              name: 'Inventory references',
+              goal: 'Collect inventory UI reference material.',
+              inclusionRules: ['Include inventory UI references.'],
+              exclusionRules: [],
+              sections: [],
+              confidence: 0.82,
+              memberships: [{
+                targetKind: 'resource',
+                targetId: resourceId,
+                state: 'strong_include',
+                confidence: 0.82,
+                reason: 'User annotation marks this as a project reference.',
+                evidenceRefs: [`user_annotation:${annotationId}`],
+              }],
+            }],
+            reviewQueues: [],
+            explanation: 'Selected from local annotations.',
+          }),
+          usage: { quotaTurns: 1 },
+        };
+      },
+    };
+
+    await runAgentCommand(db, provider, {
+      text: 'Group inventory UI reference https://example.com/private/report?token=commandsecret#frag',
+      mode: 'codex',
+      dryRun: true,
+    });
+
+    const row = db.prepare(`
+      SELECT purpose, prompt_hash, redaction_version, metadata_json
+      FROM codex_prompt_manifests
+      WHERE purpose = 'semantic_view_plan'
+    `).get() as { purpose: string; prompt_hash: string; redaction_version: string; metadata_json: string };
+
+    expect(row.purpose).toBe('semantic_view_plan');
+    expect(row.prompt_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.redaction_version).toBe(PROMPT_REDACTION_VERSION);
+    expect(row.metadata_json).not.toContain('commandsecret');
+    expect(row.metadata_json).not.toContain('inventory UI reference');
   });
 });

@@ -19,6 +19,7 @@ const results: EvalResult[] = [];
 results.push(await bootstrapAdminCapability());
 results.push(await extensionPairingIsSnapshotOnly());
 results.push(pairingChallengeLocksWrongAttempts());
+results.push(extensionMessageContractIsPassive());
 results.push(await crossSiteDenialIsAuditedWithoutSecrets());
 results.push(importPathPolicyDeniesEscapes());
 
@@ -125,6 +126,30 @@ function pairingChallengeLocksWrongAttempts(): EvalResult {
     'wrong attempts persist and lock the challenge at max attempts',
     `failures=${failures.join(',')}; status=${row.status}; attempts=${row.attempts}`,
     failures.includes('locked_challenge') && row.status === 'locked' && row.attempts === 2,
+  );
+}
+
+function extensionMessageContractIsPassive(): EvalResult {
+  const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'extension', 'manifest.json'), 'utf8')) as {
+    action?: { default_popup?: string };
+    permissions?: string[];
+  };
+  const popup = fs.readFileSync(path.join(process.cwd(), 'extension', 'popup.js'), 'utf8');
+  const worker = fs.readFileSync(path.join(process.cwd(), 'extension', 'service_worker.js'), 'utf8');
+  const messages = ['tabatlas:status', 'tabatlas:pair', 'tabatlas:export-now', 'tabatlas:unpair'];
+  const missing = messages.filter(message => !popup.includes(message) || !worker.includes(message));
+  const scheduledLoop = /chrome\.alarms|setInterval/.test(worker);
+  const debounceExport = worker.includes('setTimeout(() => exportIfReceiverAvailable');
+  return result(
+    'Extension passive message contract',
+    'popup-driven messages are wired; no alarm/interval heartbeat is present; token stays in header',
+    `popup=${manifest.action?.default_popup ?? '(none)'}; missing=${missing.join(',') || '(none)'}; scheduledLoop=${scheduledLoop}; debounce=${debounceExport}`,
+    manifest.action?.default_popup === 'popup.html'
+      && missing.length === 0
+      && !scheduledLoop
+      && debounceExport
+      && worker.includes("'x-tab-atlas-token': token")
+      && !worker.includes('token: token'),
   );
 }
 

@@ -6,7 +6,7 @@ import { openDatabase } from '../src/db/index.js';
 import { importSnapshot } from '../src/import/headlessSnapshot.js';
 import type { LlmProvider } from '../src/llm/types.js';
 import { buildResourceBrief } from '../src/resources/briefs.js';
-import { redactUrlForPrompt } from '../src/security/urlPrivacy.js';
+import { PROMPT_REDACTION_VERSION, redactUrlForPrompt } from '../src/security/urlPrivacy.js';
 
 type EvalResult = {
   caseName: string;
@@ -35,6 +35,10 @@ results.push(await semanticPlannerPromptIsRedacted());
 results.push(await scanPromptIsRedacted());
 results.push(await conversationPromptIsRedacted());
 results.push(youtubeVideoIdIsPreservedWithoutPrivateParams());
+results.push(secretPathSegmentsAreRedacted());
+results.push(malformedUrlsDoNotLeakSecrets());
+results.push(explicitFullUrlOverride());
+results.push(await promptManifestIsCreatedWithoutPromptText());
 
 for (const result of results) {
   console.log(`Case: ${result.caseName}`);
@@ -146,6 +150,93 @@ function youtubeVideoIdIsPreservedWithoutPrivateParams(): EvalResult {
     'video id remains; private params and fragments are removed',
     redacted,
     redacted.includes('v=abc123def45') && !redacted.includes('si=') && !redacted.includes('SECRET123') && !redacted.includes('#frag'),
+  );
+}
+
+function secretPathSegmentsAreRedacted(): EvalResult {
+  const redacted = redactUrlForPrompt('https://example.com/files/sk-pathSecret000000000000/report?token=SECRET123#frag');
+  return result(
+    'URL path secret redaction',
+    'secret-looking path segment, query, and fragment are removed',
+    redacted,
+    redacted.includes('/files/REDACTED_PATH_SECRET/report')
+      && !redacted.includes('sk-pathSecret000000000000')
+      && !redacted.includes('SECRET123')
+      && !redacted.includes('#frag'),
+  );
+}
+
+function malformedUrlsDoNotLeakSecrets(): EvalResult {
+  const redacted = redactUrlForPrompt('https://[::1/?api_key=abc sk-badSecret000000000000');
+  return result(
+    'Malformed URL fallback redaction',
+    'malformed URL-like strings do not recurse or leak obvious secrets',
+    redacted,
+    !redacted.includes('api_key=abc') && !redacted.includes('sk-badSecret000000000000'),
+  );
+}
+
+function explicitFullUrlOverride(): EvalResult {
+  const projected = redactUrlForPrompt('https://user:pass@example.com/private/report?token=share_me#frag', {
+    allowFullUrl: true,
+  });
+  return result(
+    'Explicit full-URL sharing override',
+    'query and fragment are preserved only when explicitly requested; URL credentials are stripped',
+    projected,
+    projected === 'https://example.com/private/report?token=share_me#frag',
+  );
+}
+
+async function promptManifestIsCreatedWithoutPromptText(): Promise<EvalResult> {
+  const { db, resourceId, annotationId } = seedPrivateFixture();
+  const provider: LlmProvider = {
+    async complete() {
+      return {
+        text: JSON.stringify({
+          commandText: 'Group inventory UI reference',
+          views: [{
+            name: 'Inventory references',
+            goal: 'Collect inventory UI reference material.',
+            inclusionRules: ['Include inventory UI references.'],
+            exclusionRules: [],
+            sections: [],
+            confidence: 0.82,
+            memberships: [{
+              targetKind: 'resource',
+              targetId: resourceId,
+              state: 'strong_include',
+              confidence: 0.82,
+              reason: 'User annotation marks this as a project reference.',
+              evidenceRefs: [`user_annotation:${annotationId}`],
+            }],
+          }],
+          reviewQueues: [],
+          explanation: 'Selected from local annotations.',
+        }),
+        usage: { quotaTurns: 1 },
+      };
+    },
+  };
+  await runAgentCommand(db, provider, {
+    text: 'Group inventory UI reference https://example.com/private/report?token=commandsecret#frag',
+    mode: 'codex',
+    dryRun: true,
+  });
+  const rows = db.prepare(`
+    SELECT purpose, prompt_hash, redaction_version, metadata_json
+    FROM codex_prompt_manifests
+  `).all() as Array<{ purpose: string; prompt_hash: string; redaction_version: string; metadata_json: string }>;
+  const manifestText = JSON.stringify(rows);
+  return result(
+    'Prompt manifest creation',
+    'provider prompts create hash-only manifests without raw prompt content',
+    `rows=${rows.length}; version=${rows[0]?.redaction_version ?? '(none)'}; hash=${rows[0]?.prompt_hash?.length ?? 0}`,
+    rows.length >= 1
+      && rows.every(row => row.prompt_hash.match(/^[a-f0-9]{64}$/))
+      && rows.every(row => row.redaction_version === PROMPT_REDACTION_VERSION)
+      && !manifestText.includes('commandsecret')
+      && !manifestText.includes('inventory UI reference'),
   );
 }
 

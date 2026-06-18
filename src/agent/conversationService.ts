@@ -19,6 +19,7 @@ import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
 import { applyViewPlan, createUserCommand, persistSemanticViewPlan, previewView } from '../views/service.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
+import { withPromptManifestRecorder } from '../security/promptManifest.js';
 import { materializeAgentTurnPlan } from './actionIdentity.js';
 import {
   claimActionEffect,
@@ -165,7 +166,7 @@ export async function sendConversationMessage(
   });
   const history = listConversationMessages(db, input.threadId);
   const context = buildConversationContext(db, input.content);
-  const plan = await planConversationTurn(options.plannerProvider, history, context);
+  const plan = await planConversationTurn(db, options.plannerProvider, history, context);
   const assistant = appendConversationMessage(db, {
     threadId: input.threadId,
     role: 'assistant',
@@ -180,6 +181,7 @@ export async function sendConversationMessage(
 }
 
 export async function planConversationTurn(
+  db: Database.Database,
   provider: LlmProvider,
   history: ConversationMessageRecord[],
   context: unknown,
@@ -202,7 +204,9 @@ export async function planConversationTurn(
     JSON.stringify(context, null, 2),
   ].join('\n');
 
-  const planned = await runStructured(provider, prompt, AgentTurnPlan, {
+  const planned = await runStructured(withPromptManifestRecorder(db, provider, 'conversation_planner', {
+    historyCount: history.length,
+  }), prompt, AgentTurnPlan, {
     maxRetries: 2,
     semanticValidate: plan => validateActionPlan(plan),
   });
