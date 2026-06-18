@@ -11,6 +11,8 @@
     "eval:semantic": "tsx scripts/eval-semantic.ts",
     "eval:agent": "tsx scripts/eval-agent.ts --provider codex",
     "eval:agent:stub": "tsx scripts/eval-agent.ts --provider stub",
+    "eval:security": "tsx scripts/eval-security.ts",
+    "eval:privacy": "tsx scripts/eval-privacy.ts",
     "import": "tsx scripts/import-snapshot.ts",
     "scan:codex": "tsx scripts/scan-codex.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts"

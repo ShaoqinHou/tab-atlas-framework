@@ -185,6 +185,24 @@
       margin-top: 8px;
       background: #ffffff;
     }
+    .security-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .code-box {
+      border: 1px solid #d8dee4;
+      border-radius: 6px;
+      background: #f6f8fa;
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 14px;
+      padding: 10px;
+      word-break: break-all;
+    }
+    .secret-input {
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
     @media (max-width: 900px) {
       main, .metrics {
         grid-template-columns: 1fr;
@@ -199,6 +217,23 @@
   </header>
   <main>
     <div class="stack">
+      <section>
+        <h2>Local Trust</h2>
+        <div id="securityNotice" class="notice">Local token not loaded.</div>
+        <input id="securityToken" class="secret-input" type="password" placeholder="Local dashboard token" autocomplete="off">
+        <div class="row" style="margin-top:10px">
+          <button id="saveSecurityTokenButton">Save token</button>
+          <button id="clearSecurityTokenButton">Clear</button>
+          <button class="primary" id="bootstrapAdminButton">Create admin token</button>
+          <button id="refreshSecurityButton">Refresh trust</button>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="createPairingCodeButton">Create extension code</button>
+        </div>
+        <div id="pairingCode" style="margin-top:10px"></div>
+        <div id="securityStatus" style="margin-top:10px"></div>
+      </section>
+
       <section>
         <h2>Agent Conversation</h2>
         <div id="conversationTranscript" class="muted">No conversation loaded.</div>
@@ -266,6 +301,7 @@
   <script>
     const chips = ['inspiration', 'game', 'art', 'ui', 'watch_later', 'project_reference', 'ignore'];
     const sampleStates = ['strong_include', 'weak_include', 'conflict', 'needs_review', 'exclude'];
+    const TOKEN_STORAGE_KEY = 'tabatlas.localToken';
     let selectedTags = new Set();
     let activeSampleStates = new Set(sampleStates);
     let currentReview = null;
@@ -276,12 +312,136 @@
     const $ = (id) => document.getElementById(id);
 
     async function api(path, options = {}) {
+      const headers = {
+        'content-type': 'application/json',
+        ...(options.headers || {}),
+      };
+      const token = localStorage.getItem(TOKEN_STORAGE_KEY);
+      if (token) headers['x-tab-atlas-token'] = token;
       const response = await fetch(path, {
-        headers: { 'content-type': 'application/json' },
         ...options,
+        headers,
       });
       if (!response.ok) throw new Error(await response.text());
       return response.json();
+    }
+
+    async function refreshSecurityStatus(options = {}) {
+      const token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+      $('securityToken').value = token;
+      if (!token && options.silent) {
+        renderSecurityLocked('No local dashboard token is saved.');
+        return false;
+      }
+      try {
+        const status = await api('/api/security/status');
+        renderSecurityStatus(status);
+        return true;
+      } catch (error) {
+        renderSecurityLocked(error.message || String(error));
+        if (!options.silent) throw error;
+        return false;
+      }
+    }
+
+    function renderSecurityLocked(message) {
+      $('securityNotice').textContent = message.includes('Unauthorized') || message.includes('denied') || message.includes('401') || message.includes('403')
+        ? 'Local dashboard token required.'
+        : message;
+      $('securityStatus').innerHTML = '<div class="muted">Create the first admin token after starting the receiver, or paste an existing local token.</div>';
+      $('pairingCode').innerHTML = '';
+    }
+
+    function renderSecurityStatus(status) {
+      $('securityNotice').textContent = `Receiver bound to ${status.bound.host}:${status.bound.port}. Denied requests: ${status.deniedRequests}.`;
+      $('securityStatus').innerHTML = `
+        <div class="security-grid">
+          <div class="metric"><span>Capabilities</span><strong>${status.capabilities.length}</strong></div>
+          <div class="metric"><span>Pairing codes</span><strong>${status.pairingCodes.length}</strong></div>
+        </div>
+        <h2 style="margin-top:14px">Capabilities</h2>
+        ${status.capabilities.length ? status.capabilities.map(renderCapability).join('') : '<div class="muted">No capabilities yet.</div>'}
+      `;
+      if (status.captureRoots) {
+        $('captureRoots').innerHTML = [
+          `<div>Capture roots: ${status.captureRoots.map(escapeHtml).join(', ') || '(none configured)'}</div>`,
+          ...(status.recentCaptureFiles || []).map(file => `<button onclick="useImportPath(${jsArg(file.path)})">${escapeHtml(file.path)}</button>`),
+        ].join('');
+      }
+    }
+
+    function renderCapability(capability) {
+      const savesDashboardToken = capability.kind === 'ui' && (capability.scopes || []).includes('admin');
+      const controls = capability.status === 'active'
+        ? `<button onclick="revokeCapability('${escapeAttribute(capability.id)}')">Revoke</button><button onclick="rotateCapability('${escapeAttribute(capability.id)}', ${savesDashboardToken ? 'true' : 'false'})">Rotate</button>`
+        : '';
+      return `
+        <div class="sample">
+          <div><strong>${escapeHtml(capability.label || capability.kind)}</strong> <span class="badge">${escapeHtml(capability.status)}</span></div>
+          <div class="muted">${escapeHtml(capability.id)} / ${escapeHtml(capability.kind)} / ${(capability.scopes || []).map(escapeHtml).join(', ')}</div>
+          <div class="row" style="margin-top:8px">${controls}</div>
+        </div>
+      `;
+    }
+
+    async function bootstrapAdminToken() {
+      const created = await api('/api/security/capabilities', {
+        method: 'POST',
+        body: JSON.stringify({
+          kind: 'ui',
+          label: 'Local dashboard',
+          scopes: ['admin', 'api:read', 'api:write', 'jobs:write', 'agent:write'],
+        }),
+      });
+      localStorage.setItem(TOKEN_STORAGE_KEY, created.token);
+      $('securityToken').value = created.token;
+      $('pairingCode').innerHTML = '<div class="notice">Admin token created and saved locally.</div>';
+      await refreshSecurityStatus({ silent: true });
+      await refreshStatus();
+      await loadReview();
+    }
+
+    function saveSecurityToken() {
+      const token = $('securityToken').value.trim();
+      if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      else localStorage.removeItem(TOKEN_STORAGE_KEY);
+      refreshSecurityStatus({ silent: true }).catch(() => {});
+    }
+
+    function clearSecurityToken() {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      $('securityToken').value = '';
+      renderSecurityLocked('Local token cleared.');
+    }
+
+    async function createExtensionPairingCode() {
+      const created = await api('/api/security/pairing-codes', {
+        method: 'POST',
+        body: JSON.stringify({ ttlMs: 5 * 60 * 1000 }),
+      });
+      $('pairingCode').innerHTML = `
+        <div class="muted">Extension pairing code</div>
+        <div class="code-box">${escapeHtml(created.code)}</div>
+      `;
+      await refreshSecurityStatus({ silent: true });
+    }
+
+    async function revokeCapability(id) {
+      await api(`/api/security/capabilities/${id}/revoke`, { method: 'POST', body: '{}' });
+      await refreshSecurityStatus({ silent: true });
+    }
+
+    async function rotateCapability(id, saveAsDashboardToken) {
+      const rotated = await api(`/api/security/capabilities/${id}/rotate`, { method: 'POST', body: '{}' });
+      $('pairingCode').innerHTML = `
+        <div class="muted">Rotated token</div>
+        <div class="code-box">${escapeHtml(rotated.token)}</div>
+      `;
+      if (saveAsDashboardToken) {
+        localStorage.setItem(TOKEN_STORAGE_KEY, rotated.token);
+        $('securityToken').value = rotated.token;
+      }
+      await refreshSecurityStatus({ silent: true });
     }
 
     async function refreshStatus() {
@@ -299,12 +459,6 @@
         ['Codex scans', status.codexScanArtifacts],
         ['Atomic items', status.atomicItems],
       ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
-      if (status.captureRoots) {
-        $('captureRoots').innerHTML = [
-          `<div>Capture roots: ${status.captureRoots.map(escapeHtml).join(', ') || '(none configured)'}</div>`,
-          ...(status.recentCaptureFiles || []).map(file => `<button onclick="useImportPath(${jsArg(file.path)})">${escapeHtml(file.path)}</button>`),
-        ].join('');
-      }
       await loadViews();
       await loadCommands();
       await loadJobs();
@@ -726,6 +880,11 @@
     $('planButton').addEventListener('click', () => planCommand().catch(showCommandError));
     $('newConversationButton').addEventListener('click', () => newConversation().catch(showError));
     $('sendConversationButton').addEventListener('click', () => sendConversation().catch(showError));
+    $('saveSecurityTokenButton').addEventListener('click', () => saveSecurityToken());
+    $('clearSecurityTokenButton').addEventListener('click', () => clearSecurityToken());
+    $('bootstrapAdminButton').addEventListener('click', () => bootstrapAdminToken().catch(showError));
+    $('refreshSecurityButton').addEventListener('click', () => refreshSecurityStatus().catch(showError));
+    $('createPairingCodeButton').addEventListener('click', () => createExtensionPairingCode().catch(showError));
 
     function showError(error) {
       $('commandResult').innerHTML = `<div class="notice">${escapeHtml(error.message || error)}</div>`;
@@ -747,7 +906,18 @@
       await planCommand();
     }
 
-    refreshStatus().then(loadReview).catch(showError);
+    async function initialLoad() {
+      const trusted = await refreshSecurityStatus({ silent: true });
+      if (trusted) {
+        await refreshStatus();
+        await loadReview();
+      } else {
+        $('metrics').innerHTML = '<div class="metric"><span>Status</span><strong>Locked</strong></div>';
+        $('reviewCard').innerHTML = '<div class="muted">Local token required.</div>';
+      }
+    }
+
+    initialLoad().catch(showError);
   </script>
 </body>
 </html>
