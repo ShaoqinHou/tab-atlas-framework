@@ -27,7 +27,8 @@ import { importSnapshot } from '../import/headlessSnapshot.js';
 import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
 import { startInProcessJobWorker } from '../jobs/worker.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
-import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
+import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
+import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
 import { buildResourceBrief } from '../resources/briefs.js';
 import {
   createCapability,
@@ -59,7 +60,10 @@ const app = Fastify({ logger: true });
 installLocalRequestGuard(app, db, { host, port });
 const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
-const codexProviders = new Map<string, CodexSdkProvider>();
+const codexProviders = createCodexProviderRegistry(db, {
+  maxTurnsPerThread: Number(process.env.TABATLAS_CODEX_MAX_TURNS_PER_THREAD ?? 20),
+  workingDirectory: process.cwd(),
+});
 const extractionRegistry = new ExtractionAdapterRegistry();
 registerExtractionAdapters(extractionRegistry);
 const jobWorker = startInProcessJobWorker(db, {
@@ -67,7 +71,7 @@ const jobWorker = startInProcessJobWorker(db, {
     const job = getJobSnapshot(db, jobId);
     const input = asRecord(job.input);
     const reasoningEffort = readReasoningEffort(input.reasoningEffort);
-    const provider = getCodexProvider({ reasoningEffort, scope: `job:${jobId}` });
+    const provider = getCodexProvider({ role: 'resource_scan', reasoningEffort, scope: `job:${jobId}` });
     await resumeCodexScanJob(db, provider, jobId, {
       maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
       maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
@@ -256,7 +260,7 @@ app.post('/api/agent/command', async (request, reply) => {
   const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = mode === 'codex'
-    ? getCodexProvider({ reasoningEffort, scope: `agent-command:${crypto.randomUUID()}`, reuseThread: false })
+    ? getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `agent-command:${crypto.randomUUID()}`, reuseThread: false })
     : 'heuristic';
   const input: RunAgentCommandInput = {
     text: typeof body.text === 'string' ? body.text : '',
@@ -286,7 +290,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   const content = typeof body.content === 'string' ? body.content : '';
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort, scope: `conversation:${params.threadId}` });
+  const provider = getCodexProvider({ role: 'conversation_planner', reasoningEffort, scope: `conversation:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
@@ -301,7 +305,7 @@ app.post('/api/agent-actions/:actionId/confirm', async (request, reply) => {
   const body = asRecord(request.body);
   const action = getAgentAction(db, params.actionId);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort, scope: `conversation:${action.threadId}` });
+  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${action.threadId}` });
   return reply.send(await confirmAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
@@ -318,7 +322,7 @@ app.post('/api/agent/refine', async (request, reply) => {
   const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = mode === 'codex'
-    ? getCodexProvider({ reasoningEffort, scope: `agent-refine:${viewId}:${crypto.randomUUID()}`, reuseThread: false })
+    ? getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `agent-refine:${viewId}:${crypto.randomUUID()}`, reuseThread: false })
     : 'heuristic';
   const preview = previewView(db, viewId);
   const parentRevision = getLatestViewRevision(db, viewId);
@@ -346,7 +350,7 @@ app.post('/api/agent/refine', async (request, reply) => {
 app.post('/api/agent/scan', async (request, reply) => {
   const body = asRecord(request.body);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort, scope: `scan:${crypto.randomUUID()}`, reuseThread: false });
+  const provider = getCodexProvider({ role: 'resource_scan', reasoningEffort, scope: `scan:${crypto.randomUUID()}`, reuseThread: false });
   const input = readCodexScanInput(body, reasoningEffort);
   const result = await runCodexResourceScan(db, provider, input);
   return reply.send(result);
@@ -390,7 +394,7 @@ app.post('/api/jobs/:jobId/resume', async (request, reply) => {
   if (job.kind !== 'codex_scan') return reply.status(400).send({ ok: false, error: `Unsupported job kind: ${job.kind}` });
   const input = asRecord(job.input);
   const reasoningEffort = readReasoningEffort(input.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort, scope: `job:${params.jobId}` });
+  const provider = getCodexProvider({ role: 'resource_scan', reasoningEffort, scope: `job:${params.jobId}` });
   const result = await resumeCodexScanJob(db, provider, params.jobId, {
     maxItems: typeof body.maxItems === 'number' ? body.maxItems : undefined,
     maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
@@ -567,24 +571,15 @@ function readCodexScanInput(
   };
 }
 
-function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort' | 'reuseThread'> & { scope: string }): CodexSdkProvider {
-  if (config.reuseThread === false) {
-    return new CodexSdkProvider({
-      reasoningEffort: config.reasoningEffort ?? 'medium',
-      reuseThread: false,
-      workingDirectory: process.cwd(),
-    });
-  }
-  const key = `${config.scope}:${config.reasoningEffort ?? 'medium'}`;
-  const existing = codexProviders.get(key);
-  if (existing) return existing;
-  const provider = new CodexSdkProvider({
+function getCodexProvider(
+  config: Pick<CodexSdkProviderConfig, 'reasoningEffort' | 'reuseThread'> & { role: CodexProviderRole; scope: string },
+) {
+  return codexProviders.getProvider({
+    role: config.role,
+    scopeKey: config.scope,
     reasoningEffort: config.reasoningEffort ?? 'medium',
-    reuseThread: true,
-    workingDirectory: process.cwd(),
+    reuseThread: config.reuseThread,
   });
-  codexProviders.set(key, provider);
-  return provider;
 }
 
 function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
