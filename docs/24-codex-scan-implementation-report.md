@@ -1,7 +1,7 @@
 # TabAtlas implementation report
 
 Repo path:
-C:\Users\housh\Documents\Codex\2026-06-17\i-tend-to-have-many-tags\outputs\tab-atlas-framework\tab-atlas-framework
+<repo-root>
 
 Branch:
 main

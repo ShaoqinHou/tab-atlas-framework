@@ -9,7 +9,7 @@ The product lead clarified that TabAtlas must be **agent-first**. A giant tab li
 ## Required first actions
 
 ```powershell
-cd "$env:USERPROFILE\Downloads\tab-atlas-framework"
+cd "<repo-root>"
 git init
 git branch -M main
 git status --short
@@ -17,7 +17,7 @@ git add .
 git commit -m "Add TabAtlas product framework"
 ```
 
-If the folder has a different extracted name, adapt the path and report it.
+Use the actual cloned repository root.
 
 ## Mandatory reading order
 

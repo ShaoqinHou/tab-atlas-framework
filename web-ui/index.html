@@ -8,168 +8,278 @@
     :root {
       color-scheme: light;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f6f7f9;
-      color: #1f2328;
+      background: #f5f6f8;
+      color: #202124;
+    }
+    * {
+      box-sizing: border-box;
     }
     body {
       margin: 0;
+      min-width: 320px;
     }
-    header {
+    .topbar {
       background: #ffffff;
-      border-bottom: 1px solid #d8dee4;
-      padding: 18px 28px;
+      border-bottom: 1px solid #d7dce2;
+      padding: 14px 24px 0;
+      position: sticky;
+      top: 0;
+      z-index: 20;
     }
-    main {
+    .topbar-main {
+      align-items: center;
       display: grid;
-      grid-template-columns: minmax(360px, 1.1fr) minmax(360px, 0.9fr);
-      gap: 18px;
-      padding: 18px 28px 28px;
+      gap: 14px;
+      grid-template-columns: minmax(180px, 280px) 1fr;
     }
     h1 {
       font-size: 22px;
-      margin: 0 0 10px;
+      margin: 0;
     }
     h2 {
-      font-size: 16px;
+      font-size: 17px;
       margin: 0 0 12px;
     }
-    section, .panel {
+    h3 {
+      font-size: 14px;
+      margin: 14px 0 8px;
+    }
+    .receiver-state {
+      color: #636c76;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .nav-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .nav-strip.secondary {
+      border-top: 1px solid #e6e9ed;
+      margin-top: 10px;
+      padding: 10px 0;
+    }
+    .workspace {
+      padding: 22px 24px 34px;
+    }
+    .page {
+      display: none;
+    }
+    .page.active {
+      display: block;
+    }
+    .page-heading {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .page-heading p {
+      color: #636c76;
+      font-size: 13px;
+      margin: 4px 0 0;
+    }
+    .workspace-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: minmax(360px, 1.1fr) minmax(320px, 0.9fr);
+    }
+    .workspace-grid.single {
+      grid-template-columns: 1fr;
+    }
+    .tool-panel {
       background: #ffffff;
-      border: 1px solid #d8dee4;
+      border: 1px solid #d7dce2;
       border-radius: 8px;
       padding: 16px;
     }
     .stack {
       display: grid;
-      gap: 18px;
+      gap: 16px;
     }
     .metrics {
       display: grid;
-      grid-template-columns: repeat(4, minmax(110px, 1fr));
-      gap: 10px;
+      gap: 8px;
+      grid-template-columns: repeat(6, minmax(92px, 1fr));
     }
     .metric {
-      border: 1px solid #d8dee4;
-      border-radius: 6px;
-      padding: 10px;
       background: #fbfcfd;
+      border: 1px solid #d7dce2;
+      border-radius: 6px;
+      padding: 9px;
     }
     .metric span {
+      color: #636c76;
       display: block;
-      color: #656d76;
       font-size: 12px;
     }
     .metric strong {
-      font-size: 20px;
+      font-size: 18px;
     }
     textarea, input, select {
-      box-sizing: border-box;
-      width: 100%;
-      border: 1px solid #afb8c1;
+      border: 1px solid #aeb7c2;
       border-radius: 6px;
-      padding: 10px;
       font: inherit;
+      padding: 10px;
+      width: 100%;
     }
     textarea {
-      min-height: 88px;
+      min-height: 92px;
       resize: vertical;
     }
     button, a.button {
+      align-items: center;
+      background: #f7f8fa;
       border: 1px solid #8c959f;
-      background: #f6f8fa;
       border-radius: 6px;
-      color: #24292f;
+      color: #202124;
       cursor: pointer;
       display: inline-flex;
-      align-items: center;
+      font: inherit;
       gap: 6px;
       min-height: 34px;
       padding: 6px 10px;
       text-decoration: none;
       white-space: nowrap;
     }
+    button:hover, a.button:hover {
+      background: #eef1f4;
+    }
+    button:focus-visible, a.button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid #9ec5ff;
+      outline-offset: 2px;
+    }
     button.primary {
       background: #0969da;
       border-color: #0969da;
       color: #ffffff;
+    }
+    button.primary:hover {
+      background: #075cbf;
     }
     button.danger {
       background: #fff1f1;
       border-color: #cf222e;
       color: #cf222e;
     }
+    button.nav-button {
+      background: transparent;
+      border-color: transparent;
+      color: #4d5560;
+    }
+    button.nav-button.active {
+      background: #eaf3ff;
+      border-color: #8ab6f0;
+      color: #075cbf;
+    }
     .row {
+      align-items: center;
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+    }
+    .split-row {
       align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: space-between;
     }
-    .chips button {
-      min-height: 30px;
-      padding: 4px 8px;
+    .inline-choice {
+      align-items: center;
+      display: inline-flex;
+      gap: 6px;
     }
-    .chips button.active {
-      background: #ddf4ff;
-      border-color: #0969da;
-      color: #0969da;
-    }
-    .filters button {
-      min-height: 30px;
-      padding: 4px 8px;
-    }
-    .filters button.active {
-      background: #dafbe1;
-      border-color: #1a7f37;
-      color: #116329;
-    }
-    .resource-title {
-      font-weight: 700;
-      margin-bottom: 6px;
+    .inline-choice input {
+      width: auto;
     }
     .muted {
-      color: #656d76;
+      color: #636c76;
       font-size: 13px;
-    }
-    .counts {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(80px, 1fr));
-      gap: 8px;
-      margin: 12px 0;
-    }
-    .count {
-      background: #f6f8fa;
-      border-radius: 6px;
-      padding: 8px;
-      font-size: 13px;
-    }
-    .sample {
-      border-top: 1px solid #d8dee4;
-      padding: 10px 0;
-    }
-    .sample:last-child {
-      padding-bottom: 0;
     }
     .notice {
       background: #fff8c5;
       border: 1px solid #d4a72c;
       border-radius: 6px;
-      padding: 10px;
       font-size: 13px;
+      padding: 10px;
+    }
+    .notice.good {
+      background: #dafbe1;
+      border-color: #4ac26b;
+    }
+    .notice.bad {
+      background: #fff1f1;
+      border-color: #cf222e;
+    }
+    .item {
+      border-top: 1px solid #d7dce2;
+      padding: 12px 0;
+    }
+    .item:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+    .item:last-child {
+      padding-bottom: 0;
+    }
+    .resource-title {
+      font-weight: 700;
+      margin-bottom: 6px;
     }
     .badge {
       background: #ddf4ff;
       border: 1px solid #54aeff;
       border-radius: 999px;
-      color: #0969da;
+      color: #075cbf;
       display: inline-flex;
       font-size: 12px;
       padding: 3px 8px;
     }
+    .badge.green {
+      background: #dafbe1;
+      border-color: #4ac26b;
+      color: #116329;
+    }
+    .badge.orange {
+      background: #fff1d6;
+      border-color: #d4a72c;
+      color: #7d4e00;
+    }
+    .chips button, .filters button {
+      min-height: 30px;
+      padding: 4px 8px;
+    }
+    .chips button.active {
+      background: #dafbe1;
+      border-color: #1a7f37;
+      color: #116329;
+    }
+    .filters button.active {
+      background: #ddf4ff;
+      border-color: #0969da;
+      color: #075cbf;
+    }
+    .counts {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(5, minmax(78px, 1fr));
+      margin: 12px 0;
+    }
+    .count {
+      background: #f7f8fa;
+      border-radius: 6px;
+      font-size: 13px;
+      padding: 8px;
+    }
     .message {
-      border-left: 3px solid #d8dee4;
-      padding: 8px 10px;
       background: #fbfcfd;
+      border-left: 3px solid #d7dce2;
       margin-bottom: 8px;
+      padding: 8px 10px;
       white-space: pre-wrap;
     }
     .message.user {
@@ -179,22 +289,20 @@
       border-left-color: #1a7f37;
     }
     .action-card {
-      border: 1px solid #d8dee4;
-      border-radius: 6px;
-      padding: 10px;
-      margin-top: 8px;
-      background: #ffffff;
+      border-top: 1px solid #d7dce2;
+      margin-top: 10px;
+      padding-top: 10px;
     }
     .security-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(180px, 1fr));
       gap: 8px;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
       margin-top: 10px;
     }
     .code-box {
-      border: 1px solid #d8dee4;
+      background: #f7f8fa;
+      border: 1px solid #d7dce2;
       border-radius: 6px;
-      background: #f6f8fa;
       font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
       font-size: 14px;
       padding: 10px;
@@ -203,116 +311,308 @@
     .secret-input {
       font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
     }
-    @media (max-width: 900px) {
-      main, .metrics {
+    .toolbar {
+      align-items: center;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      margin-bottom: 12px;
+    }
+    .empty {
+      color: #636c76;
+      font-size: 13px;
+      padding: 18px 0;
+    }
+    @media (max-width: 1100px) {
+      .topbar-main, .workspace-grid, .metrics {
         grid-template-columns: 1fr;
+      }
+      .topbar {
+        position: static;
+      }
+    }
+    @media (max-width: 640px) {
+      .workspace, .topbar {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+      .counts, .security-grid, .toolbar {
+        grid-template-columns: 1fr;
+      }
+      button, a.button {
+        white-space: normal;
       }
     }
   </style>
 </head>
 <body>
-  <header>
-    <h1>TabAtlas</h1>
-    <div class="metrics" id="metrics"></div>
+  <header class="topbar">
+    <div class="topbar-main">
+      <div>
+        <h1>TabAtlas</h1>
+        <div id="receiverState" class="receiver-state">Receiver status unknown.</div>
+      </div>
+      <div class="metrics" id="metrics"></div>
+    </div>
+    <nav class="nav-strip" aria-label="Primary">
+      <button class="nav-button" data-page="inbox">Inbox / Review</button>
+      <button class="nav-button" data-page="ask">Ask TabAtlas</button>
+      <button class="nav-button" data-page="views">Views</button>
+    </nav>
+    <nav class="nav-strip secondary" aria-label="Secondary">
+      <button class="nav-button" data-page="capture">Capture & extensions</button>
+      <button class="nav-button" data-page="jobs">Extraction jobs</button>
+      <button class="nav-button" data-page="security">Security/privacy</button>
+      <button class="nav-button" data-page="diagnostics">Diagnostics</button>
+    </nav>
   </header>
-  <main>
-    <div class="stack">
-      <section>
-        <h2>Local Trust</h2>
-        <div id="securityNotice" class="notice">Local token not loaded.</div>
-        <input id="bootstrapSecret" class="secret-input" type="password" placeholder="One-time bootstrap secret" autocomplete="off">
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="bootstrapSessionButton">Start dashboard session</button>
-          <button id="refreshOnboardingButton">Refresh onboarding</button>
-        </div>
-        <input id="securityToken" class="secret-input" type="password" placeholder="Local dashboard token" autocomplete="off">
-        <div class="row" style="margin-top:10px">
-          <button id="saveSecurityTokenButton">Save token</button>
-          <button id="clearSecurityTokenButton">Clear</button>
-          <button id="bootstrapAdminButton">Create admin token</button>
-          <button id="refreshSecurityButton">Refresh trust</button>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button id="createPairingCodeButton">Create extension code</button>
-        </div>
-        <div id="pairingCode" style="margin-top:10px"></div>
-        <div id="securityStatus" style="margin-top:10px"></div>
-      </section>
 
-      <section>
-        <h2>Agent Conversation</h2>
-        <div id="conversationTranscript" class="muted">No conversation loaded.</div>
-        <textarea id="conversationText" placeholder="Ask TabAtlas"></textarea>
-        <div class="row" style="margin-top:10px">
-          <button id="newConversationButton">New thread</button>
-          <button class="primary" id="sendConversationButton">Send</button>
+  <main class="workspace">
+    <section class="page" id="page-onboarding">
+      <div class="page-heading">
+        <div>
+          <h2>First launch</h2>
+          <p id="onboardingSummary">Start a local dashboard session.</p>
         </div>
-        <div id="actionCards"></div>
-      </section>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <h2>Local Trust</h2>
+          <div id="securityNotice" class="notice">Local token not loaded.</div>
+          <input id="bootstrapSecret" class="secret-input" type="password" placeholder="One-time bootstrap secret" autocomplete="off">
+          <div class="row" style="margin-top:10px">
+            <button class="primary" id="bootstrapSessionButton">Start dashboard session</button>
+            <button id="refreshOnboardingButton">Refresh onboarding</button>
+          </div>
+          <input id="securityToken" class="secret-input" type="password" placeholder="Local dashboard token" autocomplete="off" style="margin-top:12px">
+          <div class="row" style="margin-top:10px">
+            <button id="saveSecurityTokenButton">Save token</button>
+            <button id="clearSecurityTokenButton">Clear</button>
+            <button id="bootstrapAdminButton">Create admin token</button>
+          </div>
+        </div>
+        <div class="tool-panel">
+          <h2>Onboarding</h2>
+          <div id="onboardingStatus" class="muted">Not loaded.</div>
+        </div>
+      </div>
+    </section>
 
-      <section>
-        <h2>Ask TabAtlas</h2>
-        <textarea id="commandText">Make a loose group mainly game inspiration but welcome all marked inspiration</textarea>
-        <div class="row" style="margin-top:10px">
-          <label><input type="radio" name="plannerMode" value="codex" checked style="width:auto"> Codex agent</label>
-          <label><input type="radio" name="plannerMode" value="heuristic" style="width:auto"> Fast heuristic preview</label>
-          <select id="reasoningEffort">
-            <option value="medium" selected>medium</option>
-            <option value="low">low</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
+    <section class="page" id="page-inbox">
+      <div class="page-heading">
+        <div>
+          <h2>Inbox / Review</h2>
+          <p id="reviewSummary">Review unmarked links without changing browser tabs.</p>
+        </div>
+        <div class="row">
+          <select id="reviewSessionType" aria-label="Review session type">
+            <option value="unmarked">Unmarked</option>
+            <option value="ambiguous_command">Ambiguous command</option>
+            <option value="weak_matches">Weak matches</option>
+            <option value="conflicts">Conflicts</option>
+            <option value="extraction_failures">Extraction failures</option>
           </select>
+          <button id="startReviewSessionButton">New session</button>
         </div>
-        <div class="row" style="margin-top:10px">
-          <button class="primary" id="planButton">Plan</button>
-          <button id="extractButton">Refresh extraction</button>
-          <button id="scanButton">Codex scan 10</button>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <div id="reviewCard"></div>
         </div>
-        <div id="commandResult" style="margin-top:14px"></div>
-      </section>
+        <div class="stack">
+          <div class="tool-panel">
+            <h2>Review controls</h2>
+            <div class="row">
+              <button id="pauseReviewSessionButton">Pause</button>
+              <button id="resumeReviewSessionButton">Resume</button>
+            </div>
+            <div id="reviewProgress" class="muted" style="margin-top:10px">No session loaded.</div>
+          </div>
+          <div class="tool-panel">
+            <h2>Recent commands</h2>
+            <div id="commandsList"></div>
+          </div>
+        </div>
+      </div>
+    </section>
 
-      <section>
-        <h2>Import Snapshot</h2>
-        <input id="importPath" placeholder="Choose a JSON file under a configured capture root">
-        <div class="row" style="margin-top:10px">
-          <button id="importButton">Import</button>
-          <button id="refreshButton">Refresh status</button>
+    <section class="page" id="page-ask">
+      <div class="page-heading">
+        <div>
+          <h2>Ask TabAtlas</h2>
+          <p>Agent thread first, deterministic preview before browser changes.</p>
         </div>
-        <div id="captureRoots" class="muted" style="margin-top:10px"></div>
-        <div id="importResult" class="muted" style="margin-top:10px"></div>
-      </section>
-    </div>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <h2>Agent Conversation</h2>
+          <div id="conversationTranscript" class="muted">No conversation loaded.</div>
+          <textarea id="conversationText" placeholder="Ask TabAtlas"></textarea>
+          <div class="row" style="margin-top:10px">
+            <button id="newConversationButton">New thread</button>
+            <button class="primary" id="sendConversationButton">Send</button>
+          </div>
+          <div id="actionCards"></div>
+        </div>
+        <div class="tool-panel">
+          <h2>View planner</h2>
+          <textarea id="commandText">Make a loose group mainly game inspiration but welcome all marked inspiration</textarea>
+          <div class="row" style="margin-top:10px">
+            <label class="inline-choice"><input type="radio" name="plannerMode" value="codex" checked> Codex agent</label>
+            <label class="inline-choice"><input type="radio" name="plannerMode" value="heuristic"> Fast heuristic preview</label>
+            <select id="reasoningEffort">
+              <option value="medium" selected>medium</option>
+              <option value="low">low</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="primary" id="planButton">Plan</button>
+          </div>
+          <div id="commandResult" style="margin-top:14px"></div>
+        </div>
+      </div>
+    </section>
 
-    <div class="stack">
-      <section>
-        <h2>Focused Review</h2>
-        <div id="reviewCard"></div>
-      </section>
-      <section>
-        <h2>Views</h2>
-        <div id="viewsList"></div>
-      </section>
-      <section>
-        <h2>Command History</h2>
-        <div id="commandsList"></div>
-      </section>
-      <section>
-        <h2>Jobs</h2>
+    <section class="page" id="page-views">
+      <div class="page-heading">
+        <div>
+          <h2>Views</h2>
+          <p>Stored previews and accepted groupings.</p>
+        </div>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <div class="toolbar">
+            <input id="viewsSearch" placeholder="Filter views">
+            <div class="row">
+              <button id="viewsPrevButton">Prev</button>
+              <button id="viewsNextButton">Next</button>
+            </div>
+          </div>
+          <div id="viewsPager" class="muted" style="margin-bottom:10px"></div>
+          <div id="viewsList"></div>
+        </div>
+        <div class="tool-panel">
+          <h2>Preview</h2>
+          <div id="viewPreviewPanel" class="muted">Select a view.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-capture">
+      <div class="page-heading">
+        <div>
+          <h2>Capture & extensions</h2>
+          <p>Imports, browser extension pairing, and local extraction refresh.</p>
+        </div>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <h2>Import Snapshot</h2>
+          <input id="importPath" placeholder="Choose a JSON file under a configured capture root">
+          <div class="row" style="margin-top:10px">
+            <button id="importButton">Import</button>
+            <button id="refreshButton">Refresh status</button>
+          </div>
+          <div id="captureRoots" class="muted" style="margin-top:10px"></div>
+          <div id="importResult" class="muted" style="margin-top:10px"></div>
+        </div>
+        <div class="stack">
+          <div class="tool-panel">
+            <h2>Extension pairing</h2>
+            <div class="row">
+              <button id="createPairingCodeButton">Create extension code</button>
+              <button id="refreshSecurityButton">Refresh trust</button>
+            </div>
+            <div id="pairingCode" style="margin-top:10px"></div>
+          </div>
+          <div class="tool-panel">
+            <h2>Extraction</h2>
+            <div class="row">
+              <button id="extractButton">Refresh extraction</button>
+              <button id="scanButton">Codex scan 10</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-jobs">
+      <div class="page-heading">
+        <div>
+          <h2>Extraction jobs</h2>
+          <p>Queued metadata and scan work.</p>
+        </div>
+      </div>
+      <div class="tool-panel">
         <div id="jobsList"></div>
-      </section>
-    </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-security">
+      <div class="page-heading">
+        <div>
+          <h2>Security/privacy</h2>
+          <p>Local receiver trust, extension capabilities, and prompt privacy.</p>
+        </div>
+      </div>
+      <div class="workspace-grid">
+        <div class="tool-panel">
+          <h2>Local Trust</h2>
+          <div class="row">
+            <button id="refreshSecurityButtonSecondary">Refresh trust</button>
+          </div>
+          <div id="securityStatus" style="margin-top:10px"></div>
+        </div>
+        <div class="tool-panel">
+          <h2>Prompt privacy</h2>
+          <div class="notice good">Codex prompts use redacted URLs by default. Full URLs require an explicit local action.</div>
+          <h3>Dashboard token</h3>
+          <input id="securityTokenMirror" class="secret-input" type="password" placeholder="Local dashboard token" autocomplete="off">
+          <div class="row" style="margin-top:10px">
+            <button id="saveSecurityTokenButtonSecondary">Save token</button>
+            <button id="clearSecurityTokenButtonSecondary">Clear</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-diagnostics">
+      <div class="page-heading">
+        <div>
+          <h2>Diagnostics</h2>
+          <p>Receiver counts and recent command state.</p>
+        </div>
+      </div>
+      <div class="workspace-grid single">
+        <div class="tool-panel">
+          <h2>Counts</h2>
+          <div class="metrics" id="diagnosticMetrics"></div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script>
     const chips = ['inspiration', 'game', 'art', 'ui', 'watch_later', 'project_reference', 'ignore'];
     const sampleStates = ['strong_include', 'weak_include', 'conflict', 'needs_review', 'exclude'];
     const TOKEN_STORAGE_KEY = 'tabatlas.localToken';
+    const PAGE_STORAGE_KEY = 'tabatlas.activePage';
+    const REVIEW_SESSION_STORAGE_KEY = 'tabatlas.reviewSessionId';
+    const VIEWS_PER_PAGE = 12;
     let selectedTags = new Set();
     let activeSampleStates = new Set(sampleStates);
     let currentReview = null;
+    let reviewSnapshot = null;
+    let activeReviewSessionId = localStorage.getItem(REVIEW_SESSION_STORAGE_KEY);
     let currentCommandResult = null;
     let activeThreadId = null;
     let conversationSnapshot = null;
+    let activePage = 'ask';
+    let viewsCache = [];
+    let viewsPage = 0;
 
     const $ = (id) => document.getElementById(id);
 
@@ -331,9 +631,24 @@
       return response.json();
     }
 
+    function showPage(page) {
+      activePage = page;
+      document.querySelectorAll('.page').forEach(section => section.classList.toggle('active', section.id === `page-${page}`));
+      document.querySelectorAll('[data-page]').forEach(button => button.classList.toggle('active', button.dataset.page === page));
+      if (page !== 'onboarding') localStorage.setItem(PAGE_STORAGE_KEY, page);
+      if (page === 'inbox') loadReview().catch(showError);
+      if (page === 'views') renderViews();
+      if (page === 'jobs') loadJobs().catch(showError);
+    }
+
+    function setupNavigation() {
+      document.querySelectorAll('[data-page]').forEach(button => {
+        button.addEventListener('click', () => showPage(button.dataset.page));
+      });
+    }
+
     async function refreshSecurityStatus(options = {}) {
-      const token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
-      $('securityToken').value = token;
+      syncTokenInputs();
       try {
         const status = await api('/api/security/status');
         renderSecurityStatus(status);
@@ -346,44 +661,50 @@
     }
 
     function renderSecurityLocked(message) {
+      $('receiverState').textContent = 'Receiver locked.';
       $('securityNotice').textContent = message.includes('Unauthorized') || message.includes('denied') || message.includes('401') || message.includes('403')
         ? 'Local dashboard token required.'
         : message;
-      $('securityStatus').innerHTML = '<div class="muted">Create the first admin token after starting the receiver, or paste an existing local token.</div>';
+      $('securityStatus').innerHTML = '<div class="muted">No active local dashboard session.</div>';
       $('pairingCode').innerHTML = '';
     }
 
     async function refreshOnboarding() {
       const onboarding = await api('/api/onboarding');
-      const next = onboarding.steps.find(step => step.id === onboarding.nextStepId);
-      $('securityNotice').textContent = next
-        ? `Next setup step: ${next.title}`
-        : 'Onboarding complete.';
-      const file = onboarding.bootstrapFilePath ? `<div class="muted">Bootstrap file: ${escapeHtml(onboarding.bootstrapFilePath)}</div>` : '';
-      $('securityStatus').insertAdjacentHTML('afterbegin', `
-        <div class="sample">
-          <div><strong>Onboarding</strong></div>
-          <div class="muted">${onboarding.steps.map(step => `${step.status === 'completed' ? 'done' : 'todo'} ${step.title}`).map(escapeHtml).join('<br>')}</div>
-          ${file}
-        </div>
-      `);
+      renderOnboarding(onboarding);
       return onboarding;
     }
 
+    function renderOnboarding(onboarding) {
+      const next = onboarding.steps.find(step => step.id === onboarding.nextStepId);
+      const summary = next ? `Next setup step: ${next.title}` : 'Onboarding complete.';
+      $('securityNotice').textContent = summary;
+      $('onboardingSummary').textContent = summary;
+      const file = onboarding.bootstrapFilePath ? `<div class="muted">Bootstrap file: ${escapeHtml(onboarding.bootstrapFilePath)}</div>` : '';
+      const steps = onboarding.steps.map(step => `
+        <div class="item">
+          <div><strong>${escapeHtml(step.title)}</strong> <span class="badge ${step.status === 'completed' ? 'green' : 'orange'}">${escapeHtml(step.status)}</span></div>
+          <div class="muted">${escapeHtml(step.id)}</div>
+        </div>
+      `).join('');
+      $('onboardingStatus').innerHTML = `${steps || '<div class="empty">No onboarding steps.</div>'}${file}`;
+    }
+
     function renderSecurityStatus(status) {
+      $('receiverState').textContent = `Receiver ${status.bound.host}:${status.bound.port}`;
       $('securityNotice').textContent = `Receiver bound to ${status.bound.host}:${status.bound.port}. Denied requests: ${status.deniedRequests}.`;
       $('securityStatus').innerHTML = `
         <div class="security-grid">
           <div class="metric"><span>Capabilities</span><strong>${status.capabilities.length}</strong></div>
           <div class="metric"><span>Pairing challenges</span><strong>${(status.pairingChallenges || status.pairingCodes || []).length}</strong></div>
         </div>
-        <h2 style="margin-top:14px">Capabilities</h2>
-        ${status.capabilities.length ? status.capabilities.map(renderCapability).join('') : '<div class="muted">No capabilities yet.</div>'}
+        <h3>Capabilities</h3>
+        ${status.capabilities.length ? status.capabilities.map(renderCapability).join('') : '<div class="empty">No capabilities yet.</div>'}
       `;
       if (status.captureRoots) {
         $('captureRoots').innerHTML = [
           `<div>Capture roots: ${status.captureRoots.map(escapeHtml).join(', ') || '(none configured)'}</div>`,
-          ...(status.recentCaptureFiles || []).map(file => `<button onclick="useImportPath(${jsArg(file.path)})">${escapeHtml(file.path)}</button>`),
+          ...(status.recentCaptureFiles || []).slice(0, 8).map(file => `<button onclick="useImportPath(${jsArg(file.path)})">${escapeHtml(file.path)}</button>`),
         ].join('');
       }
     }
@@ -394,7 +715,7 @@
         ? `<button onclick="revokeCapability('${escapeAttribute(capability.id)}')">Revoke</button><button onclick="rotateCapability('${escapeAttribute(capability.id)}', ${savesDashboardToken ? 'true' : 'false'})">Rotate</button>`
         : '';
       return `
-        <div class="sample">
+        <div class="item">
           <div><strong>${escapeHtml(capability.label || capability.kind)}</strong> <span class="badge">${escapeHtml(capability.status)}</span></div>
           <div class="muted">${escapeHtml(capability.id)} / ${escapeHtml(capability.kind)} / ${(capability.scopes || []).map(escapeHtml).join(', ')}</div>
           <div class="row" style="margin-top:8px">${controls}</div>
@@ -412,11 +733,11 @@
         }),
       });
       localStorage.setItem(TOKEN_STORAGE_KEY, created.token);
-      $('securityToken').value = created.token;
-      $('pairingCode').innerHTML = '<div class="notice">Admin token created and saved locally.</div>';
+      syncTokenInputs();
+      $('pairingCode').innerHTML = '<div class="notice good">Admin token created and saved locally.</div>';
       await refreshSecurityStatus({ silent: true });
       await refreshStatus();
-      await loadReview();
+      showPage('ask');
     }
 
     async function bootstrapDashboardSession() {
@@ -430,24 +751,32 @@
         body: JSON.stringify({ secret }),
       });
       localStorage.removeItem(TOKEN_STORAGE_KEY);
-      $('securityToken').value = '';
+      syncTokenInputs();
       $('bootstrapSecret').value = '';
-      $('pairingCode').innerHTML = `<div class="notice">Dashboard session ready until ${escapeHtml(result.session.expiresAt)}.</div>`;
+      $('pairingCode').innerHTML = `<div class="notice good">Dashboard session ready until ${escapeHtml(result.session.expiresAt)}.</div>`;
       await refreshSecurityStatus({ silent: true });
       await refreshStatus();
-      await loadReview();
+      showPage('ask');
     }
 
-    function saveSecurityToken() {
-      const token = $('securityToken').value.trim();
+    function syncTokenInputs() {
+      const token = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+      $('securityToken').value = token;
+      $('securityTokenMirror').value = token;
+    }
+
+    function saveSecurityToken(sourceId = 'securityTokenMirror') {
+      const source = $(sourceId);
+      const token = (source ? source.value : '').trim();
       if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
       else localStorage.removeItem(TOKEN_STORAGE_KEY);
+      syncTokenInputs();
       refreshSecurityStatus({ silent: true }).catch(() => {});
     }
 
     function clearSecurityToken() {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
-      $('securityToken').value = '';
+      syncTokenInputs();
       renderSecurityLocked('Local token cleared.');
     }
 
@@ -476,28 +805,27 @@
         <div class="muted">Rotated token</div>
         <div class="code-box">${escapeHtml(rotated.token)}</div>
       `;
-      if (saveAsDashboardToken) {
-        localStorage.setItem(TOKEN_STORAGE_KEY, rotated.token);
-        $('securityToken').value = rotated.token;
-      }
+      if (saveAsDashboardToken) localStorage.setItem(TOKEN_STORAGE_KEY, rotated.token);
+      syncTokenInputs();
       await refreshSecurityStatus({ silent: true });
     }
 
     async function refreshStatus() {
       const status = await api('/api/status');
-      $('metrics').innerHTML = [
+      const metricHtml = [
         ['Snapshots', status.snapshots],
         ['Unique links', status.resources],
         ['YouTube', status.youtube],
         ['Unmarked', status.unmarked],
         ['Annotated', status.annotated],
-        ['Proposed views', status.proposedViews],
-        ['Accepted views', status.acceptedViews],
+        ['Views', `${status.acceptedViews}/${status.proposedViews}`],
         ['Tab observations', status.observations],
         ['Agent runs', status.agentRuns],
         ['Codex scans', status.codexScanArtifacts],
         ['Atomic items', status.atomicItems],
       ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
+      $('metrics').innerHTML = metricHtml;
+      $('diagnosticMetrics').innerHTML = metricHtml;
       await loadViews();
       await loadCommands();
       await loadJobs();
@@ -511,14 +839,15 @@
       });
       $('importResult').textContent = `Imported ${result.tabCount} tabs into ${result.resourceCount} resources.`;
       await refreshStatus();
-      await loadReview();
+      await startReviewSession('unmarked');
     }
 
     async function runExtraction() {
       $('commandResult').innerHTML = '<div class="notice">Refreshing local extraction artifacts...</div>';
       const result = await api('/api/extract/run', { method: 'POST', body: '{}' });
-      $('commandResult').innerHTML = `<div class="notice">Extracted ${result.artifactsWritten} artifacts across ${result.resourcesProcessed} resources.</div>`;
+      $('commandResult').innerHTML = `<div class="notice good">Extracted ${result.artifactsWritten} artifacts across ${result.resourcesProcessed} resources.</div>`;
       await refreshStatus();
+      showPage('ask');
     }
 
     async function runScan() {
@@ -531,8 +860,9 @@
           reasoningEffort: $('reasoningEffort').value,
         }),
       });
-      $('commandResult').innerHTML = `<div class="notice">Created ${created.job.id}. Queued ${created.resourcesQueued}, skipped fresh ${created.resourcesSkippedFresh}. Use Resume from Jobs to process it.</div>`;
+      $('commandResult').innerHTML = `<div class="notice good">Created ${created.job.id}. Queued ${created.resourcesQueued}, skipped fresh ${created.resourcesSkippedFresh}.</div>`;
       await refreshStatus();
+      showPage('jobs');
     }
 
     async function planCommand() {
@@ -592,7 +922,7 @@
     }
 
     function renderActionCard(action) {
-      const result = action.result ? `<div class="muted">${escapeHtml(JSON.stringify(action.result).slice(0, 280))}</div>` : '';
+      const result = action.result ? `<div class="muted">${escapeHtml(JSON.stringify(action.result).slice(0, 220))}</div>` : '';
       const controls = action.status === 'proposed' && action.approval === 'confirm'
         ? `<button class="primary" onclick="confirmAction('${escapeAttribute(action.id)}')">Confirm</button><button onclick="cancelAction('${escapeAttribute(action.id)}')">Cancel</button>`
         : action.status === 'proposed'
@@ -602,10 +932,24 @@
         <div class="action-card">
           <div><strong>${escapeHtml(action.kind)}</strong> <span class="badge">${escapeHtml(action.status)}</span> <span class="badge">${escapeHtml(action.approval)}</span></div>
           <div class="muted">${escapeHtml(action.action.rationale || '')}</div>
+          ${renderActionResultLinks(action)}
           ${result}
           <div class="row" style="margin-top:8px">${controls}</div>
         </div>
       `;
+    }
+
+    function renderActionResultLinks(action) {
+      const result = action.result || {};
+      const viewIds = Array.isArray(result.viewIds) ? result.viewIds : [];
+      const viewButtons = viewIds.map(viewId => `<button onclick="loadViewPreview('${escapeAttribute(viewId)}')">Open view</button>`).join('');
+      const reviewButton = action.kind === 'start_review'
+        ? `<button onclick="startReviewSession('${escapeAttribute(action.action.queue || 'unmarked')}')">Open review session</button>`
+        : '';
+      const jobId = result.job?.id || result.jobId || result.id;
+      const jobButton = action.kind === 'scan_resources' && jobId ? `<button onclick="showPage('jobs')">Open job</button>` : '';
+      const controls = [viewButtons, reviewButton, jobButton].filter(Boolean).join('');
+      return controls ? `<div class="row" style="margin:8px 0">${controls}</div>` : '';
     }
 
     async function confirmAction(actionId) {
@@ -628,42 +972,44 @@
 
     function renderCommandResult(result) {
       const preview = result.previews[0];
-      if (!preview) return `<div class="notice">${result.message}</div>`;
+      if (!preview) return `<div class="notice">${escapeHtml(result.message)}</div>`;
+      return renderViewPreview(preview, result);
+    }
+
+    function renderViewPreview(preview, result = {}) {
       const badgeHtml = result.mode ? `
             <span class="badge">Mode: ${escapeHtml(result.mode)}</span>
             <span class="badge">Codex used: ${result.codexTurnSpent ? 'yes' : 'no'}</span>
             <span class="badge">Validation: ${escapeHtml(result.validationStatus || 'unknown')}</span>
-            <span class="badge">No browser tabs changed</span>
+            <span class="badge green">No browser tabs changed</span>
       ` : `
             <span class="badge">Stored preview</span>
-            <span class="badge">No browser tabs changed</span>
+            <span class="badge green">No browser tabs changed</span>
       `;
-      const visibleSamples = preview.samples.filter(sample => activeSampleStates.has(sample.state));
+      const visibleSamples = preview.samples.filter(sample => activeSampleStates.has(sample.state)).slice(0, 30);
       return `
-        <div class="panel">
-          <div class="row" style="margin-bottom:10px">
-            ${badgeHtml}
-          </div>
-          <div class="resource-title">${preview.name}</div>
-          <div class="muted">${preview.goal || ''}</div>
+        <div>
+          <div class="row" style="margin-bottom:10px">${badgeHtml}</div>
+          <div class="resource-title">${escapeHtml(preview.name)}</div>
+          <div class="muted">${escapeHtml(preview.goal || '')}</div>
           ${renderCounts(preview.countsByState)}
           <div class="row">
-            <button class="primary" onclick="acceptView('${preview.viewId}')">Accept view</button>
-            <button onclick="loadViewPreview('${preview.viewId}')">Refresh preview</button>
+            <button class="primary" onclick="acceptView('${escapeAttribute(preview.viewId)}')">Accept view</button>
+            <button onclick="loadViewPreview('${escapeAttribute(preview.viewId)}')">Refresh preview</button>
           </div>
-          <h2 style="margin-top:14px">Rules</h2>
-          <div class="muted">Include: ${preview.inclusionRules.join('; ')}</div>
-          <div class="muted">Exclude: ${preview.exclusionRules.join('; ')}</div>
-          <h2 style="margin-top:14px">Refine</h2>
+          <h3>Rules</h3>
+          <div class="muted">Include: ${preview.inclusionRules.map(escapeHtml).join('; ')}</div>
+          <div class="muted">Exclude: ${preview.exclusionRules.map(escapeHtml).join('; ')}</div>
+          <h3>Refine</h3>
           <textarea id="refineText" placeholder="Refine this view"></textarea>
           <div class="row" style="margin-top:10px">
             <button onclick="refineView('${escapeAttribute(preview.viewId)}')">Refine view</button>
           </div>
-          <h2 style="margin-top:14px">Samples</h2>
+          <h3>Samples</h3>
           <div class="filters row" style="margin-bottom:8px">
             ${sampleStates.map(state => `<button class="${activeSampleStates.has(state) ? 'active' : ''}" onclick="toggleSampleState('${state}')">${state.replace('_', ' ')}</button>`).join('')}
           </div>
-          ${visibleSamples.map(sample => renderSample(sample, preview.viewId)).join('') || '<div class="muted">No samples match the active filters.</div>'}
+          ${visibleSamples.map(sample => renderSample(sample, preview.viewId)).join('') || '<div class="empty">No samples match the active filters.</div>'}
         </div>
       `;
     }
@@ -682,9 +1028,9 @@
     function renderSample(sample, viewId) {
       const safeId = cssSafeId(`${viewId}_${sample.resourceId}`);
       return `
-        <div class="sample">
+        <div class="item">
           <div><strong>${escapeHtml(sample.title)}</strong></div>
-          <div class="muted">${sample.state}${sample.section ? ` / ${escapeHtml(sample.section)}` : ''} / ${Math.round(sample.confidence * 100)}%</div>
+          <div class="muted">${escapeHtml(sample.state)}${sample.section ? ` / ${escapeHtml(sample.section)}` : ''} / ${Math.round(sample.confidence * 100)}%</div>
           <div class="muted">${escapeHtml(sample.reason || '')}</div>
           <div class="row" style="margin-top:8px">
             <button onclick="whyIncluded('${escapeAttribute(viewId)}', '${escapeAttribute(sample.resourceId)}', '${safeId}')">Why included?</button>
@@ -703,32 +1049,52 @@
         method: 'POST',
         body: JSON.stringify({ mode: 'accepted' }),
       });
-      $('commandResult').innerHTML = `<div class="notice">Accepted ${preview.name}. Browser tabs were not changed.</div>${renderCounts(preview.countsByState)}`;
+      const html = `<div class="notice good">Accepted ${escapeHtml(preview.name)}. Browser tabs were not changed.</div>${renderCounts(preview.countsByState)}`;
+      $('commandResult').innerHTML = html;
+      $('viewPreviewPanel').innerHTML = html;
       await refreshStatus();
     }
 
     async function loadViewPreview(viewId) {
       const preview = await api(`/api/views/${viewId}/preview`);
-      showCommandResult({ message: '', previews: [preview] });
+      currentCommandResult = { message: '', previews: [preview] };
+      $('viewPreviewPanel').innerHTML = renderViewPreview(preview);
+      showPage('views');
     }
 
     async function loadViews() {
-      const views = await api('/api/views');
-      $('viewsList').innerHTML = views.length ? views.map(view => `
-        <div class="sample">
+      viewsCache = await api('/api/views');
+      renderViews();
+    }
+
+    function renderViews() {
+      if (!$('viewsList')) return;
+      const query = ($('viewsSearch').value || '').toLowerCase().trim();
+      const filtered = viewsCache.filter(view => `${view.name} ${view.description || ''} ${view.status} ${view.origin}`.toLowerCase().includes(query));
+      const maxPage = Math.max(0, Math.ceil(filtered.length / VIEWS_PER_PAGE) - 1);
+      viewsPage = Math.min(viewsPage, maxPage);
+      const start = viewsPage * VIEWS_PER_PAGE;
+      const pageItems = filtered.slice(start, start + VIEWS_PER_PAGE);
+      $('viewsPager').textContent = filtered.length ? `${start + 1}-${start + pageItems.length} of ${filtered.length}` : 'No views.';
+      $('viewsPrevButton').disabled = viewsPage === 0;
+      $('viewsNextButton').disabled = viewsPage >= maxPage;
+      $('viewsList').innerHTML = pageItems.length ? pageItems.map(view => `
+        <div class="item">
           <div><strong>${escapeHtml(view.name)}</strong></div>
-          <div class="muted">${view.status} / ${view.origin}</div>
-          <button onclick="loadViewPreview('${view.id}')">Preview</button>
+          <div class="muted">${escapeHtml(view.status)} / ${escapeHtml(view.origin)} / ${escapeHtml(view.created_at)}</div>
+          <div class="row" style="margin-top:8px">
+            <button onclick="loadViewPreview('${escapeAttribute(view.id)}')">Preview</button>
+          </div>
         </div>
-      `).join('') : '<div class="muted">No views yet.</div>';
+      `).join('') : '<div class="empty">No views match the filter.</div>';
     }
 
     async function loadCommands() {
       const commands = await api('/api/commands');
-      $('commandsList').innerHTML = commands.length ? commands.map(command => {
+      $('commandsList').innerHTML = commands.length ? commands.slice(0, 15).map(command => {
         const firstView = command.viewIds && command.viewIds[0];
         return `
-          <div class="sample">
+          <div class="item">
             <div><strong>${escapeHtml(command.text)}</strong></div>
             <div class="muted">${escapeHtml(command.status)} / ${escapeHtml(command.created_at)}</div>
             <div class="row" style="margin-top:8px">
@@ -737,22 +1103,35 @@
             </div>
           </div>
         `;
-      }).join('') : '<div class="muted">No commands yet.</div>';
+      }).join('') : '<div class="empty">No commands yet.</div>';
     }
 
     async function loadJobs() {
       const jobs = await api('/api/jobs');
-      $('jobsList').innerHTML = jobs.length ? jobs.map(job => `
-        <div class="sample">
-          <div><strong>${escapeHtml(job.kind)}</strong></div>
-          <div class="muted">${escapeHtml(job.id)} / ${escapeHtml(job.status)}</div>
-          <div class="muted">pending ${job.progress.pending}, running ${job.progress.running}, succeeded ${job.progress.succeeded}, failed ${job.progress.failed}, skipped ${job.progress.skipped}, cancelled ${job.progress.cancelled}</div>
+      $('jobsList').innerHTML = jobs.length ? jobs.slice(0, 20).map(job => `
+        <div class="item">
+          <div><strong>${escapeHtml(formatJobKind(job.kind))}</strong> <span class="badge">${escapeHtml(formatJobStatus(job.status))}</span></div>
+          <div class="muted">${escapeHtml(job.id)}</div>
+          <div class="muted">${escapeHtml(formatJobProgress(job.progress))}</div>
           <div class="row" style="margin-top:8px">
             <button onclick="resumeJob('${escapeAttribute(job.id)}')">Resume</button>
             <button onclick="cancelJob('${escapeAttribute(job.id)}')">Cancel</button>
           </div>
         </div>
-      `).join('') : '<div class="muted">No jobs yet.</div>';
+      `).join('') : '<div class="empty">No jobs yet.</div>';
+    }
+
+    function formatJobKind(kind) {
+      return kind === 'codex_scan' ? 'Codex resource scan' : kind === 'metadata_fetch' ? 'Metadata extraction' : kind;
+    }
+
+    function formatJobStatus(status) {
+      const map = { pending: 'Ready', running: 'Working', succeeded: 'Done', failed: 'Needs attention', cancelled: 'Stopped' };
+      return map[status] || status;
+    }
+
+    function formatJobProgress(progress) {
+      return `ready ${progress.pending}, working ${progress.running}, done ${progress.succeeded}, needs attention ${progress.failed}, skipped ${progress.skipped}, stopped ${progress.cancelled}`;
     }
 
     async function resumeJob(jobId) {
@@ -761,7 +1140,7 @@
         method: 'POST',
         body: JSON.stringify({ maxItems: 10 }),
       });
-      $('commandResult').innerHTML = `<div class="notice">Processed ${result.processedItems}; scanned ${result.scannedResources}; skipped ${result.skippedItems}; failed ${result.failedItems}; Codex turns ${result.codexTurns || 0}.</div>`;
+      $('commandResult').innerHTML = `<div class="notice good">Processed ${result.processedItems}; scanned ${result.scannedResources}; skipped ${result.skippedItems}; failed ${result.failedItems}; Codex turns ${result.codexTurns || 0}.</div>`;
       await refreshStatus();
     }
 
@@ -786,6 +1165,7 @@
       });
       showCommandResult(result);
       await refreshStatus();
+      showPage('ask');
     }
 
     async function whyIncluded(viewId, resourceId, safeId) {
@@ -805,32 +1185,76 @@
           reason: `User clicked ${decision.replace('_', ' ')}`,
         }),
       });
-      $('commandResult').insertAdjacentHTML('afterbegin', `<div class="notice">Saved ${escapeHtml(decision.replace('_', ' '))} feedback. Future views will use it as primary evidence.</div>`);
+      const notice = `<div class="notice good">Saved ${escapeHtml(decision.replace('_', ' '))} feedback.</div>`;
+      if (activePage === 'views') $('viewPreviewPanel').insertAdjacentHTML('afterbegin', notice);
+      else $('commandResult').insertAdjacentHTML('afterbegin', notice);
     }
 
     function toggleSampleState(state) {
       if (activeSampleStates.has(state)) activeSampleStates.delete(state);
       else activeSampleStates.add(state);
-      if (currentCommandResult) $('commandResult').innerHTML = renderCommandResult(currentCommandResult);
+      if (currentCommandResult) {
+        const html = renderCommandResult(currentCommandResult);
+        if (activePage === 'views') $('viewPreviewPanel').innerHTML = html;
+        else $('commandResult').innerHTML = html;
+      }
     }
 
     function reuseCommand(text) {
       $('commandText').value = text;
+      showPage('ask');
     }
 
     function useImportPath(path) {
       $('importPath').value = path;
+      showPage('capture');
     }
 
     async function loadReview() {
-      selectedTags = new Set();
-      const result = await api('/api/review/next?queue=unmarked&preload=2');
-      currentReview = result.current;
-      if (!currentReview) {
-        $('reviewCard').innerHTML = '<div class="muted">No review items.</div>';
+      if (!activeReviewSessionId) {
+        await startReviewSession($('reviewSessionType').value || 'unmarked');
         return;
       }
-      $('reviewCard').innerHTML = renderReview(result);
+      try {
+        reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}`);
+        selectedTags = new Set();
+        currentReview = reviewSnapshot.current;
+        renderReviewSession(reviewSnapshot);
+      } catch {
+        activeReviewSessionId = null;
+        localStorage.removeItem(REVIEW_SESSION_STORAGE_KEY);
+        await startReviewSession($('reviewSessionType').value || 'unmarked');
+      }
+    }
+
+    async function startReviewSession(type = 'unmarked') {
+      const commandText = type === 'ambiguous_command' ? $('commandText').value : undefined;
+      reviewSnapshot = await api('/api/review-sessions', {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          commandText,
+          preload: 4,
+          title: `${type.replace('_', ' ')} review`,
+        }),
+      });
+      activeReviewSessionId = reviewSnapshot.session.id;
+      localStorage.setItem(REVIEW_SESSION_STORAGE_KEY, activeReviewSessionId);
+      selectedTags = new Set();
+      currentReview = reviewSnapshot.current;
+      renderReviewSession(reviewSnapshot);
+      showPage('inbox');
+    }
+
+    function renderReviewSession(snapshot) {
+      const progress = snapshot.progress;
+      $('reviewProgress').textContent = `${snapshot.session.status}: ${progress.completed} done, ${progress.pending} pending, ${progress.skipped} skipped.`;
+      $('reviewSummary').textContent = `${snapshot.session.totalItems} items in ${snapshot.session.type.replace('_', ' ')}.`;
+      if (!snapshot.current) {
+        $('reviewCard').innerHTML = '<div class="empty">No review items in this session.</div>';
+        return;
+      }
+      $('reviewCard').innerHTML = renderReview(snapshot);
     }
 
     function selectedPlannerMode() {
@@ -841,12 +1265,21 @@
     function renderReview(result) {
       const item = result.current;
       const url = item.redactedUrl || item.canonicalUrl;
+      const frequent = result.frequentTags || [];
+      const tagButtons = Array.from(new Set([...frequent, ...chips])).slice(0, 16).map(tag => (
+        `<button class="${selectedTags.has(tag) ? 'active' : ''}" onclick="toggleTag('${escapeAttribute(tag)}', this)">${escapeHtml(tag)}</button>`
+      )).join('');
       return `
-        <div class="resource-title">${escapeHtml(item.title || '(untitled)')}</div>
-        <div class="muted">${escapeHtml(item.host)} / ${escapeHtml(item.urlKind)} / ${escapeHtml(item.extractionStatus)}</div>
+        <div class="split-row">
+          <div>
+            <div class="resource-title">${escapeHtml(item.title || '(untitled)')}</div>
+            <div class="muted">${escapeHtml(item.host)} / ${escapeHtml(item.urlKind)} / ${escapeHtml(item.extractionStatus)}</div>
+          </div>
+          <span class="badge">${escapeHtml(result.session.status)}</span>
+        </div>
         <div class="muted" style="word-break:break-all">${escapeHtml(url)}</div>
         <div class="muted">Groups: ${item.browserGroupTitles.map(escapeHtml).join(', ') || '(none)'}</div>
-        <div class="chips row" style="margin-top:12px">${chips.map(tag => `<button onclick="toggleTag('${tag}', this)">${tag}</button>`).join('')}</div>
+        <div class="chips row" style="margin-top:12px">${tagButtons}</div>
         <textarea id="reviewNote" placeholder="Note" style="margin-top:10px"></textarea>
         <div class="row" style="margin-top:10px">
           <button class="primary" onclick="saveReview()">Save & next</button>
@@ -854,7 +1287,7 @@
           <button class="danger" onclick="ignoreReview()">Mark ignore</button>
           <a class="button" target="_blank" rel="noreferrer" href="${escapeAttribute(item.canonicalUrl)}">Open externally</a>
         </div>
-        <h2 style="margin-top:14px">Next</h2>
+        <h3>Next</h3>
         ${result.next.map(next => `<div class="muted">${escapeHtml(next.title || next.canonicalUrl)}</div>`).join('') || '<div class="muted">(none)</div>'}
       `;
     }
@@ -870,30 +1303,90 @@
     }
 
     async function saveReview() {
-      if (!currentReview) return;
-      await api(`/api/review/${currentReview.resourceId}/complete`, {
+      if (!currentReview || !activeReviewSessionId) return;
+      reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}/decisions`, {
         method: 'POST',
         body: JSON.stringify({
+          resourceId: currentReview.resourceId,
+          action: 'save_and_next',
           tags: [...selectedTags],
           description: $('reviewNote').value,
-          decision: selectedTags.has('watch_later') ? 'watch_later' : selectedTags.has('project_reference') ? 'project_reference' : selectedTags.has('inspiration') ? 'inspiration' : 'none',
+          decision: selectedTags.has('watch_later') ? 'watch_later' : selectedTags.has('project_reference') ? 'project_reference' : selectedTags.has('inspiration') ? 'inspiration' : selectedTags.has('ignore') ? 'ignore' : 'none',
         }),
       });
       await refreshStatus();
-      await loadReview();
+      selectedTags = new Set();
+      currentReview = reviewSnapshot.current;
+      renderReviewSession(reviewSnapshot);
     }
 
     async function skipReview() {
-      if (!currentReview) return;
-      await api(`/api/review/${currentReview.resourceId}/skip`, { method: 'POST', body: '{}' });
-      await loadReview();
+      if (!currentReview || !activeReviewSessionId) return;
+      reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}/decisions`, {
+        method: 'POST',
+        body: JSON.stringify({ resourceId: currentReview.resourceId, action: 'skip' }),
+      });
+      selectedTags = new Set();
+      currentReview = reviewSnapshot.current;
+      renderReviewSession(reviewSnapshot);
     }
 
     async function ignoreReview() {
-      if (!currentReview) return;
-      await api(`/api/review/${currentReview.resourceId}/ignore`, { method: 'POST', body: '{}' });
+      if (!currentReview || !activeReviewSessionId) return;
+      reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}/decisions`, {
+        method: 'POST',
+        body: JSON.stringify({ resourceId: currentReview.resourceId, action: 'mark_ignore', tags: ['ignore'], decision: 'ignore' }),
+      });
       await refreshStatus();
-      await loadReview();
+      selectedTags = new Set();
+      currentReview = reviewSnapshot.current;
+      renderReviewSession(reviewSnapshot);
+    }
+
+    async function pauseReviewSession() {
+      if (!activeReviewSessionId) return;
+      reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}/pause`, { method: 'POST', body: '{}' });
+      renderReviewSession(reviewSnapshot);
+    }
+
+    async function resumeReviewSession() {
+      if (!activeReviewSessionId) return;
+      reviewSnapshot = await api(`/api/review-sessions/${activeReviewSessionId}/resume`, { method: 'POST', body: '{}' });
+      renderReviewSession(reviewSnapshot);
+    }
+
+    function handleReviewShortcuts(event) {
+      const target = event.target;
+      if (activePage !== 'inbox' || !currentReview || (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      const key = event.key.toLowerCase();
+      if (key === 'enter') {
+        event.preventDefault();
+        saveReview().catch(showError);
+      } else if (key === 's') {
+        event.preventDefault();
+        skipReview().catch(showError);
+      } else if (key === 'i') {
+        event.preventDefault();
+        selectedTags.add('ignore');
+        ignoreReview().catch(showError);
+      } else if (key === '1') {
+        toggleTagFromKeyboard('important');
+      } else if (key === '2') {
+        toggleTagFromKeyboard('watch_later');
+      } else if (key === '3') {
+        toggleTagFromKeyboard('project_reference');
+      } else if (key === '4') {
+        toggleTagFromKeyboard('inspiration');
+      } else if (key === 'p') {
+        event.preventDefault();
+        pauseReviewSession().catch(showError);
+      }
+    }
+
+    function toggleTagFromKeyboard(tag) {
+      if (selectedTags.has(tag)) selectedTags.delete(tag);
+      else selectedTags.add(tag);
+      if (reviewSnapshot) renderReviewSession(reviewSnapshot);
     }
 
     function escapeHtml(value) {
@@ -919,27 +1412,41 @@
     $('planButton').addEventListener('click', () => planCommand().catch(showCommandError));
     $('newConversationButton').addEventListener('click', () => newConversation().catch(showError));
     $('sendConversationButton').addEventListener('click', () => sendConversation().catch(showError));
-    $('saveSecurityTokenButton').addEventListener('click', () => saveSecurityToken());
+    $('saveSecurityTokenButton').addEventListener('click', () => saveSecurityToken('securityToken'));
+    $('saveSecurityTokenButtonSecondary').addEventListener('click', () => saveSecurityToken('securityTokenMirror'));
     $('clearSecurityTokenButton').addEventListener('click', () => clearSecurityToken());
+    $('clearSecurityTokenButtonSecondary').addEventListener('click', () => clearSecurityToken());
     $('bootstrapAdminButton').addEventListener('click', () => bootstrapAdminToken().catch(showError));
     $('bootstrapSessionButton').addEventListener('click', () => bootstrapDashboardSession().catch(showError));
     $('refreshSecurityButton').addEventListener('click', () => refreshSecurityStatus().catch(showError));
+    $('refreshSecurityButtonSecondary').addEventListener('click', () => refreshSecurityStatus().catch(showError));
     $('refreshOnboardingButton').addEventListener('click', () => refreshOnboarding().catch(showError));
     $('createPairingCodeButton').addEventListener('click', () => createExtensionPairingCode().catch(showError));
+    $('startReviewSessionButton').addEventListener('click', () => startReviewSession($('reviewSessionType').value).catch(showError));
+    $('pauseReviewSessionButton').addEventListener('click', () => pauseReviewSession().catch(showError));
+    $('resumeReviewSessionButton').addEventListener('click', () => resumeReviewSession().catch(showError));
+    $('viewsSearch').addEventListener('input', () => { viewsPage = 0; renderViews(); });
+    $('viewsPrevButton').addEventListener('click', () => { viewsPage = Math.max(0, viewsPage - 1); renderViews(); });
+    $('viewsNextButton').addEventListener('click', () => { viewsPage += 1; renderViews(); });
+    document.addEventListener('keydown', handleReviewShortcuts);
+    setupNavigation();
 
     function showError(error) {
-      $('commandResult').innerHTML = `<div class="notice">${escapeHtml(error.message || error)}</div>`;
+      const message = escapeHtml(error.message || error);
+      if (activePage === 'views') $('viewPreviewPanel').innerHTML = `<div class="notice bad">${message}</div>`;
+      else $('commandResult').innerHTML = `<div class="notice bad">${message}</div>`;
     }
 
     function showCommandError(error) {
       $('commandResult').innerHTML = `
-        <div class="notice">
+        <div class="notice bad">
           ${escapeHtml(error.message || error)}
           <div class="row" style="margin-top:10px">
             <button onclick="retryHeuristic()">Retry with heuristic</button>
           </div>
         </div>
       `;
+      showPage('ask');
     }
 
     async function retryHeuristic() {
@@ -948,14 +1455,18 @@
     }
 
     async function initialLoad() {
+      syncTokenInputs();
       const trusted = await refreshSecurityStatus({ silent: true });
       if (trusted) {
         await refreshStatus();
-        await loadReview();
+        const preferred = localStorage.getItem(PAGE_STORAGE_KEY) || 'ask';
+        showPage(preferred === 'onboarding' ? 'ask' : preferred);
       } else {
         $('metrics').innerHTML = '<div class="metric"><span>Status</span><strong>Locked</strong></div>';
-        $('reviewCard').innerHTML = '<div class="muted">Local token required.</div>';
+        $('diagnosticMetrics').innerHTML = $('metrics').innerHTML;
+        $('reviewCard').innerHTML = '<div class="empty">Local token required.</div>';
         await refreshOnboarding();
+        showPage('onboarding');
       }
     }
 
