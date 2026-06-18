@@ -65,6 +65,10 @@ export interface SendConversationMessageOptions {
   plannerProvider: LlmProvider;
 }
 
+export interface AgentActionExecutionOptions {
+  plannerProvider?: LlmProvider;
+}
+
 export function createConversationThread(
   db: Database.Database,
   title?: string,
@@ -156,7 +160,7 @@ export async function sendConversationMessage(
   });
   persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
   for (const action of actionsReadyWithoutConfirmation(plan)) {
-    await runPersistedAgentAction(db, action.id);
+    await runPersistedAgentAction(db, action.id, { plannerProvider: options.plannerProvider });
   }
   return getConversationSnapshot(db, input.threadId);
 }
@@ -223,13 +227,17 @@ export function persistAgentTurnPlan(
   return plan;
 }
 
-export async function confirmAgentAction(db: Database.Database, actionId: string): Promise<AgentActionRecord> {
+export async function confirmAgentAction(
+  db: Database.Database,
+  actionId: string,
+  options: AgentActionExecutionOptions = {},
+): Promise<AgentActionRecord> {
   const record = getAgentAction(db, actionId);
   if (record.status === 'succeeded' || record.status === 'failed') return record;
   if (record.status === 'cancelled') return record;
-  if (record.action.approval !== 'confirm') return runPersistedAgentAction(db, actionId);
+  if (record.action.approval !== 'confirm') return runPersistedAgentAction(db, actionId, options);
   updateAgentAction(db, { actionId, status: 'approved' });
-  return runPersistedAgentAction(db, actionId);
+  return runPersistedAgentAction(db, actionId, options);
 }
 
 export function cancelAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
@@ -239,12 +247,16 @@ export function cancelAgentAction(db: Database.Database, actionId: string): Agen
   return getAgentAction(db, actionId);
 }
 
-export async function runPersistedAgentAction(db: Database.Database, actionId: string): Promise<AgentActionRecord> {
+export async function runPersistedAgentAction(
+  db: Database.Database,
+  actionId: string,
+  options: AgentActionExecutionOptions = {},
+): Promise<AgentActionRecord> {
   const record = getAgentAction(db, actionId);
   if (record.status === 'succeeded' || record.status === 'failed' || record.status === 'cancelled') return record;
   try {
     updateAgentAction(db, { actionId, status: 'running' });
-    const result = await executeAgentAction(db, record.action);
+    const result = await executeAgentAction(db, record.action, options);
     updateAgentAction(db, { actionId, status: 'succeeded', result });
   } catch (error) {
     updateAgentAction(db, { actionId, status: 'failed', error: error instanceof Error ? error.message : String(error) });
@@ -252,12 +264,16 @@ export async function runPersistedAgentAction(db: Database.Database, actionId: s
   return getAgentAction(db, actionId);
 }
 
-export async function executeAgentAction(db: Database.Database, action: AgentActionValue): Promise<unknown> {
+export async function executeAgentAction(
+  db: Database.Database,
+  action: AgentActionValue,
+  options: AgentActionExecutionOptions = {},
+): Promise<unknown> {
   switch (action.kind) {
     case 'plan_view':
-      return runAgentCommand(db, 'heuristic', {
+      return runAgentCommand(db, requirePlannerProvider(options, action.kind), {
         text: action.commandText,
-        mode: 'heuristic',
+        mode: 'codex',
         candidateLimit: action.candidateLimit,
       });
     case 'refine_view': {
@@ -268,13 +284,13 @@ export async function executeAgentAction(db: Database.Database, action: AgentAct
         FROM memberships
         WHERE view_id = ? AND target_kind = 'resource'
       `).all(action.viewId).map((row: unknown) => (row as { id: string }).id);
-      return runAgentCommand(db, 'heuristic', {
+      return runAgentCommand(db, requirePlannerProvider(options, action.kind), {
         text: [
           `Refine existing view "${preview.name}".`,
           preview.goal ? `Existing goal: ${preview.goal}` : '',
           `User refinement: ${action.instruction}`,
         ].filter(Boolean).join(' '),
-        mode: 'heuristic',
+        mode: 'codex',
         candidateLimit: 200,
         seedResourceIds,
         parentRevisionId: parentRevision?.id,
@@ -469,4 +485,11 @@ function parseJson(value: string): unknown {
 
 function assertNever(value: never): never {
   throw new Error(`Unsupported agent action: ${JSON.stringify(value)}`);
+}
+
+function requirePlannerProvider(options: AgentActionExecutionOptions, actionKind: AgentActionValue['kind']): LlmProvider {
+  if (!options.plannerProvider) {
+    throw new Error(`${actionKind} requires a Codex planner provider`);
+  }
+  return options.plannerProvider;
 }

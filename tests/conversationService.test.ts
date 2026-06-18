@@ -17,6 +17,7 @@ import type { AgentTurnPlan } from '../src/agent/actionProtocol.js';
 import type { LlmProvider } from '../src/llm/types.js';
 import { buildResourceBrief } from '../src/resources/briefs.js';
 import { createUserCommand, persistSemanticViewPlan } from '../src/views/service.js';
+import type { SemanticViewPlan } from '../src/shared/schemas.js';
 
 function seed() {
   const db = openDatabase(':memory:');
@@ -40,6 +41,17 @@ function queuedProvider(plans: AgentTurnPlan[], prompts: string[] = []): LlmProv
       const plan = plans.shift();
       if (!plan) throw new Error('No queued plan');
       return { text: JSON.stringify(plan), usage: { quotaTurns: 1 } };
+    },
+  };
+}
+
+function queuedJsonProvider(outputs: unknown[], prompts: string[] = []): LlmProvider {
+  return {
+    async complete(prompt) {
+      prompts.push(prompt);
+      const output = outputs.shift();
+      if (!output) throw new Error('No queued output');
+      return { text: JSON.stringify(output), usage: { quotaTurns: 1 } };
     },
   };
 }
@@ -143,6 +155,62 @@ describe('persistent conversational agent actions', () => {
 
     expect(snapshot.actions[0].status).toBe('succeeded');
     expect(snapshot.actions[0].result).toHaveProperty('current');
+  });
+
+  it('executes conversational plan_view actions through Codex semantic planning', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const prompts: string[] = [];
+    const semanticPlan: SemanticViewPlan = {
+      commandText: 'Make a forest inspiration board',
+      views: [{
+        name: 'Codex forest inspiration',
+        goal: 'Collect forest inspiration resources.',
+        inclusionRules: ['Include forest inspiration.'],
+        exclusionRules: ['Exclude unrelated resources.'],
+        sections: [],
+        confidence: 0.91,
+        memberships: [{
+          targetKind: 'resource',
+          targetId: resourceId,
+          state: 'strong_include',
+          confidence: 0.91,
+          reason: 'Codex selected the forest moodboard resource.',
+          evidenceRefs: [evidenceRef],
+        }],
+      }],
+      reviewQueues: [],
+      explanation: 'Codex planned the conversational view.',
+    };
+    const provider = queuedJsonProvider([{
+      reply: 'I will preview that view.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'action_plan_view_codex',
+        kind: 'plan_view',
+        approval: 'preview',
+        rationale: 'Create a proposed view from the request.',
+        commandText: 'Make a forest inspiration board',
+        candidateLimit: 50,
+      }],
+    } satisfies AgentTurnPlan, semanticPlan], prompts);
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Make a forest inspiration board',
+    }, { plannerProvider: provider });
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain('Make a forest inspiration board');
+    expect(snapshot.actions[0].status).toBe('succeeded');
+    const result = snapshot.actions[0].result as { mode?: string; codexTurnSpent?: boolean; viewIds?: string[] };
+    expect(result.mode).toBe('codex');
+    expect(result.codexTurnSpent).toBe(true);
+    expect(result.viewIds).toHaveLength(1);
+    const view = db.prepare('SELECT origin FROM views WHERE id = ?').get(result.viewIds?.[0]) as { origin: string };
+    expect(view.origin).toBe('codex');
   });
 
   it('keeps annotation actions proposed until confirmed', async () => {

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import Fastify from 'fastify';
 import { runAgentCommand, type RunAgentCommandInput } from '../agent/commandService.js';
@@ -5,6 +6,7 @@ import {
   cancelAgentAction,
   confirmAgentAction,
   createConversationThread,
+  getAgentAction,
   getConversationSnapshot,
   sendConversationMessage,
 } from '../agent/conversationService.js';
@@ -50,7 +52,7 @@ const jobWorker = startInProcessJobWorker(db, {
     const job = getJobSnapshot(db, jobId);
     const input = asRecord(job.input);
     const reasoningEffort = readReasoningEffort(input.reasoningEffort);
-    const provider = getCodexProvider({ reasoningEffort });
+    const provider = getCodexProvider({ reasoningEffort, scope: `job:${jobId}` });
     await resumeCodexScanJob(db, provider, jobId, {
       maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
       maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
@@ -173,7 +175,9 @@ app.post('/api/agent/command', async (request, reply) => {
   const body = asRecord(request.body);
   const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = mode === 'codex' ? getCodexProvider({ reasoningEffort }) : 'heuristic';
+  const provider = mode === 'codex'
+    ? getCodexProvider({ reasoningEffort, scope: `agent-command:${crypto.randomUUID()}`, reuseThread: false })
+    : 'heuristic';
   const input: RunAgentCommandInput = {
     text: typeof body.text === 'string' ? body.text : '',
     mode,
@@ -202,7 +206,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   const content = typeof body.content === 'string' ? body.content : '';
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort });
+  const provider = getCodexProvider({ reasoningEffort, scope: `conversation:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
@@ -214,7 +218,11 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
 
 app.post('/api/agent-actions/:actionId/confirm', async (request, reply) => {
   const params = request.params as { actionId: string };
-  return reply.send(await confirmAgentAction(db, params.actionId));
+  const body = asRecord(request.body);
+  const action = getAgentAction(db, params.actionId);
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = getCodexProvider({ reasoningEffort, scope: `conversation:${action.threadId}` });
+  return reply.send(await confirmAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
 app.post('/api/agent-actions/:actionId/cancel', async (request, reply) => {
@@ -229,7 +237,9 @@ app.post('/api/agent/refine', async (request, reply) => {
   if (!viewId || !refinement) return reply.status(400).send({ ok: false, error: 'viewId and text are required' });
   const mode = body.mode === 'heuristic' ? 'heuristic' : 'codex';
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = mode === 'codex' ? getCodexProvider({ reasoningEffort }) : 'heuristic';
+  const provider = mode === 'codex'
+    ? getCodexProvider({ reasoningEffort, scope: `agent-refine:${viewId}:${crypto.randomUUID()}`, reuseThread: false })
+    : 'heuristic';
   const preview = previewView(db, viewId);
   const parentRevision = getLatestViewRevision(db, viewId);
   const seedResourceIds = db.prepare(`
@@ -256,7 +266,7 @@ app.post('/api/agent/refine', async (request, reply) => {
 app.post('/api/agent/scan', async (request, reply) => {
   const body = asRecord(request.body);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort });
+  const provider = getCodexProvider({ reasoningEffort, scope: `scan:${crypto.randomUUID()}`, reuseThread: false });
   const input = readCodexScanInput(body, reasoningEffort);
   const result = await runCodexResourceScan(db, provider, input);
   return reply.send(result);
@@ -300,7 +310,7 @@ app.post('/api/jobs/:jobId/resume', async (request, reply) => {
   if (job.kind !== 'codex_scan') return reply.status(400).send({ ok: false, error: `Unsupported job kind: ${job.kind}` });
   const input = asRecord(job.input);
   const reasoningEffort = readReasoningEffort(input.reasoningEffort);
-  const provider = getCodexProvider({ reasoningEffort });
+  const provider = getCodexProvider({ reasoningEffort, scope: `job:${params.jobId}` });
   const result = await resumeCodexScanJob(db, provider, params.jobId, {
     maxItems: typeof body.maxItems === 'number' ? body.maxItems : undefined,
     maxRetries: typeof body.maxRetries === 'number' ? body.maxRetries : undefined,
@@ -477,8 +487,15 @@ function readCodexScanInput(
   };
 }
 
-function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'>): CodexSdkProvider {
-  const key = config.reasoningEffort ?? 'medium';
+function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort' | 'reuseThread'> & { scope: string }): CodexSdkProvider {
+  if (config.reuseThread === false) {
+    return new CodexSdkProvider({
+      reasoningEffort: config.reasoningEffort ?? 'medium',
+      reuseThread: false,
+      workingDirectory: process.cwd(),
+    });
+  }
+  const key = `${config.scope}:${config.reasoningEffort ?? 'medium'}`;
   const existing = codexProviders.get(key);
   if (existing) return existing;
   const provider = new CodexSdkProvider({
