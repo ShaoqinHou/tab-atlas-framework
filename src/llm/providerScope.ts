@@ -15,6 +15,8 @@ export type ReasoningEffort = NonNullable<CodexSdkProviderConfig['reasoningEffor
 export interface ScopedProviderRequest {
   role: CodexProviderRole;
   scopeKey: string;
+  ownerKey?: string;
+  model?: string;
   reasoningEffort?: ReasoningEffort;
   reuseThread?: boolean;
 }
@@ -22,6 +24,8 @@ export interface ScopedProviderRequest {
 export interface ProviderFactoryConfig {
   role: CodexProviderRole;
   scopeKey: string;
+  ownerKey: string;
+  model: string;
   generation: number;
   reasoningEffort: ReasoningEffort;
   reuseThread: boolean;
@@ -38,6 +42,9 @@ type ProviderThreadRow = {
   id: string;
   role: CodexProviderRole;
   scope_key: string;
+  owner_key: string;
+  model: string;
+  reasoning_effort: ReasoningEffort;
   generation: number;
   thread_id: string | null;
   turn_count: number;
@@ -50,6 +57,9 @@ export class ScopedLlmProvider implements LlmProvider {
     private readonly delegate: LlmProvider,
     readonly role: CodexProviderRole,
     readonly scopeKey: string,
+    readonly ownerKey: string,
+    readonly model: string,
+    readonly reasoningEffort: ReasoningEffort,
     readonly generation: number,
   ) {}
 
@@ -84,10 +94,12 @@ export class ScopedProviderRegistry {
 
   getProvider(request: ScopedProviderRequest): ScopedLlmProvider {
     const reasoningEffort = request.reasoningEffort ?? 'medium';
+    const ownerKey = request.ownerKey ?? 'local';
+    const model = request.model ?? 'gpt-5.5';
     const reuseThread = request.reuseThread !== false;
     const row = reuseThread
-      ? this.currentReusableRow(request.role, request.scopeKey)
-      : this.createNextGenerationRow(request.role, request.scopeKey);
+      ? this.currentReusableRow(request.role, request.scopeKey, ownerKey, model, reasoningEffort)
+      : this.createNextGenerationRow(request.role, request.scopeKey, ownerKey, model, reasoningEffort);
     const cacheKey = row.id;
     const cached = reuseThread ? this.providers.get(cacheKey) : undefined;
     if (cached) return cached;
@@ -98,53 +110,95 @@ export class ScopedProviderRegistry {
       this.options.providerFactory({
         role: request.role,
         scopeKey: request.scopeKey,
+        ownerKey,
+        model,
         generation: row.generation,
         reasoningEffort,
         reuseThread,
       }),
       request.role,
       request.scopeKey,
+      ownerKey,
+      model,
+      reasoningEffort,
       row.generation,
     );
     if (reuseThread) this.providers.set(cacheKey, provider);
     return provider;
   }
 
-  private currentReusableRow(role: CodexProviderRole, scopeKey: string): ProviderThreadRow {
-    const current = this.latestRow(role, scopeKey);
-    if (!current) return this.createGenerationRow(role, scopeKey, 1);
+  private currentReusableRow(
+    role: CodexProviderRole,
+    scopeKey: string,
+    ownerKey: string,
+    model: string,
+    reasoningEffort: ReasoningEffort,
+  ): ProviderThreadRow {
+    const current = this.latestRow(role, scopeKey, ownerKey, model, reasoningEffort);
+    if (!current) return this.createGenerationRow(role, scopeKey, ownerKey, model, reasoningEffort, this.nextGeneration(role, scopeKey));
     if (current.turn_count >= this.maxTurnsPerThread) {
-      return this.createGenerationRow(role, scopeKey, current.generation + 1);
+      return this.createGenerationRow(role, scopeKey, ownerKey, model, reasoningEffort, this.nextGeneration(role, scopeKey));
     }
     return current;
   }
 
-  private createNextGenerationRow(role: CodexProviderRole, scopeKey: string): ProviderThreadRow {
-    const current = this.latestRow(role, scopeKey);
-    return this.createGenerationRow(role, scopeKey, (current?.generation ?? 0) + 1);
+  private createNextGenerationRow(
+    role: CodexProviderRole,
+    scopeKey: string,
+    ownerKey: string,
+    model: string,
+    reasoningEffort: ReasoningEffort,
+  ): ProviderThreadRow {
+    return this.createGenerationRow(role, scopeKey, ownerKey, model, reasoningEffort, this.nextGeneration(role, scopeKey));
   }
 
-  private latestRow(role: CodexProviderRole, scopeKey: string): ProviderThreadRow | undefined {
+  private latestRow(
+    role: CodexProviderRole,
+    scopeKey: string,
+    ownerKey: string,
+    model: string,
+    reasoningEffort: ReasoningEffort,
+  ): ProviderThreadRow | undefined {
     return this.db.prepare(`
-      SELECT id, role, scope_key, generation, thread_id, turn_count
+      SELECT id, role, scope_key, owner_key, model, reasoning_effort, generation, thread_id, turn_count
       FROM codex_provider_threads
-      WHERE role = ? AND scope_key = ?
+      WHERE role = ? AND scope_key = ? AND owner_key = ? AND model = ? AND reasoning_effort = ?
       ORDER BY generation DESC
       LIMIT 1
-    `).get(role, scopeKey) as ProviderThreadRow | undefined;
+    `).get(role, scopeKey, ownerKey, model, reasoningEffort) as ProviderThreadRow | undefined;
   }
 
-  private createGenerationRow(role: CodexProviderRole, scopeKey: string, generation: number): ProviderThreadRow {
+  private nextGeneration(role: CodexProviderRole, scopeKey: string): number {
+    const row = this.db.prepare(`
+      SELECT COALESCE(MAX(generation), 0) AS generation
+      FROM codex_provider_threads
+      WHERE role = ? AND scope_key = ?
+    `).get(role, scopeKey) as { generation: number };
+    return row.generation + 1;
+  }
+
+  private createGenerationRow(
+    role: CodexProviderRole,
+    scopeKey: string,
+    ownerKey: string,
+    model: string,
+    reasoningEffort: ReasoningEffort,
+    generation: number,
+  ): ProviderThreadRow {
     const now = new Date().toISOString();
     const id = `provider_${crypto.randomUUID()}`;
     this.db.prepare(`
-      INSERT INTO codex_provider_threads (id, role, scope_key, generation, thread_id, turn_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, NULL, 0, ?, ?)
-    `).run(id, role, scopeKey, generation, now, now);
+      INSERT INTO codex_provider_threads
+        (id, role, scope_key, owner_key, model, reasoning_effort, generation, thread_id, turn_count, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+    `).run(id, role, scopeKey, ownerKey, model, reasoningEffort, generation, now, now);
     return {
       id,
       role,
       scope_key: scopeKey,
+      owner_key: ownerKey,
+      model,
+      reasoning_effort: reasoningEffort,
       generation,
       thread_id: null,
       turn_count: 0,

@@ -10,6 +10,7 @@ export function openDatabase(filePath = path.join(process.cwd(), 'data', 'tabatl
     new URL('./schema-v2-durable.sql', import.meta.url),
     new URL('./schema-v3-evidence.sql', import.meta.url),
     new URL('./schema-v4-local-trust.sql', import.meta.url),
+    new URL('./schema-v5-user-workspace.sql', import.meta.url),
   ];
   for (const schemaPath of schemas) {
     db.exec(fs.readFileSync(schemaPath, 'utf8'));
@@ -24,6 +25,9 @@ function runLightweightMigrations(db: Database.Database): void {
   ensureColumn(db, 'agent_actions', 'execution_started_at', 'TEXT');
   ensureColumn(db, 'agent_actions', 'model_action_key', 'TEXT');
   ensureColumn(db, 'agent_actions', 'action_ordinal', 'INTEGER');
+  ensureColumn(db, 'codex_provider_threads', 'model', "TEXT NOT NULL DEFAULT 'gpt-5.5'");
+  ensureColumn(db, 'codex_provider_threads', 'reasoning_effort', "TEXT NOT NULL DEFAULT 'medium'");
+  ensureColumn(db, 'codex_provider_threads', 'owner_key', "TEXT NOT NULL DEFAULT 'local'");
   db.exec(`
     UPDATE agent_actions
     SET idempotency_key = id
@@ -47,6 +51,10 @@ function runLightweightMigrations(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_agent_actions_model_key
       ON agent_actions(thread_id, message_id, model_action_key)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_codex_provider_threads_identity
+      ON codex_provider_threads(role, owner_key, scope_key, model, reasoning_effort, generation)
   `);
 }
 

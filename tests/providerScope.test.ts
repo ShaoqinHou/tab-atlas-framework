@@ -41,13 +41,34 @@ describe('scoped Codex provider registry', () => {
     expect(conversation).not.toBe(semantic);
     expect(factoryCalls.map(call => call.role)).toEqual(['conversation_planner', 'semantic_planner']);
     const rows = db.prepare(`
-      SELECT role, scope_key, generation, thread_id, turn_count
+      SELECT role, scope_key, model, reasoning_effort, generation, thread_id, turn_count
       FROM codex_provider_threads
       ORDER BY role
-    `).all() as Array<{ role: string; scope_key: string; generation: number; thread_id: string; turn_count: number }>;
+    `).all() as Array<{ role: string; scope_key: string; model: string; reasoning_effort: string; generation: number; thread_id: string; turn_count: number }>;
     expect(rows).toEqual([
-      { role: 'conversation_planner', scope_key: 'thread_123', generation: 1, thread_id: 'thread_1', turn_count: 1 },
-      { role: 'semantic_planner', scope_key: 'thread_123', generation: 1, thread_id: 'thread_2', turn_count: 1 },
+      { role: 'conversation_planner', scope_key: 'thread_123', model: 'gpt-5.5', reasoning_effort: 'medium', generation: 1, thread_id: 'thread_1', turn_count: 1 },
+      { role: 'semantic_planner', scope_key: 'thread_123', model: 'gpt-5.5', reasoning_effort: 'medium', generation: 1, thread_id: 'thread_2', turn_count: 1 },
+    ]);
+  });
+
+  it('does not reuse provider rows across reasoning effort changes', async () => {
+    const { db, registry } = registryWithFakeProviders();
+
+    const medium = registry.getProvider({ role: 'conversation_planner', scopeKey: 'thread_abc', reasoningEffort: 'medium' });
+    const high = registry.getProvider({ role: 'conversation_planner', scopeKey: 'thread_abc', reasoningEffort: 'high' });
+    await medium.complete('medium');
+    await high.complete('high');
+
+    expect(high).not.toBe(medium);
+    const rows = db.prepare(`
+      SELECT reasoning_effort, generation, thread_id
+      FROM codex_provider_threads
+      WHERE role = 'conversation_planner' AND scope_key = 'thread_abc'
+      ORDER BY generation
+    `).all() as Array<{ reasoning_effort: string; generation: number; thread_id: string }>;
+    expect(rows).toEqual([
+      { reasoning_effort: 'medium', generation: 1, thread_id: 'thread_1' },
+      { reasoning_effort: 'high', generation: 2, thread_id: 'thread_2' },
     ]);
   });
 
