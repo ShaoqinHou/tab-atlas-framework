@@ -29,6 +29,15 @@ import { startInProcessJobWorker } from '../jobs/worker.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
 import { CodexSdkProvider, type CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { buildResourceBrief } from '../resources/briefs.js';
+import {
+  createCapability,
+  listCapabilities,
+  revokeCapability,
+  rotateCapability,
+  type CapabilityKind,
+  type CapabilityScope,
+} from '../security/localCapability.js';
+import { installLocalRequestGuard } from '../security/localRequestGuard.js';
 import { applyViewPlan, previewView } from '../views/service.js';
 import {
   acceptViewRevision,
@@ -43,6 +52,7 @@ const host = '127.0.0.1';
 const port = Number(process.env.TABATLAS_PORT ?? 9787);
 const db = openDatabase(process.env.TABATLAS_DB);
 const app = Fastify({ logger: true });
+installLocalRequestGuard(app, db, { host, port });
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
 const codexProviders = new Map<string, CodexSdkProvider>();
 const extractionRegistry = new ExtractionAdapterRegistry();
@@ -90,6 +100,40 @@ app.post('/api/import-file', async (request, reply) => {
   const json = JSON.parse(await fs.readFile(file, 'utf8'));
   const result = importSnapshot(db, json, 'manual_file_import');
   return reply.send({ ok: true, ...result });
+});
+
+app.get('/api/security/status', async () => {
+  const denied = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM security_audit_events
+    WHERE outcome = 'denied'
+  `).get() as { count: number };
+  return {
+    bound: { host, port },
+    capabilities: listCapabilities(db),
+    deniedRequests: denied.count,
+  };
+});
+
+app.post('/api/security/capabilities', async (request, reply) => {
+  const body = asRecord(request.body);
+  const created = createCapability(db, {
+    kind: readCapabilityKind(body.kind),
+    scopes: readCapabilityScopes(body.scopes),
+    label: typeof body.label === 'string' ? body.label : undefined,
+    expiresAt: typeof body.expiresAt === 'string' ? body.expiresAt : undefined,
+  });
+  return reply.code(201).send(created);
+});
+
+app.post('/api/security/capabilities/:id/revoke', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.send({ capability: revokeCapability(db, params.id) });
+});
+
+app.post('/api/security/capabilities/:id/rotate', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.send(rotateCapability(db, params.id));
 });
 
 app.post('/api/extract/run', async (request, reply) => {
@@ -509,6 +553,18 @@ function getCodexProvider(config: Pick<CodexSdkProviderConfig, 'reasoningEffort'
 
 function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
   return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : 'medium';
+}
+
+function readCapabilityKind(value: unknown): CapabilityKind {
+  if (value === 'extension' || value === 'automation') return value;
+  return 'ui';
+}
+
+function readCapabilityScopes(value: unknown): CapabilityScope[] {
+  const allowed = new Set<CapabilityScope>(['snapshot:write', 'api:read', 'api:write', 'jobs:write', 'agent:write', 'admin']);
+  if (!Array.isArray(value)) return ['api:read'];
+  const scopes = value.filter((item): item is CapabilityScope => typeof item === 'string' && allowed.has(item as CapabilityScope));
+  return scopes.length ? [...new Set(scopes)] : ['api:read'];
 }
 
 function registerExtractionAdapters(registry: ExtractionAdapterRegistry): void {

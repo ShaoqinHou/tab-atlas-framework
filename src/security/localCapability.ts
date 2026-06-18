@@ -72,6 +72,11 @@ export function listCapabilities(db: Database.Database): CapabilityRecord[] {
   return rows.map(capabilityFromRow);
 }
 
+export function countCapabilities(db: Database.Database): number {
+  const row = db.prepare('SELECT COUNT(*) AS count FROM local_capabilities').get() as { count: number };
+  return row.count;
+}
+
 export function getCapability(db: Database.Database, id: string): CapabilityRecord {
   const row = db.prepare(`
     SELECT id, kind, label, scopes_json, status, created_at, expires_at, last_used_at, revoked_at
