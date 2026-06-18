@@ -15,6 +15,7 @@
     "eval:privacy": "tsx scripts/eval-privacy.ts",
     "eval:onboarding": "tsx scripts/eval-onboarding.ts",
     "eval:retrieval": "tsx scripts/eval-retrieval.ts",
+    "eval:review": "tsx scripts/eval-review.ts",
     "import": "tsx scripts/import-snapshot.ts",
     "scan:codex": "tsx scripts/scan-codex.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts"

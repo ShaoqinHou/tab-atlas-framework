@@ -66,6 +66,13 @@ import {
   recordMembershipFeedback,
   rejectViewRevision,
 } from '../views/feedbackService.js';
+import {
+  createReviewSession,
+  getReviewSession,
+  pauseReviewSession,
+  resumeReviewSession,
+  submitReviewSessionDecision,
+} from '../review/sessionService.js';
 
 const host = '127.0.0.1';
 const port = Number(process.env.TABATLAS_PORT ?? 9787);
@@ -633,6 +640,33 @@ app.post('/api/review/:resourceId/ignore', async (request, reply) => {
     tags: ['ignore'],
     decision: 'ignore',
   }));
+});
+
+app.post('/api/review-sessions', async (request, reply) => {
+  const session = createReviewSession(db, asRecord(request.body));
+  return reply.code(201).send(session);
+});
+
+app.get('/api/review-sessions/:id', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.send(getReviewSession(db, params.id));
+});
+
+app.post('/api/review-sessions/:id/decisions', async (request, reply) => {
+  const params = request.params as { id: string };
+  const snapshot = submitReviewSessionDecision(db, params.id, asRecord(request.body));
+  completeOnboardingStep(db, 'first_review_completed', { sessionId: params.id });
+  return reply.send(snapshot);
+});
+
+app.post('/api/review-sessions/:id/pause', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.send(pauseReviewSession(db, params.id));
+});
+
+app.post('/api/review-sessions/:id/resume', async (request, reply) => {
+  const params = request.params as { id: string };
+  return reply.send(resumeReviewSession(db, params.id));
 });
 
 app.get('/api/resources/:id/preview', async (request, reply) => {
