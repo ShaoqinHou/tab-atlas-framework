@@ -10,6 +10,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "TabAtlas"
+    "default_title": "TabAtlas",
+    "default_popup": "popup.html"
   }
 }

@@ -32,17 +32,20 @@ import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/prov
 import { buildResourceBrief } from '../resources/briefs.js';
 import {
   createCapability,
-  createPairingCode,
-  exchangePairingCode,
   listCapabilities,
-  listPairingCodes,
   revokeCapability,
   rotateCapability,
   type CapabilityKind,
   type CapabilityScope,
 } from '../security/localCapability.js';
+import {
+  createPairingChallenge,
+  exchangePairingChallenge,
+  listPairingChallenges,
+  PairingChallengeError,
+} from '../security/pairingChallenge.js';
 import { importPathPolicyFromEnv, listCaptureRoots, listRecentCaptureFiles, validateImportPath } from '../security/importPathPolicy.js';
-import { installLocalRequestGuard } from '../security/localRequestGuard.js';
+import { installLocalRequestGuard, writeSecurityAuditRecord } from '../security/localRequestGuard.js';
 import { applyViewPlan, previewView } from '../views/service.js';
 import {
   acceptViewRevision,
@@ -126,7 +129,8 @@ app.get('/api/security/status', async () => {
   return {
     bound: { host, port },
     capabilities: listCapabilities(db),
-    pairingCodes: listPairingCodes(db),
+    pairingCodes: [],
+    pairingChallenges: listPairingChallenges(db),
     captureRoots: listCaptureRoots(importPolicy),
     recentCaptureFiles: listRecentCaptureFiles(importPolicy, 10),
     deniedRequests: denied.count,
@@ -141,38 +145,102 @@ app.post('/api/security/capabilities', async (request, reply) => {
     label: typeof body.label === 'string' ? body.label : undefined,
     expiresAt: typeof body.expiresAt === 'string' ? body.expiresAt : undefined,
   });
+  writeSecurityAuditRecord(db, {
+    eventType: 'capability_create',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    capabilityId: created.capability.id,
+    details: { kind: created.capability.kind, scopes: created.capability.scopes },
+  });
   return reply.code(201).send(created);
 });
 
 app.post('/api/security/capabilities/:id/revoke', async (request, reply) => {
   const params = request.params as { id: string };
-  return reply.send({ capability: revokeCapability(db, params.id) });
+  const capability = revokeCapability(db, params.id);
+  writeSecurityAuditRecord(db, {
+    eventType: 'capability_revoke',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    capabilityId: capability.id,
+    details: { kind: capability.kind },
+  });
+  return reply.send({ capability });
 });
 
 app.post('/api/security/capabilities/:id/rotate', async (request, reply) => {
   const params = request.params as { id: string };
-  return reply.send(rotateCapability(db, params.id));
+  const rotated = rotateCapability(db, params.id);
+  writeSecurityAuditRecord(db, {
+    eventType: 'capability_rotate',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    capabilityId: rotated.capability.id,
+    details: { kind: rotated.capability.kind },
+  });
+  return reply.send(rotated);
 });
 
 app.post('/api/security/pairing-codes', async (request, reply) => {
   const body = asRecord(request.body);
   const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
-  const created = createPairingCode(db, {
+  const browser = typeof body.browser === 'string' ? body.browser : 'unknown';
+  const created = createPairingChallenge(db, {
     kind: 'extension',
     scopes: ['snapshot:write'],
     ttlMs,
+    browser,
+    label: typeof body.label === 'string' ? body.label : undefined,
+    maxAttempts: typeof body.maxAttempts === 'number' ? body.maxAttempts : undefined,
+  });
+  writeSecurityAuditRecord(db, {
+    eventType: 'pairing_challenge_create',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    details: { challengeId: created.challenge.id, browser: created.challenge.browser, expiresAt: created.challenge.expiresAt },
   });
   return reply.code(201).send(created);
 });
 
 app.post('/api/security/pairing-codes/exchange', async (request, reply) => {
   const body = asRecord(request.body);
-  const code = typeof body.code === 'string' ? body.code : '';
-  if (!code.trim()) return reply.status(400).send({ ok: false, error: 'code is required' });
+  const challengeId = typeof body.challengeId === 'string' ? body.challengeId : '';
+  const secret = typeof body.secret === 'string' ? body.secret : typeof body.code === 'string' ? body.code : '';
+  if (!challengeId.trim() || !secret.trim()) return reply.status(400).send({ ok: false, error: 'challengeId and secret are required' });
   try {
-    return reply.send(exchangePairingCode(db, code, typeof body.label === 'string' ? body.label : 'Browser extension'));
-  } catch {
-    return reply.status(400).send({ ok: false, error: 'invalid pairing code' });
+    const exchanged = exchangePairingChallenge(db, {
+      challengeId,
+      secret,
+      label: typeof body.label === 'string' ? body.label : 'Browser extension',
+      browser: typeof body.browser === 'string' ? body.browser : 'unknown',
+      throttleKey: request.ip ?? 'local',
+    });
+    writeSecurityAuditRecord(db, {
+      eventType: 'pairing_exchange',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      capabilityId: exchanged.capability.id,
+      remoteAddress: request.ip,
+      details: { challengeId, browser: exchanged.challenge.browser },
+    });
+    return reply.send(exchanged);
+  } catch (error) {
+    const reason = error instanceof PairingChallengeError ? error.reason : 'invalid_challenge';
+    writeSecurityAuditRecord(db, {
+      eventType: 'pairing_exchange',
+      method: request.method,
+      route: request.url,
+      outcome: 'denied',
+      reason,
+      remoteAddress: request.ip,
+      details: { challengeId },
+    });
+    return reply.status(reason === 'global_rate_limited' ? 429 : 400).send({ ok: false, error: reason });
   }
 });
 

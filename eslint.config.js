@@ -33,6 +33,7 @@ export default [
       globals: {
         chrome: 'readonly',
         clearTimeout: 'readonly',
+        document: 'readonly',
         fetch: 'readonly',
         navigator: 'readonly',
         setTimeout: 'readonly',

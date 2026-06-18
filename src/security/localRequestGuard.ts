@@ -148,6 +148,41 @@ export function writeSecurityAuditEvent(
   );
 }
 
+export function writeSecurityAuditRecord(
+  db: Database.Database,
+  input: {
+    eventType: string;
+    method?: string;
+    route?: string;
+    outcome: 'allowed' | 'denied';
+    reason?: string;
+    capabilityId?: string;
+    host?: string;
+    origin?: string;
+    remoteAddress?: string;
+    details?: unknown;
+  },
+): void {
+  db.prepare(`
+    INSERT INTO security_audit_events
+      (id, event_type, method, route, outcome, reason, capability_id, host, origin, remote_address, details_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    `audit_${nanoid()}`,
+    input.eventType,
+    input.method ?? null,
+    input.route ?? null,
+    input.outcome,
+    input.reason ?? null,
+    input.capabilityId ?? null,
+    input.host ?? null,
+    input.origin ?? null,
+    input.remoteAddress ?? null,
+    input.details === undefined ? null : JSON.stringify(input.details),
+    new Date().toISOString(),
+  );
+}
+
 function recordDenied(remote: string): number {
   const now = Date.now();
   const current = deniedByRemote.get(remote);

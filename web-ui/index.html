@@ -357,7 +357,7 @@
       $('securityStatus').innerHTML = `
         <div class="security-grid">
           <div class="metric"><span>Capabilities</span><strong>${status.capabilities.length}</strong></div>
-          <div class="metric"><span>Pairing codes</span><strong>${status.pairingCodes.length}</strong></div>
+          <div class="metric"><span>Pairing challenges</span><strong>${(status.pairingChallenges || status.pairingCodes || []).length}</strong></div>
         </div>
         <h2 style="margin-top:14px">Capabilities</h2>
         ${status.capabilities.length ? status.capabilities.map(renderCapability).join('') : '<div class="muted">No capabilities yet.</div>'}
@@ -417,11 +417,13 @@
     async function createExtensionPairingCode() {
       const created = await api('/api/security/pairing-codes', {
         method: 'POST',
-        body: JSON.stringify({ ttlMs: 5 * 60 * 1000 }),
+        body: JSON.stringify({ ttlMs: 5 * 60 * 1000, browser: 'unknown' }),
       });
       $('pairingCode').innerHTML = `
-        <div class="muted">Extension pairing code</div>
-        <div class="code-box">${escapeHtml(created.code)}</div>
+        <div class="muted">Extension challenge ID</div>
+        <div class="code-box">${escapeHtml(created.challenge.id)}</div>
+        <div class="muted" style="margin-top:8px">Extension pairing secret</div>
+        <div class="code-box">${escapeHtml(created.secret)}</div>
       `;
       await refreshSecurityStatus({ silent: true });
     }

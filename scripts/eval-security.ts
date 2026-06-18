@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Fastify from 'fastify';
-import { createCapability, createPairingCode, exchangePairingCode, type CapabilityScope } from '../src/security/localCapability.js';
+import { createCapability, type CapabilityScope } from '../src/security/localCapability.js';
+import { createPairingChallenge, exchangePairingChallenge, PairingChallengeError } from '../src/security/pairingChallenge.js';
 import { installLocalRequestGuard } from '../src/security/localRequestGuard.js';
 import { validateImportPath } from '../src/security/importPathPolicy.js';
 import { openDatabase } from '../src/db/index.js';
@@ -17,6 +18,7 @@ type EvalResult = {
 const results: EvalResult[] = [];
 results.push(await bootstrapAdminCapability());
 results.push(await extensionPairingIsSnapshotOnly());
+results.push(pairingChallengeLocksWrongAttempts());
 results.push(await crossSiteDenialIsAuditedWithoutSecrets());
 results.push(importPathPolicyDeniesEscapes());
 
@@ -73,12 +75,12 @@ async function extensionPairingIsSnapshotOnly(): Promise<EvalResult> {
     headers: { ...localHeaders(), 'x-tab-atlas-token': admin.token },
     payload: { ttlMs: 60_000 },
   });
-  const code = (created.json() as { code: string }).code;
+  const challenge = created.json() as { challenge: { id: string }; secret: string };
   const paired = await app.inject({
     method: 'POST',
     url: '/api/security/pairing-codes/exchange',
     headers: { ...localHeaders(), origin: 'chrome-extension://tabatlas' },
-    payload: { code },
+    payload: { challengeId: challenge.challenge.id, secret: challenge.secret },
   });
   const pairedBody = paired.json() as { token?: string };
   const snapshot = await app.inject({
@@ -98,6 +100,31 @@ async function extensionPairingIsSnapshotOnly(): Promise<EvalResult> {
     'paired extension token can write snapshots and cannot access jobs',
     `pair=${paired.statusCode}; snapshot=${snapshot.statusCode}; job=${job.statusCode}`,
     paired.statusCode === 200 && snapshot.statusCode === 200 && job.statusCode === 401,
+  );
+}
+
+function pairingChallengeLocksWrongAttempts(): EvalResult {
+  const db = openDatabase(':memory:');
+  const challenge = createPairingChallenge(db, { maxAttempts: 2, ttlMs: 60_000 });
+  const failures: string[] = [];
+  for (const secret of ['wrong', 'wrong-again']) {
+    try {
+      exchangePairingChallenge(db, {
+        challengeId: challenge.challenge.id,
+        secret,
+        throttleKey: 'eval-lockout',
+      });
+      failures.push('unexpected-success');
+    } catch (error) {
+      failures.push(error instanceof PairingChallengeError ? error.reason : 'unknown');
+    }
+  }
+  const row = db.prepare('SELECT status, attempts FROM pairing_challenges WHERE id = ?').get(challenge.challenge.id) as { status: string; attempts: number };
+  return result(
+    'Pairing challenge locks wrong attempts',
+    'wrong attempts persist and lock the challenge at max attempts',
+    `failures=${failures.join(',')}; status=${row.status}; attempts=${row.attempts}`,
+    failures.includes('locked_challenge') && row.status === 'locked' && row.attempts === 2,
   );
 }
 
@@ -185,11 +212,16 @@ function guardedApp() {
   });
   app.post('/api/security/pairing-codes', async request => {
     const body = asRecord(request.body);
-    return createPairingCode(db, { kind: 'extension', scopes: ['snapshot:write'], ttlMs: typeof body.ttlMs === 'number' ? body.ttlMs : undefined });
+    return createPairingChallenge(db, { kind: 'extension', scopes: ['snapshot:write'], ttlMs: typeof body.ttlMs === 'number' ? body.ttlMs : undefined });
   });
   app.post('/api/security/pairing-codes/exchange', async request => {
     const body = asRecord(request.body);
-    return exchangePairingCode(db, typeof body.code === 'string' ? body.code : '', 'Eval extension');
+    return exchangePairingChallenge(db, {
+      challengeId: typeof body.challengeId === 'string' ? body.challengeId : '',
+      secret: typeof body.secret === 'string' ? body.secret : '',
+      label: 'Eval extension',
+      throttleKey: 'eval-http',
+    });
   });
   return { app, db };
 }

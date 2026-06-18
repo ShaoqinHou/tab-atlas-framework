@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
-import { createCapability, createPairingCode, exchangePairingCode, revokeCapability } from '../src/security/localCapability.js';
+import { createCapability, revokeCapability } from '../src/security/localCapability.js';
+import { createPairingChallenge, exchangePairingChallenge } from '../src/security/pairingChallenge.js';
 import { installLocalRequestGuard, requiredScopeFor } from '../src/security/localRequestGuard.js';
 import { openDatabase } from '../src/db/index.js';
 
@@ -16,11 +17,16 @@ function guardedApp() {
   app.post('/api/conversations', async () => ({ ok: true }));
   app.post('/api/security/pairing-codes', async request => {
     const body = typeof request.body === 'object' && request.body ? request.body as { ttlMs?: number } : {};
-    return createPairingCode(db, { ttlMs: body.ttlMs });
+    return createPairingChallenge(db, { ttlMs: body.ttlMs });
   });
   app.post('/api/security/pairing-codes/exchange', async request => {
-    const body = typeof request.body === 'object' && request.body ? request.body as { code?: string } : {};
-    return exchangePairingCode(db, body.code ?? '', 'Test extension');
+    const body = typeof request.body === 'object' && request.body ? request.body as { challengeId?: string; secret?: string } : {};
+    return exchangePairingChallenge(db, {
+      challengeId: body.challengeId ?? '',
+      secret: body.secret ?? '',
+      label: 'Test extension',
+      throttleKey: 'test',
+    });
   });
   return { app, db };
 }
@@ -106,20 +112,20 @@ describe('local request guard', () => {
       headers: { ...localHeaders, 'x-tab-atlas-token': admin.token },
       payload: { ttlMs: 60_000 },
     });
-    const code = (created.json() as { code: string }).code;
+    const challenge = created.json() as { challenge: { id: string }; secret: string };
 
     const paired = await app.inject({
       method: 'POST',
       url: '/api/security/pairing-codes/exchange',
       headers: { ...localHeaders, origin: 'chrome-extension://abc' },
-      payload: { code },
+      payload: { challengeId: challenge.challenge.id, secret: challenge.secret },
     });
     const payload = paired.json() as { token: string; capability: { scopes: string[] } };
     const replay = await app.inject({
       method: 'POST',
       url: '/api/security/pairing-codes/exchange',
       headers: { ...localHeaders, origin: 'chrome-extension://abc' },
-      payload: { code },
+      payload: { challengeId: challenge.challenge.id, secret: challenge.secret },
     });
     const snapshot = await app.inject({
       method: 'POST',
@@ -142,14 +148,37 @@ describe('local request guard', () => {
     expect(JSON.stringify(db.prepare('SELECT * FROM snapshots').all())).not.toContain(payload.token);
   });
 
-  it('rejects expired pairing codes', async () => {
+  it('locks pairing challenges after bounded wrong attempts', async () => {
     const { app, db } = guardedApp();
-    const expired = createPairingCode(db, { ttlMs: -1 });
+    const challenge = createPairingChallenge(db, { ttlMs: 60_000, maxAttempts: 2 });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes/exchange',
+      headers: localHeaders,
+      payload: { challengeId: challenge.challenge.id, secret: 'wrong' },
+    });
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/security/pairing-codes/exchange',
+      headers: localHeaders,
+      payload: { challengeId: challenge.challenge.id, secret: 'wrong-again' },
+    });
+    const row = db.prepare('SELECT status, attempts FROM pairing_challenges WHERE id = ?').get(challenge.challenge.id) as { status: string; attempts: number };
+
+    expect(first.statusCode).toBeGreaterThanOrEqual(400);
+    expect(second.statusCode).toBeGreaterThanOrEqual(400);
+    expect(row).toEqual({ status: 'locked', attempts: 2 });
+  });
+
+  it('rejects expired pairing challenges', async () => {
+    const { app, db } = guardedApp();
+    const expired = createPairingChallenge(db, { ttlMs: -1 });
     const response = await app.inject({
       method: 'POST',
       url: '/api/security/pairing-codes/exchange',
       headers: localHeaders,
-      payload: { code: expired.code },
+      payload: { challengeId: expired.challenge.id, secret: expired.secret },
     });
 
     expect(response.statusCode).toBeGreaterThanOrEqual(400);
