@@ -1,14 +1,15 @@
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import { planSemanticViewHeuristic } from '../ai/heuristicSemanticView.js';
-import { planSemanticView } from '../ai/planSemanticView.js';
+import { planSemanticViewHierarchical } from '../ai/hierarchicalPlanner.js';
 import { buildResourceBriefsForIntent } from '../resources/briefs.js';
-import type { LlmProvider } from '../llm/types.js';
+import type { LlmProvider, LlmUsage } from '../llm/types.js';
 import { StructuredOutputError } from '../llm/runStructured.js';
 import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
 import { createUserCommand, persistSemanticViewPlan, previewView, type ViewPreview } from '../views/service.js';
 import { logAgentRun } from './runLog.js';
 import { retrieveCandidatesForCommand } from '../retrieval/service.js';
+import type { RetrievalMetrics } from '../retrieval/queryPlan.js';
 import { withPromptManifestRecorder } from '../security/promptManifest.js';
 
 export const RunAgentCommandInput = z.object({
@@ -37,6 +38,16 @@ export interface RunAgentCommandResult {
   validationStatus: 'passed' | 'failed' | 'not_applicable';
   agentRunId?: string;
   dryRun: boolean;
+  retrievalRunId: string;
+  retrievalMetrics: RetrievalMetrics;
+  candidateResourceIds: string[];
+  usage?: LlmUsage;
+  hierarchicalPlanning?: {
+    mode: 'direct' | 'hierarchical';
+    chunkCount: number;
+    splitChunkCount: number;
+    checkpointPath?: string;
+  };
 }
 
 export async function runAgentCommand(
@@ -68,6 +79,8 @@ export async function runAgentCommand(
   let codexTurnSpent = false;
   let agentRunId: string | undefined;
   let validationStatus: RunAgentCommandResult['validationStatus'] = mode === 'codex' ? 'failed' : 'not_applicable';
+  let usage: LlmUsage | undefined;
+  let hierarchicalPlanning: RunAgentCommandResult['hierarchicalPlanning'];
   if (mode === 'codex') {
     if (!provider) throw new Error('Codex mode requires an LlmProvider');
     const startedAt = new Date().toISOString();
@@ -83,7 +96,7 @@ export async function runAgentCommand(
       dryRun: parsed.dryRun,
     };
     try {
-      const result = await planSemanticView(withPromptManifestRecorder(db, provider, 'semantic_view_plan', {
+      const result = await planSemanticViewHierarchical(withPromptManifestRecorder(db, provider, 'semantic_view_plan', {
         candidateCount: candidateResourceIds.length,
         retrievalRunId: retrieval.runId,
         dryRun: parsed.dryRun,
@@ -93,6 +106,13 @@ export async function runAgentCommand(
         askReviewForAmbiguous: true,
       });
       plan = result.value;
+      usage = result.usage;
+      hierarchicalPlanning = {
+        mode: result.mode,
+        chunkCount: result.chunkCount,
+        splitChunkCount: result.splitChunkCount,
+        checkpointPath: result.checkpointPath,
+      };
       providerThreadId = providerThreadIdFor(provider);
       codexTurnSpent = (result.usage.quotaTurns ?? 0) > 0;
       validationStatus = 'passed';
@@ -140,6 +160,11 @@ export async function runAgentCommand(
       validationStatus,
       agentRunId,
       dryRun: true,
+      retrievalRunId: retrieval.runId,
+      retrievalMetrics: retrieval.metrics,
+      candidateResourceIds,
+      usage,
+      hierarchicalPlanning,
     };
   }
 
@@ -169,6 +194,11 @@ export async function runAgentCommand(
     validationStatus,
     agentRunId,
     dryRun: false,
+    retrievalRunId: retrieval.runId,
+    retrievalMetrics: retrieval.metrics,
+    candidateResourceIds,
+    usage,
+    hierarchicalPlanning,
   };
 }
 

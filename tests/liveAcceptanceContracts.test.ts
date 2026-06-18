@@ -14,6 +14,7 @@ describe('live acceptance contracts', () => {
         popupDefaultMatchesServer: true,
       },
       browserSmokes: [
+        browserSmoke('chromium', 'automated'),
         browserSmoke('chrome'),
         browserSmoke('edge'),
       ],
@@ -22,9 +23,13 @@ describe('live acceptance contracts', () => {
         commands: ['a', 'b', 'c', 'd'].map(commandId => ({
           commandId,
           description: 'redacted command category',
+          status: 'passed',
+          mode: 'codex',
           candidateCount: 40,
           selectedCount: 25,
           retrievalSourceCoverage: { user_annotations: 4, fts: 10 },
+          retrievalRunId: `retrieval_${commandId}`,
+          promptManifestIds: [`prompt_manifest_${commandId}`],
           codexTurns: 1,
           strongIncludeCount: 8,
           weakIncludeCount: 3,
@@ -69,6 +74,7 @@ describe('live acceptance contracts', () => {
         popupDefaultMatchesServer: false,
       },
       browserSmokes: [
+        { ...browserSmoke('chromium', 'automated'), snapshotArrived: false },
         { ...browserSmoke('chrome'), pairedThroughPopup: false },
         { ...browserSmoke('edge'), revocationVisible: false },
       ],
@@ -93,6 +99,7 @@ describe('live acceptance contracts', () => {
 
     expect(acceptanceBlockers(report)).toEqual(expect.arrayContaining([
       'runtime port incompatible',
+      'chromium automated acceptance incomplete',
       'chrome popup acceptance incomplete',
       'edge popup acceptance incomplete',
       'private-library smoke skipped',
@@ -111,10 +118,10 @@ describe('live acceptance contracts', () => {
   });
 });
 
-function browserSmoke(browser: 'chrome' | 'edge') {
+function browserSmoke(browser: 'chromium' | 'chrome' | 'edge', mode: 'automated' | 'manual' = 'manual') {
   return {
     browser,
-    mode: 'manual',
+    mode,
     popupOpened: true,
     receiverReachable: true,
     pairedThroughPopup: true,

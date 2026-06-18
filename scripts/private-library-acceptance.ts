@@ -1,99 +1,178 @@
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { runAgentCommand } from '../src/agent/commandService.js';
-import { openDatabase } from '../src/db/index.js';
-import { createCodexProviderRegistry } from '../src/llm/providerScope.js';
+import { CheckpointStore } from '../src/acceptance/checkpointStore.js';
+import {
+  failedSmoke,
+  privateLibraryCommands,
+  type CommandSmoke,
+  type PrivateLibraryMode,
+} from './private-library-acceptance-common.js';
 
-const commands = [
-  { commandId: 'tab-manager-project', description: 'tab-manager project group', text: 'Make a project group for the tab-manager app.' },
-  { commandId: 'loose-inspiration', description: 'loose inspiration board', text: 'Make a loose inspiration board, mainly game inspiration, but include anything I marked as inspiration.' },
-  { commandId: 'collection-video-items', description: 'AI papers and tools inside collection videos', text: 'Show AI papers and tools inside collection videos, not only parent videos.' },
-  { commandId: 'opened-later-unmarked', description: 'probably opened for later but never marked', text: 'Find links I probably opened for later but never marked.' },
-];
+type Args = {
+  resume: boolean;
+  retryFailed: boolean;
+  retryTimeouts: boolean;
+  commandId?: string;
+  timeoutMs?: number;
+  mode?: PrivateLibraryMode;
+};
 
-const db = openDatabase(process.env.TABATLAS_DB);
-const registry = createCodexProviderRegistry(db, { workingDirectory: process.cwd() });
+const args = parseArgs(process.argv.slice(2));
 const outputDir = path.join(process.cwd(), '.local', 'acceptance');
 const outputPath = path.join(outputDir, 'private-library-smoke.json');
-const mode = process.env.TABATLAS_ACCEPTANCE_MODE === 'heuristic' ? 'heuristic' : 'codex';
+const checkpointPath = path.join(outputDir, 'private-library-checkpoints.json');
+const mode = args.mode ?? (process.env.TABATLAS_ACCEPTANCE_MODE === 'heuristic' ? 'heuristic' : 'codex');
+const timeoutMs = args.timeoutMs ?? Number(process.env.TABATLAS_ACCEPTANCE_COMMAND_TIMEOUT_MS ?? 240_000);
+const store = new CheckpointStore<CommandSmoke>(checkpointPath);
+const selectedCommands = args.commandId
+  ? privateLibraryCommands.filter(command => command.commandId === args.commandId)
+  : privateLibraryCommands;
 
-const results = [];
-for (const command of commands) {
-  const beforeTurns = countPromptManifests(db);
-  const result = await runAgentCommand(
-    db,
-    mode === 'codex'
-      ? registry.getProvider({ role: 'semantic_planner', scopeKey: `private-acceptance:${command.commandId}`, reuseThread: false })
-      : 'heuristic',
-    {
-      text: command.text,
-      mode,
-      candidateLimit: 200,
-      dryRun: true,
-      reasoningEffort: 'medium',
-    },
-  );
-  const afterTurns = countPromptManifests(db);
-  const retrieval = latestRetrievalMetrics(db);
-  results.push({
-    commandId: command.commandId,
-    description: command.description,
-    candidateCount: retrieval.candidateCount,
-    selectedCount: retrieval.selectedCount,
-    retrievalSourceCoverage: retrieval.sourceCoverage,
-    codexTurns: mode === 'codex' ? Math.max(1, afterTurns - beforeTurns) : 0,
-    strongIncludeCount: result.summary.strong_include,
-    weakIncludeCount: result.summary.weak_include,
-    conflictCount: result.summary.conflict,
-    needsReviewCount: result.summary.needs_review,
-    evidenceReasonCategories: evidenceCategories(result.plan),
-    usedUserNotes: JSON.stringify(result.plan).includes('user_annotation:'),
-    usedCodexScanEvidence: JSON.stringify(retrieval.sourceCoverage).includes('codex_scan'),
-    usedAtomicItems: JSON.stringify(result.plan).includes('"targetKind":"atomic_item"') || retrieval.atomicItemRecall > 0,
-    promptRedactionOk: true,
-  });
+if (args.commandId && selectedCommands.length === 0) {
+  console.error(`Unknown command id: ${args.commandId}`);
+  process.exit(1);
 }
 
 fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(outputPath, JSON.stringify({ generatedAt: new Date().toISOString(), mode, commands: results }, null, 2));
+
+for (const command of selectedCommands) {
+  if (!store.shouldRun(command.commandId, {
+    resume: args.resume,
+    retryFailed: args.retryFailed,
+    retryTimeouts: args.retryTimeouts,
+  })) {
+    continue;
+  }
+
+  store.start(command.commandId, timeoutMs);
+  const started = Date.now();
+  const resultFile = path.join(outputDir, `${command.commandId}-worker-result.json`);
+  fs.rmSync(resultFile, { force: true });
+  const child = spawnWorker(command.commandId, mode, resultFile);
+  const outcome = await waitForWorker(child, timeoutMs);
+  const durationMs = Date.now() - started;
+
+  if (outcome.status === 'timeout') {
+    killProcessTree(child);
+    const smoke = failedSmoke(command.commandId, mode, 'timeout', durationMs, `command timed out after ${timeoutMs}ms`);
+    store.timeout(command.commandId, smoke.error ?? 'timeout');
+    store.pass(`${command.commandId}:last-result`, smoke);
+    continue;
+  }
+  if (outcome.status !== 'passed') {
+    const smoke = failedSmoke(command.commandId, mode, 'failed', durationMs, outcome.error || `worker exited with code ${outcome.code}`);
+    store.fail(command.commandId, smoke.error ?? 'failed');
+    store.pass(`${command.commandId}:last-result`, smoke);
+    continue;
+  }
+
+  const smoke = JSON.parse(fs.readFileSync(resultFile, 'utf8')) as CommandSmoke;
+  store.pass(command.commandId, smoke);
+}
+
+const checkpointResults = store.list();
+const results = privateLibraryCommands.flatMap(command => {
+  const checkpoint = store.get(command.commandId);
+  if (checkpoint?.status === 'passed' && checkpoint.result) return [checkpoint.result];
+  const failedResult = store.get(`${command.commandId}:last-result`)?.result;
+  if (failedResult) return [failedResult];
+  return [];
+});
+
+fs.writeFileSync(outputPath, JSON.stringify({
+  generatedAt: new Date().toISOString(),
+  mode,
+  checkpointPath,
+  checkpoints: checkpointResults.map(({ id, status, attempts, startedAt, finishedAt, timeoutAt, error }) => ({
+    id,
+    status,
+    attempts,
+    startedAt,
+    finishedAt,
+    timeoutAt,
+    error,
+  })),
+  commands: results,
+}, null, 2));
 console.log(`Private-library smoke metrics written to ${outputPath}`);
 console.log(JSON.stringify({ mode, commands: results }, null, 2));
 
-function countPromptManifests(dbHandle: ReturnType<typeof openDatabase>): number {
-  return (dbHandle.prepare('SELECT COUNT(*) AS count FROM codex_prompt_manifests').get() as { count: number }).count;
+if (results.length < privateLibraryCommands.length || results.some(result => result.status !== 'passed')) {
+  process.exitCode = 1;
 }
 
-function latestRetrievalMetrics(dbHandle: ReturnType<typeof openDatabase>): {
-  candidateCount: number;
-  selectedCount: number;
-  sourceCoverage: Record<string, number>;
-  atomicItemRecall: number;
-} {
-  const row = dbHandle.prepare(`
-    SELECT metrics_json, candidate_count, selected_count, source_coverage_json
-    FROM retrieval_runs
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get() as { metrics_json: string; candidate_count: number; selected_count: number; source_coverage_json: string };
-  const metrics = JSON.parse(row.metrics_json) as { atomicItemRecall?: number };
-  return {
-    candidateCount: row.candidate_count,
-    selectedCount: row.selected_count,
-    sourceCoverage: JSON.parse(row.source_coverage_json) as Record<string, number>,
-    atomicItemRecall: metrics.atomicItemRecall ?? 0,
-  };
+function spawnWorker(commandId: string, modeValue: PrivateLibraryMode, resultFile: string): ChildProcess {
+  const tsxCli = path.join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  return spawn(process.execPath, [
+    tsxCli,
+    'scripts/private-library-command-worker.ts',
+    '--command',
+    commandId,
+    '--mode',
+    modeValue,
+    '--result-file',
+    resultFile,
+  ], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
 }
 
-function evidenceCategories(plan: { views: Array<{ memberships: Array<{ evidenceRefs: string[] }> }> }): string[] {
-  const refs = plan.views.flatMap(view => view.memberships.flatMap(membership => membership.evidenceRefs));
-  const categories = new Set<string>();
-  for (const ref of refs) {
-    if (ref.startsWith('user_annotation:')) categories.add('user_annotation');
-    else if (ref.startsWith('feedback:')) categories.add('membership_feedback');
-    else if (ref.includes('codex')) categories.add('codex_scan');
-    else if (ref.includes('youtube')) categories.add('youtube_evidence');
-    else if (ref.startsWith('ev_')) categories.add('local_evidence');
-    else categories.add('model_or_rule_reason');
+function waitForWorker(child: ChildProcess, timeoutMsValue: number): Promise<{
+  status: 'passed' | 'failed' | 'timeout';
+  code?: number | null;
+  error?: string;
+}> {
+  return new Promise(resolve => {
+    let stderr = '';
+    const timer = setTimeout(() => {
+      resolve({ status: 'timeout' });
+    }, timeoutMsValue);
+    child.stderr?.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+    child.on('error', error => {
+      clearTimeout(timer);
+      resolve({ status: 'failed', error: error.message });
+    });
+    child.on('exit', code => {
+      clearTimeout(timer);
+      resolve(code === 0
+        ? { status: 'passed', code }
+        : { status: 'failed', code, error: stderr.slice(0, 4000) });
+    });
+  });
+}
+
+function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
   }
-  return [...categories].sort();
+  child.kill('SIGKILL');
+}
+
+function parseArgs(raw: string[]): Args {
+  const parsed = {
+    resume: false,
+    retryFailed: false,
+    retryTimeouts: false,
+  } as Args;
+  for (let index = 0; index < raw.length; index += 1) {
+    const arg = raw[index];
+    if (arg === '--resume') parsed.resume = true;
+    else if (arg === '--retry-failed') parsed.retryFailed = true;
+    else if (arg === '--retry-timeouts') parsed.retryTimeouts = true;
+    else if (arg === '--command') parsed.commandId = raw[++index];
+    else if (arg === '--timeout-ms') parsed.timeoutMs = Number(raw[++index]);
+    else if (arg === '--mode') {
+      const value = raw[++index];
+      if (value !== 'codex' && value !== 'heuristic') throw new Error(`Unsupported mode: ${value}`);
+      parsed.mode = value;
+    }
+  }
+  return parsed;
 }

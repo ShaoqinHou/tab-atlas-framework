@@ -1,5 +1,9 @@
+import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { acceptanceBlockers, LiveAcceptanceReport } from '../src/acceptance/contracts.js';
+import os from 'node:os';
+import path from 'node:path';
+import { acceptanceBlockers, LiveAcceptanceReport, type LiveAcceptanceReport as LiveAcceptanceReportType } from '../src/acceptance/contracts.js';
 
 const reportPath = process.argv[2];
 if (!reportPath) {
@@ -17,24 +21,131 @@ if (!parsed.success) {
 }
 
 const report = parsed.data;
-const blockers = acceptanceBlockers(report);
+const evidence = deriveEvidence(report);
+const blockers = [...new Set([...acceptanceBlockers(report), ...evidence.blockers])];
+const chromium = report.browserSmokes.find(item => item.browser === 'chromium');
 const chrome = report.browserSmokes.find(item => item.browser === 'chrome');
 const edge = report.browserSmokes.find(item => item.browser === 'edge');
+const ready = blockers.length === 0;
 
 console.log(`Acceptance report: ${report.schemaVersion}`);
 console.log(`Generated at: ${report.generatedAt}`);
+console.log(`Caller releaseReady: ${report.releaseReady ? 'yes' : 'no'} (ignored as authority)`);
 console.log(`Runtime compatible: ${report.runtime.receiverListIncludesServer && report.runtime.manifestCoversServer && report.runtime.popupDefaultMatchesServer ? 'yes' : 'no'}`);
-console.log(`Chrome popup: ${chrome?.pairedThroughPopup && chrome.snapshotArrived && chrome.revocationVisible ? 'pass' : 'fail'}`);
-console.log(`Edge popup: ${edge?.pairedThroughPopup && edge.snapshotArrived && edge.revocationVisible ? 'pass' : 'fail'}`);
-console.log(`Private library commands: ${report.privateLibrarySmoke.ran ? report.privateLibrarySmoke.commands.length : 0}`);
-console.log(`App package: ${report.releaseArtifacts.appPackagePath}`);
-console.log(`Extension package: ${report.releaseArtifacts.extensionPackagePath}`);
+console.log(`Chromium automated popup: ${passedBrowser(chromium) ? 'pass' : 'fail'}`);
+console.log(`Chrome manual popup: ${passedBrowser(chrome) ? 'pass' : 'fail'}`);
+console.log(`Edge manual popup: ${passedBrowser(edge) ? 'pass' : 'fail'}`);
+console.log(`Private library commands: ${report.privateLibrarySmoke.ran ? report.privateLibrarySmoke.commands.filter(command => command.status === 'passed').length : 0}/${report.privateLibrarySmoke.commands.length}`);
+console.log(`Validation commands: ${report.validationCommands.filter(command => command.passed).length}/${report.validationCommands.length}`);
+console.log(`App package: ${evidence.app.path}`);
+console.log(`App SHA-256: ${evidence.app.sha256 || '(missing)'}`);
+console.log(`Extension package: ${evidence.extension.path}`);
+console.log(`Extension SHA-256: ${evidence.extension.sha256 || '(missing)'}`);
 
 if (blockers.length) {
   console.error('Blockers:');
   for (const blocker of blockers) console.error(`- ${blocker}`);
 }
 
-const ready = report.releaseReady && blockers.length === 0;
 console.log(`Release ready: ${ready ? 'yes' : 'no'}`);
 if (!ready) process.exit(1);
+
+function deriveEvidence(reportValue: LiveAcceptanceReportType): {
+  blockers: string[];
+  app: ArtifactEvidence;
+  extension: ArtifactEvidence;
+} {
+  const blockers: string[] = [];
+  if (reportValue.validationCommands.length === 0) blockers.push('validation command evidence missing');
+  for (const command of reportValue.validationCommands) {
+    if (!command.passed) blockers.push(`validation failed: ${command.command}`);
+  }
+  const app = verifyArtifact('app', reportValue.releaseArtifacts.appPackagePath, reportValue.releaseArtifacts.appPackageSha256, [
+    'package.json',
+    'src/server/index.ts',
+    'web-ui/index.html',
+    'docs/32-release-candidate.md',
+  ]);
+  const extension = verifyArtifact('extension', reportValue.releaseArtifacts.extensionPackagePath, reportValue.releaseArtifacts.extensionPackageSha256, [
+    'manifest.json',
+    'service_worker.js',
+    'popup.html',
+    'popup.js',
+  ]);
+  blockers.push(...app.blockers, ...extension.blockers);
+  for (const docPath of [reportValue.releaseArtifacts.installDocsPath, reportValue.releaseArtifacts.backupRestoreDocsPath]) {
+    if (!fs.existsSync(resolveFromRoot(docPath))) blockers.push(`release doc missing: ${docPath}`);
+  }
+  return { blockers, app, extension };
+}
+
+type ArtifactEvidence = {
+  label: string;
+  path: string;
+  exists: boolean;
+  sha256?: string;
+  blockers: string[];
+};
+
+function verifyArtifact(label: string, artifactPath: string, expectedHash: string | undefined, requiredEntries: string[]): ArtifactEvidence {
+  const resolved = resolveFromRoot(artifactPath);
+  const blockers: string[] = [];
+  const exists = Boolean(artifactPath) && fs.existsSync(resolved);
+  if (!exists) {
+    blockers.push(`${label} package missing: ${artifactPath || '(empty path)'}`);
+    return { label, path: resolved, exists, blockers };
+  }
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) {
+    blockers.push(`${label} package is not a file: ${artifactPath}`);
+    return { label, path: resolved, exists, blockers };
+  }
+  const sha256 = sha256File(resolved);
+  if (expectedHash && expectedHash.toLowerCase() !== sha256.toLowerCase()) {
+    blockers.push(`${label} package hash mismatch`);
+  }
+  const missingEntries = inspectPackageContents(resolved, requiredEntries);
+  for (const entry of missingEntries) blockers.push(`${label} package missing content: ${entry}`);
+  return { label, path: resolved, exists, sha256, blockers };
+}
+
+function inspectPackageContents(zipPath: string, requiredEntries: string[]): string[] {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'tabatlas-acceptance-report-'));
+  try {
+    const result = spawnSync('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      `Expand-Archive -LiteralPath ${quote(zipPath)} -DestinationPath ${quote(temp)} -Force`,
+    ], { encoding: 'utf8' });
+    if (result.status !== 0) {
+      return [`unable to inspect archive: ${(result.stderr || result.stdout).slice(0, 200)}`];
+    }
+    return requiredEntries.filter(entry => !fs.existsSync(path.join(temp, entry)));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+function passedBrowser(smoke: LiveAcceptanceReportType['browserSmokes'][number] | undefined): boolean {
+  return Boolean(smoke?.popupOpened
+    && smoke.receiverReachable
+    && smoke.pairedThroughPopup
+    && smoke.snapshotExportedThroughPopup
+    && smoke.snapshotArrived
+    && smoke.revocationVisible
+    && smoke.tokenAbsentFromSnapshot);
+}
+
+function resolveFromRoot(value: string): string {
+  return path.isAbsolute(value) ? value : path.join(process.cwd(), value);
+}
+
+function sha256File(filePath: string): string {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+function quote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
