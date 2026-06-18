@@ -8,7 +8,7 @@ import { StructuredOutputError } from '../llm/runStructured.js';
 import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
 import { createUserCommand, persistSemanticViewPlan, previewView, type ViewPreview } from '../views/service.js';
 import { logAgentRun } from './runLog.js';
-import { searchResources } from './tools.js';
+import { retrieveCandidatesForCommand } from '../retrieval/service.js';
 
 export const RunAgentCommandInput = z.object({
   text: z.string().min(1),
@@ -49,14 +49,12 @@ export async function runAgentCommand(
   const providerLabel = mode === 'codex' ? providerLabelFor(provider) : 'heuristic';
   let providerThreadId = mode === 'codex' ? providerThreadIdFor(provider) : null;
   const query = deriveCandidateSearchQuery(parsed.text);
-  const matches = searchResources(db, {
-    query,
-    filters: { annotationStatus: 'any', limit: parsed.candidateLimit },
-  }).matches;
+  const retrieval = retrieveCandidatesForCommand(db, parsed.text, {
+    maxCandidates: parsed.candidateLimit,
+    knownRelevantResourceIds: parsed.seedResourceIds,
+  });
   const candidateResourceIds = selectCandidateResourceIds(
-    db,
-    parsed.text,
-    matches.map(match => match.resourceId),
+    retrieval.selectedResourceIds,
     parsed.seedResourceIds,
     parsed.candidateLimit,
   );
@@ -76,6 +74,8 @@ export async function runAgentCommand(
       commandText: parsed.text,
       candidateCount: candidateResourceIds.length,
       candidateResourceIds,
+      retrievalRunId: retrieval.runId,
+      retrievalMetrics: retrieval.metrics,
       seedResourceIds: parsed.seedResourceIds,
       parentRevisionId: parsed.parentRevisionId,
       reasoningEffort: parsed.reasoningEffort,
@@ -138,7 +138,13 @@ export async function runAgentCommand(
     };
   }
 
-  const commandId = createUserCommand(db, parsed.text, { mode, query, candidateResourceIds });
+  const commandId = createUserCommand(db, parsed.text, {
+    mode,
+    query,
+    candidateResourceIds,
+    retrievalRunId: retrieval.runId,
+    retrievalMetrics: retrieval.metrics,
+  });
   const persisted = persistSemanticViewPlan(db, commandId, plan, {
     origin: mode,
     parentRevisionId: parsed.parentRevisionId,
@@ -175,34 +181,8 @@ export function deriveCandidateSearchQuery(text: string): string {
   return [...new Set(terms)].join(' ');
 }
 
-function selectCandidateResourceIds(
-  db: Database.Database,
-  commandText: string,
-  searchIds: string[],
-  seedResourceIds: string[],
-  limit: number,
-): string[] {
-  const ids = new Set<string>([...seedResourceIds, ...searchIds]);
-  if (referencesTasteOrPurpose(commandText)) {
-    for (const id of getUserMarkedResourceIds(db, limit)) ids.add(id);
-  }
-  for (const id of getRecentResourceIds(db, limit)) ids.add(id);
-  return [...ids].slice(0, limit);
-}
-
-function referencesTasteOrPurpose(commandText: string): boolean {
-  return /\b(inspiration|important|reference|later|project|ignore|archive|watch|moodboard|taste|purpose)\b/i.test(commandText);
-}
-
-function getUserMarkedResourceIds(db: Database.Database, limit: number): string[] {
-  const rows = db.prepare(`
-    SELECT DISTINCT target_id AS id
-    FROM user_annotations
-    WHERE target_kind = 'resource'
-    ORDER BY created_at DESC
-    LIMIT ?
-  `).all(limit) as { id: string }[];
-  return rows.map(row => row.id);
+function selectCandidateResourceIds(retrievedIds: string[], seedResourceIds: string[], limit: number): string[] {
+  return [...new Set([...seedResourceIds, ...retrievedIds])].slice(0, limit);
 }
 
 function summarizePlan(plan: SemanticViewPlan): Record<MembershipState, number> {
@@ -264,14 +244,4 @@ function messageForPlan(plan: SemanticViewPlan, preview: ViewPreview | null): st
     `${summary.strong_include} strong, ${summary.weak_include} weak, ${summary.conflict} conflicts, ${summary.needs_review} need review, ${summary.exclude} excluded.`,
     'Preview before accepting; no browser tabs were changed.',
   ].join(' ');
-}
-
-function getRecentResourceIds(db: Database.Database, limit: number): string[] {
-  const rows = db.prepare(`
-    SELECT id
-    FROM resources
-    ORDER BY last_seen_at DESC
-    LIMIT ?
-  `).all(limit) as { id: string }[];
-  return rows.map(row => row.id);
 }
