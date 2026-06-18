@@ -12,6 +12,7 @@ import {
 import { openDatabase } from '../db/index.js';
 import { runDeterministicExtraction } from '../extract/deterministic.js';
 import { createExtractionJob, ExtractionAdapterRegistry, resumeExtractionJob } from '../extract/runtime.js';
+import { createGenericWebpageAdapter } from '../extract/webpage.js';
 import { createYouTubeOfficialMetadataAdapter, createYouTubeYtDlpAdapter, importManualYouTubeTranscript } from '../extract/youtube.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
 import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
@@ -450,6 +451,7 @@ function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningE
 }
 
 function registerExtractionAdapters(registry: ExtractionAdapterRegistry): void {
+  registry.register(createGenericWebpageAdapter());
   if (process.env.TABATLAS_YOUTUBE_DATA_API_ENABLED === '1') {
     registry.register(createYouTubeOfficialMetadataAdapter({
       officialDataApi: {

@@ -13,16 +13,19 @@
     "smoke:codex": "tsx scripts/smoke-codex.ts"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@openai/codex-sdk": "latest",
     "better-sqlite3": "latest",
     "commander": "latest",
     "fastify": "latest",
+    "jsdom": "^29.1.1",
     "nanoid": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "latest",
+    "@types/jsdom": "^28.0.3",
     "@types/node": "latest",
     "eslint": "latest",
     "globals": "^17.6.0",
