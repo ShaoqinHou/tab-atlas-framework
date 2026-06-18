@@ -9,6 +9,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "eval:semantic": "tsx scripts/eval-semantic.ts",
+    "eval:agent": "tsx scripts/eval-agent.ts --provider codex",
+    "eval:agent:stub": "tsx scripts/eval-agent.ts --provider stub",
     "import": "tsx scripts/import-snapshot.ts",
     "scan:codex": "tsx scripts/scan-codex.ts",
     "smoke:codex": "tsx scripts/smoke-codex.ts"
