@@ -40,6 +40,7 @@ import {
   type CapabilityKind,
   type CapabilityScope,
 } from '../security/localCapability.js';
+import { importPathPolicyFromEnv, listCaptureRoots, listRecentCaptureFiles, validateImportPath } from '../security/importPathPolicy.js';
 import { installLocalRequestGuard } from '../security/localRequestGuard.js';
 import { applyViewPlan, previewView } from '../views/service.js';
 import {
@@ -56,6 +57,7 @@ const port = Number(process.env.TABATLAS_PORT ?? 9787);
 const db = openDatabase(process.env.TABATLAS_DB);
 const app = Fastify({ logger: true });
 installLocalRequestGuard(app, db, { host, port });
+const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
 const codexProviders = new Map<string, CodexSdkProvider>();
 const extractionRegistry = new ExtractionAdapterRegistry();
@@ -100,7 +102,13 @@ app.post('/api/import-file', async (request, reply) => {
   const body = asRecord(request.body);
   const file = typeof body.file === 'string' ? body.file : '';
   if (!file) return reply.status(400).send({ ok: false, error: 'file is required' });
-  const json = JSON.parse(await fs.readFile(file, 'utf8'));
+  let validated;
+  try {
+    validated = validateImportPath(file, importPolicy);
+  } catch (error) {
+    return reply.status(400).send({ ok: false, error: error instanceof Error ? error.message : 'invalid import path' });
+  }
+  const json = JSON.parse(await fs.readFile(validated.path, 'utf8'));
   const result = importSnapshot(db, json, 'manual_file_import');
   return reply.send({ ok: true, ...result });
 });
@@ -115,6 +123,8 @@ app.get('/api/security/status', async () => {
     bound: { host, port },
     capabilities: listCapabilities(db),
     pairingCodes: listPairingCodes(db),
+    captureRoots: listCaptureRoots(importPolicy),
+    recentCaptureFiles: listRecentCaptureFiles(importPolicy, 10),
     deniedRequests: denied.count,
   };
 });

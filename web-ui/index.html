@@ -233,11 +233,12 @@
 
       <section>
         <h2>Import Snapshot</h2>
-        <input id="importPath" value="C:\Users\housh\Documents\Codex\2026-06-17\i-tend-to-have-many-tags\outputs\headless-tab-exporter\captures\latest-all.json">
+        <input id="importPath" placeholder="Choose a JSON file under a configured capture root">
         <div class="row" style="margin-top:10px">
           <button id="importButton">Import</button>
           <button id="refreshButton">Refresh status</button>
         </div>
+        <div id="captureRoots" class="muted" style="margin-top:10px"></div>
         <div id="importResult" class="muted" style="margin-top:10px"></div>
       </section>
     </div>
@@ -298,6 +299,12 @@
         ['Codex scans', status.codexScanArtifacts],
         ['Atomic items', status.atomicItems],
       ].map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`).join('');
+      if (status.captureRoots) {
+        $('captureRoots').innerHTML = [
+          `<div>Capture roots: ${status.captureRoots.map(escapeHtml).join(', ') || '(none configured)'}</div>`,
+          ...(status.recentCaptureFiles || []).map(file => `<button onclick="useImportPath(${jsArg(file.path)})">${escapeHtml(file.path)}</button>`),
+        ].join('');
+      }
       await loadViews();
       await loadCommands();
       await loadJobs();
@@ -616,6 +623,10 @@
 
     function reuseCommand(text) {
       $('commandText').value = text;
+    }
+
+    function useImportPath(path) {
+      $('importPath').value = path;
     }
 
     async function loadReview() {
