@@ -10,8 +10,8 @@ describe('durable job service', () => {
       requestedBy: 'test',
       input: { batchSize: 1 },
       items: [
-        { key: 'res_1', resourceId: 'res_1' },
-        { key: 'res_2', resourceId: 'res_2' },
+        { key: 'res_1' },
+        { key: 'res_2' },
       ],
     });
     expect(created.status).toBe('queued');
@@ -35,7 +35,7 @@ describe('durable job service', () => {
     const created = createJob(db, {
       kind: 'metadata_fetch',
       requestedBy: 'test',
-      items: [{ key: 'res_1', resourceId: 'res_1' }],
+      items: [{ key: 'res_1' }],
     });
     const cancelled = requestJobCancel(db, created.id);
     expect(cancelled.status).toBe('cancelled');
