@@ -3,6 +3,7 @@ import { openDatabase } from '../src/db/index.js';
 import { importSnapshot } from '../src/import/headlessSnapshot.js';
 import { planSemanticViewHeuristic } from '../src/ai/heuristicSemanticView.js';
 import { buildResourceBrief } from '../src/resources/briefs.js';
+import { buildResourceBriefForIntent } from '../src/resources/briefs.js';
 import {
   acceptViewRevision,
   buildPreferenceEvidence,
@@ -115,5 +116,103 @@ describe('view revisions and membership feedback', () => {
     const plan = planSemanticViewHeuristic('Make a strict game UI inspiration group', [brief]);
     expect(plan.views[0].memberships[0].state).toBe('conflict');
     expect(plan.views[0].memberships[0].evidenceRefs[0]).toMatch(/^feedback:/);
+  });
+
+  it('does not apply painting-tutorial rejection to game-art inspiration', () => {
+    const { db, resourceId } = seed();
+    recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'reject',
+      reason: 'Not a painting tutorial.',
+      sourceCommandText: 'Collect painting tutorials I should follow step by step',
+      sourceGoal: 'Practical painting lessons',
+      sourceRules: ['Exclude moodboards and inspiration-only videos'],
+    });
+
+    const brief = buildResourceBriefForIntent(db, resourceId, {
+      commandText: 'Make a game environment inspiration moodboard',
+    });
+    const plan = planSemanticViewHeuristic('Make a game environment inspiration moodboard', [brief]);
+
+    expect(brief.evidence.some(item => item.kind === 'membership_feedback')).toBe(false);
+    expect(plan.views[0].memberships[0].evidenceRefs.some(ref => ref.startsWith('feedback:'))).toBe(false);
+  });
+
+  it('applies game UI pin to a related game interface command', () => {
+    const { db, resourceId } = seed();
+    recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'pin_include',
+      reason: 'Strong inventory design reference.',
+      sourceCommandText: 'Make a game UI inspiration board',
+      sourceGoal: 'Collect inventory and interface design ideas for games',
+      sourceRules: ['Include game interface examples'],
+    });
+
+    const brief = buildResourceBriefForIntent(db, resourceId, {
+      commandText: 'Show game interface reference links',
+    });
+    const plan = planSemanticViewHeuristic('Show game interface reference links', [brief]);
+
+    expect(brief.evidence[0].kind).toBe('membership_feedback');
+    expect(plan.views[0].memberships[0].state).toBe('strong_include');
+    expect(plan.views[0].memberships[0].evidenceRefs[0]).toMatch(/^feedback:/);
+  });
+
+  it('applies explicit global feedback to unrelated commands', () => {
+    const { db, resourceId } = seed();
+    recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'pin_exclude',
+      reason: 'Never use this stale duplicate.',
+      scopeMode: 'global',
+      sourceCommandText: 'Any command',
+    });
+
+    const brief = buildResourceBriefForIntent(db, resourceId, {
+      commandText: 'Collect project architecture references',
+    });
+
+    expect(brief.evidence[0].kind).toBe('membership_feedback');
+  });
+
+  it('places relevant feedback before Codex scan evidence', () => {
+    const { db, resourceId } = seed();
+    db.prepare(`
+      INSERT INTO extraction_artifacts
+        (id, resource_id, recipe_id, artifact_kind, text_excerpt, json_payload, source_url, provenance, confidence, status, extracted_at)
+      VALUES
+        ('art_codex_1', ?, 'codex_resource_analysis.v1', 'codex_resource_analysis', 'Codex scan says UI reference.', '{}', 'https://example.com/ui', 'codex', 0.8, 'complete', '2026-06-18T00:00:00.000Z')
+    `).run(resourceId);
+    recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'pin_include',
+      reason: 'Inventory UI reference.',
+      sourceCommandText: 'Make a game UI inspiration board',
+      sourceGoal: 'Collect inventory and interface design ideas for games',
+      sourceRules: ['Include game interface examples'],
+    });
+
+    const brief = buildResourceBriefForIntent(db, resourceId, {
+      commandText: 'Show game interface inspiration',
+    });
+
+    expect(brief.evidence[0].kind).toBe('membership_feedback');
+    expect(brief.evidence.some(item => item.kind === 'codex_resource_analysis')).toBe(true);
+    expect(brief.evidence.findIndex(item => item.kind === 'membership_feedback')).toBeLessThan(
+      brief.evidence.findIndex(item => item.kind === 'codex_resource_analysis'),
+    );
   });
 });

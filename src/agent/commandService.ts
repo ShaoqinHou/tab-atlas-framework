@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import { planSemanticViewHeuristic } from '../ai/heuristicSemanticView.js';
 import { planSemanticView } from '../ai/planSemanticView.js';
-import { buildResourceBriefs } from '../resources/briefs.js';
+import { buildResourceBriefsForIntent } from '../resources/briefs.js';
 import type { LlmProvider } from '../llm/types.js';
 import { StructuredOutputError } from '../llm/runStructured.js';
 import type { MembershipState, SemanticViewPlan } from '../shared/schemas.js';
@@ -60,7 +60,10 @@ export async function runAgentCommand(
     parsed.seedResourceIds,
     parsed.candidateLimit,
   );
-  const briefs = buildResourceBriefs(db, candidateResourceIds);
+  const briefs = buildResourceBriefsForIntent(db, candidateResourceIds, {
+    commandText: parsed.text,
+    revisionId: parsed.parentRevisionId,
+  });
 
   let plan: SemanticViewPlan;
   let codexTurnSpent = false;

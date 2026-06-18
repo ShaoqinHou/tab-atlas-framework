@@ -31,7 +31,33 @@ type AtomicItemRow = {
   confidence: number;
 };
 
+export interface ResourceBriefIntent {
+  commandText: string;
+  viewId?: string;
+  revisionId?: string;
+}
+
 export function buildResourceBrief(db: Database.Database, resourceId: string): ResourceBrief {
+  return buildResourceBriefInternal(db, resourceId);
+}
+
+export function buildResourceBriefForIntent(
+  db: Database.Database,
+  resourceId: string,
+  intent: ResourceBriefIntent,
+): ResourceBrief {
+  return buildResourceBriefInternal(db, resourceId, intent);
+}
+
+export function buildResourceBriefsForIntent(
+  db: Database.Database,
+  resourceIds: string[],
+  intent: ResourceBriefIntent,
+): ResourceBrief[] {
+  return resourceIds.map(resourceId => buildResourceBriefForIntent(db, resourceId, intent));
+}
+
+function buildResourceBriefInternal(db: Database.Database, resourceId: string, intent?: ResourceBriefIntent): ResourceBrief {
   const resource = db.prepare(`
     SELECT id, canonical_url, redacted_url, url_kind, host, title_best
     FROM resources
@@ -44,7 +70,7 @@ export function buildResourceBrief(db: Database.Database, resourceId: string): R
 
   const browserGroupTitles = getBrowserGroupTitles(db, resourceId);
   const userAnnotations = getUserAnnotations(db, 'resource', resourceId);
-  const preferenceEvidence = buildPreferenceEvidence(db, 'resource', resourceId);
+  const preferenceEvidence = buildPreferenceEvidence(db, 'resource', resourceId, intent);
   const artifacts = getArtifacts(db, resourceId);
   const atomicItems = getAtomicItems(db, resourceId);
   const systemTags = systemTagsFor(resource.url_kind, resource.host);

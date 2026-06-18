@@ -12,7 +12,7 @@ import {
 } from './toolContracts.js';
 import { addUserAnnotation } from '../annotations/service.js';
 import { planSemanticView } from '../ai/planSemanticView.js';
-import { buildResourceBrief, buildResourceBriefs } from '../resources/briefs.js';
+import { buildResourceBrief, buildResourceBriefs, buildResourceBriefsForIntent } from '../resources/briefs.js';
 import { getReviewNext, submitReviewDecision } from '../review/service.js';
 import type { LlmProvider } from '../llm/types.js';
 
@@ -95,7 +95,7 @@ export async function planSemanticViewTool(
 ) {
   const parsed = PlanSemanticViewInput.parse(input);
   const briefs = parsed.candidateResourceIds.length
-    ? buildResourceBriefs(db, parsed.candidateResourceIds)
+    ? buildResourceBriefsForIntent(db, parsed.candidateResourceIds, { commandText: parsed.commandText })
     : [];
   const result = await planSemanticView(provider, parsed.commandText, briefs, parsed.options);
   return PlanSemanticViewOutput.parse(result.value);

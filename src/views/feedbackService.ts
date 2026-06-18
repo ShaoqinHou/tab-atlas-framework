@@ -1,6 +1,10 @@
 import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
+import {
+  evaluateFeedbackForIntent,
+  saveFeedbackIntentContext,
+} from '../preferences/feedbackContextService.js';
 
 export const ViewRevisionStatus = z.enum(['proposed', 'accepted', 'superseded', 'rejected']);
 export const MembershipFeedbackDecision = z.enum(['accept', 'reject', 'correct', 'pin_include', 'pin_exclude']);
@@ -22,6 +26,11 @@ export const RecordMembershipFeedbackInput = z.object({
   decision: MembershipFeedbackDecision,
   correction: z.unknown().optional(),
   reason: z.string().optional(),
+  scopeMode: z.enum(['view_revision', 'intent', 'global']).default('intent'),
+  sourceRevisionId: z.string().optional(),
+  sourceCommandText: z.string().optional(),
+  sourceGoal: z.string().optional(),
+  sourceRules: z.array(z.string()).optional(),
 });
 
 export interface ViewRevisionRecord {
@@ -206,6 +215,16 @@ export function recordMembershipFeedback(
     parsed.reason ?? null,
     createdAt,
   );
+  const source = feedbackSourceContext(db, parsed.viewId);
+  saveFeedbackIntentContext(db, {
+    feedbackId: id,
+    mode: parsed.scopeMode,
+    sourceViewId: parsed.viewId,
+    sourceRevisionId: parsed.sourceRevisionId ?? source.revisionId,
+    sourceCommandText: parsed.sourceCommandText ?? source.commandText,
+    sourceGoal: parsed.sourceGoal ?? source.goal,
+    sourceRules: parsed.sourceRules ?? source.rules,
+  });
   return {
     id,
     viewId: parsed.viewId,
@@ -258,17 +277,25 @@ export function buildPreferenceEvidence(
   db: Database.Database,
   targetKind: 'resource' | 'atomic_item',
   targetId: string,
+  current?: { commandText: string; viewId?: string; revisionId?: string },
 ): Array<{ kind: 'membership_feedback'; text: string; confidence: number; feedbackId: string }> {
-  return listTargetFeedback(db, targetKind, targetId).map(feedback => ({
-    kind: 'membership_feedback' as const,
-    text: [
-      `User ${feedback.decision.replace('_', ' ')} for a previous semantic view.`,
-      feedback.reason ?? '',
-      feedback.correction === undefined ? '' : `Correction: ${JSON.stringify(feedback.correction)}`,
-    ].filter(Boolean).join(' '),
-    confidence: feedback.decision === 'pin_include' || feedback.decision === 'pin_exclude' ? 1 : 0.95,
-    feedbackId: feedback.id,
-  }));
+  return listTargetFeedback(db, targetKind, targetId)
+    .flatMap(feedback => {
+      if (current) {
+        const match = evaluateFeedbackForIntent(db, feedback.id, current);
+        if (!match.applies) return [];
+      }
+      return [{
+        kind: 'membership_feedback' as const,
+        text: [
+          `User ${feedback.decision.replace('_', ' ')} for a previous semantic view.`,
+          feedback.reason ?? '',
+          feedback.correction === undefined ? '' : `Correction: ${JSON.stringify(feedback.correction)}`,
+        ].filter(Boolean).join(' '),
+        confidence: feedback.decision === 'pin_include' || feedback.decision === 'pin_exclude' ? 1 : 0.95,
+        feedbackId: feedback.id,
+      }];
+    });
 }
 
 function parseJson(value: string): unknown {
@@ -287,4 +314,46 @@ function revisionFromRow(row: ViewRevisionRow): ViewRevisionRecord {
     snapshot: parseJson(row.snapshot_json),
     createdAt: row.created_at,
   };
+}
+
+function feedbackSourceContext(db: Database.Database, viewId: string): {
+  revisionId?: string;
+  commandText: string;
+  goal: string;
+  rules: string[];
+} {
+  const revision = getLatestViewRevision(db, viewId);
+  const spec = db.prepare(`
+    SELECT command_id, goal, inclusion_rules_json, exclusion_rules_json
+    FROM semantic_view_specs
+    WHERE view_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(viewId) as {
+    command_id: string | null;
+    goal: string;
+    inclusion_rules_json: string;
+    exclusion_rules_json: string;
+  } | undefined;
+  const command = spec?.command_id
+    ? db.prepare(`SELECT text FROM user_commands WHERE id = ?`).get(spec.command_id) as { text: string } | undefined
+    : undefined;
+  return {
+    revisionId: revision?.id,
+    commandText: command?.text ?? '',
+    goal: spec?.goal ?? '',
+    rules: [
+      ...parseStringArray(spec?.inclusion_rules_json ?? '[]'),
+      ...parseStringArray(spec?.exclusion_rules_json ?? '[]'),
+    ],
+  };
+}
+
+function parseStringArray(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
 }
