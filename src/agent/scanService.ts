@@ -7,6 +7,7 @@ import { runStructured, StructuredOutputError } from '../llm/runStructured.js';
 import type { LlmProvider } from '../llm/types.js';
 import type { ResourceBrief } from '../shared/schemas.js';
 import { computeResourceKnowledgeDependencyHash } from '../knowledge/dependencyHash.js';
+import { isDetailedAtomicItemSupportedByEvidence } from '../extract/youtube.js';
 import {
   beginNextJobItem,
   createJob,
@@ -473,9 +474,15 @@ function persistScanBatch(
     if (!brief || !candidate) continue;
     const tx = db.transaction(() => {
       const artifactId = upsertScanArtifact(db, brief, analysis);
+      const supportedAtomicItems = analysis.atomicItems.filter(item => isDetailedAtomicItemSupportedByEvidence({
+        urlKind: brief.urlKind,
+        title: brief.title,
+        evidenceRefs: item.evidenceRefs,
+        evidence: brief.evidence,
+      }));
       artifactsWritten += 1;
       deleteCodexAtomicItems(db, analysis.resourceId);
-      for (const item of analysis.atomicItems.filter(item => item.evidenceRefs.length > 0)) {
+      for (const item of supportedAtomicItems) {
         upsertAtomicItem(db, analysis.resourceId, item);
         atomicItemsWritten += 1;
       }
@@ -487,7 +494,7 @@ function persistScanBatch(
           result: {
             resourceId: analysis.resourceId,
             artifactId,
-            atomicItemCount: analysis.atomicItems.filter(item => item.evidenceRefs.length > 0).length,
+            atomicItemCount: supportedAtomicItems.length,
           },
         });
       }

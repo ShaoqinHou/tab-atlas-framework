@@ -148,7 +148,12 @@ function getArtifacts(db: Database.Database, resourceId: string): ArtifactRow[] 
     SELECT id, artifact_kind, text_excerpt, json_payload, provenance, confidence, status
     FROM extraction_artifacts
     WHERE resource_id = ?
-    ORDER BY extracted_at DESC
+    ORDER BY
+      CASE
+        WHEN artifact_kind = 'codex_resource_analysis' OR provenance LIKE 'codex%' THEN 1
+        ELSE 0
+      END,
+      extracted_at DESC
   `).all(resourceId) as ArtifactRow[];
 }
 
