@@ -99,7 +99,7 @@ export function submitReviewSessionDecision(
       WHERE session_id = ? AND resource_id = ?
     `).get(sessionId, parsed.resourceId) as { id: string; position: number; status: string; decision_json: string | null } | undefined;
     if (!item) throw new Error(`Review session item not found: ${parsed.resourceId}`);
-    if (item.decision_json) return;
+    if (item.status === 'completed' && item.decision_json) return;
 
     if (parsed.action !== 'skip') {
       const annotationId = reviewAnnotationId(sessionId, parsed.resourceId);
@@ -209,8 +209,8 @@ function nextPendingPosition(db: Database.Database, sessionId: string): number |
   const row = db.prepare(`
     SELECT position
     FROM review_session_items
-    WHERE session_id = ? AND status = 'pending'
-    ORDER BY position
+    WHERE session_id = ? AND status IN ('pending', 'skipped')
+    ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, position
     LIMIT 1
   `).get(sessionId) as { position: number } | undefined;
   return row?.position ?? null;
@@ -220,7 +220,7 @@ function isSessionDone(db: Database.Database, sessionId: string): boolean {
   const row = db.prepare(`
     SELECT COUNT(*) AS count
     FROM review_session_items
-    WHERE session_id = ? AND status = 'pending'
+    WHERE session_id = ? AND status IN ('pending', 'skipped')
   `).get(sessionId) as { count: number };
   return row.count === 0;
 }

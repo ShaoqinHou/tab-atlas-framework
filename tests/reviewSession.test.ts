@@ -82,6 +82,38 @@ describe('persistent review sessions', () => {
     expect(later.current?.resourceId).toBe(skippedId);
   });
 
+  it('lets skipped items be completed when they return', () => {
+    const db = seed();
+    const session = createReviewSession(db, { type: 'unmarked', preload: 5 });
+    const skippedId = session.current!.resourceId;
+    const afterSkip = submitReviewSessionDecision(db, session.session.id, {
+      resourceId: skippedId,
+      action: 'skip',
+    });
+
+    for (const item of [afterSkip.current, ...afterSkip.next].filter(Boolean)) {
+      submitReviewSessionDecision(db, session.session.id, {
+        resourceId: item!.resourceId,
+        action: 'save_and_next',
+        tags: ['reviewed'],
+        decision: 'none',
+      });
+    }
+    const returned = getReviewSession(db, session.session.id);
+    expect(returned.current?.resourceId).toBe(skippedId);
+
+    const completed = submitReviewSessionDecision(db, session.session.id, {
+      resourceId: skippedId,
+      action: 'save_and_next',
+      tags: ['reviewed_later'],
+      decision: 'important',
+    });
+
+    expect(completed.current).toBeNull();
+    expect(completed.session.status).toBe('completed');
+    expect(completed.progress.completed).toBe(5);
+  });
+
   it('duplicate decisions create one annotation', () => {
     const db = seed();
     const session = createReviewSession(db, { type: 'unmarked', preload: 4 });

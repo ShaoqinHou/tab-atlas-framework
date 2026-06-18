@@ -20,6 +20,7 @@ const results: EvalResult[] = [];
 results.push(preloadAndShortcuts());
 results.push(restartResumePosition());
 results.push(skipReappears());
+results.push(skippedItemCanBeCompleted());
 results.push(duplicateDecisionIdempotent());
 results.push(commandSpecificTargets());
 
@@ -97,6 +98,33 @@ function skipReappears(): EvalResult {
     'skip advances immediately but skipped item is not lost',
     `skipped=${skippedId}; later=${later.current?.resourceId ?? '(none)'}`,
     later.current?.resourceId === skippedId,
+  );
+}
+
+function skippedItemCanBeCompleted(): EvalResult {
+  const db = seed();
+  const session = createReviewSession(db, { type: 'unmarked', preload: 5 });
+  const skippedId = session.current!.resourceId;
+  const afterSkip = submitReviewSessionDecision(db, session.session.id, { resourceId: skippedId, action: 'skip' });
+  for (const item of [afterSkip.current, ...afterSkip.next].filter(Boolean)) {
+    submitReviewSessionDecision(db, session.session.id, {
+      resourceId: item!.resourceId,
+      action: 'save_and_next',
+      tags: ['reviewed'],
+      decision: 'none',
+    });
+  }
+  const completed = submitReviewSessionDecision(db, session.session.id, {
+    resourceId: skippedId,
+    action: 'save_and_next',
+    tags: ['reviewed_later'],
+    decision: 'important',
+  });
+  return result(
+    'Skipped item can be completed later',
+    'returned skipped item can be saved and completes the session',
+    `current=${completed.current?.resourceId ?? '(none)'}; status=${completed.session.status}; completed=${completed.progress.completed}`,
+    completed.current === null && completed.session.status === 'completed' && completed.progress.completed === 5,
   );
 }
 
