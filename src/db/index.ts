@@ -9,6 +9,7 @@ export function openDatabase(filePath = path.join(process.cwd(), 'data', 'tabatl
     new URL('./schema.sql', import.meta.url),
     new URL('./schema-v2-durable.sql', import.meta.url),
     new URL('./schema-v3-evidence.sql', import.meta.url),
+    new URL('./schema-v4-local-trust.sql', import.meta.url),
   ];
   for (const schemaPath of schemas) {
     db.exec(fs.readFileSync(schemaPath, 'utf8'));
