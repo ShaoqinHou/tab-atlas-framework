@@ -380,7 +380,7 @@ h3 {
   align-items: end;
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(180px, 1fr) auto auto auto;
 }
 
 .field-row label {
@@ -751,6 +751,47 @@ h3 {
   font-size: 13px;
   line-height: 1.4;
   margin: 6px 0;
+}
+
+.ops-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.ops-grid div,
+.ops-row,
+.correction-panel {
+  background: #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 9px;
+}
+
+.ops-grid span,
+.ops-row span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+}
+
+.ops-row {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.action-row,
+.row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.correction-panel textarea {
+  margin-top: 8px;
 }
 
 .review-workspace {

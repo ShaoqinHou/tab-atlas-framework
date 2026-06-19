@@ -38,6 +38,7 @@
           <button type="button" data-nav="settings">Onboarding</button>
           <button type="button" data-nav="settings" data-settings-panel="capture">Capture</button>
           <button type="button" data-nav="settings" data-settings-panel="jobs">Jobs</button>
+          <button type="button" data-nav="settings" data-settings-panel="view-ops">View Ops</button>
           <button type="button" data-nav="settings" data-settings-panel="security">Security</button>
           <button type="button" data-nav="settings" data-settings-panel="diagnostics">Diagnostics</button>
         </div>
@@ -108,9 +109,37 @@
               <input id="capturePath" type="text" placeholder="C:\path\snapshot.json">
               <button id="importButton" type="button">Import</button>
             </div>
+            <div class="field-row">
+              <label for="pairingBrowser">Extension pairing</label>
+              <select id="pairingBrowser">
+                <option value="chrome">Chrome</option>
+                <option value="edge">Edge</option>
+              </select>
+              <button id="createPairingButton" type="button">Create pairing</button>
+            </div>
+            <div class="field-row">
+              <label>Evidence processing</label>
+              <button id="runExtractionButton" type="button">Run extraction</button>
+              <button id="createExtractionJobButton" type="button">Queue extraction</button>
+              <button id="createScanJobButton" type="button">Queue Codex scan</button>
+            </div>
+            <div id="captureStatus" class="list-surface"></div>
+          </section>
+          <section class="settings-panel" id="settings-view-ops">
+            <h3>View Operations</h3>
+            <div class="field-row">
+              <label for="refineText">Active view</label>
+              <input id="refineText" type="text" placeholder="Refine instruction">
+              <button id="acceptViewButton" type="button">Accept view</button>
+              <button id="refineViewButton" type="button">Refine</button>
+            </div>
+            <div id="viewOpsStatus" class="list-surface"></div>
           </section>
           <section class="settings-panel" id="settings-jobs">
             <h3>Jobs</h3>
+            <div class="row">
+              <button id="refreshJobsButton" type="button">Refresh jobs</button>
+            </div>
             <div id="jobsList" class="list-surface"></div>
           </section>
           <section class="settings-panel" id="settings-diagnostics">

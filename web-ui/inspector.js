@@ -1,4 +1,4 @@
-import { getJson } from './api.js';
+import { getJson, postJson } from './api.js';
 import { state } from './state.js';
 import { escapeHtml } from './shell.js';
 
@@ -8,6 +8,7 @@ let activeTab = 'overview';
 export function initInspector() {
   document.getElementById('conversationTab')?.addEventListener('click', () => showPanel('conversation'));
   document.getElementById('inspectorTab')?.addEventListener('click', () => showPanel('inspector'));
+  document.getElementById('inspectorContent')?.addEventListener('click', handleInspectorAction);
 }
 
 export async function openInspector(targetKind, targetId, options = {}) {
@@ -113,6 +114,19 @@ function renderInspectorTab(item, tab) {
         <div><span>Extraction</span><strong>${escapeHtml(item.extractionStatus)}</strong></div>
       </div>
       <p>${escapeHtml(item.summary || membership?.reason || 'No summary available.')}</p>
+      ${membership ? `
+        <div class="correction-panel">
+          <h4>Correct this view</h4>
+          <div class="action-row">
+            <button type="button" data-explain-membership="${escapeHtml(item.targetId)}">Explain</button>
+            <button type="button" data-correction-decision="pin_include">Pin include</button>
+            <button type="button" data-correction-decision="pin_exclude">Pin exclude</button>
+            <button type="button" data-correction-decision="reject">Reject</button>
+          </div>
+          <textarea id="correctionReason" rows="2" placeholder="Correction note"></textarea>
+          <div id="correctionResult" class="muted"></div>
+        </div>
+      ` : ''}
       ${item.atomicItems.length ? `
         <section>
           <h4>Atomic items</h4>
@@ -126,6 +140,34 @@ function renderInspectorTab(item, tab) {
       ` : ''}
     </div>
   `;
+}
+
+async function handleInspectorAction(event) {
+  const explain = event.target.closest('[data-explain-membership]');
+  if (explain && currentInspector) {
+    const viewId = state.activeViewId;
+    const result = await getJson(`/api/resources/${encodeURIComponent(currentInspector.parentResourceId || currentInspector.targetId)}/explain?viewId=${encodeURIComponent(viewId)}`);
+    writeCorrectionResult(result.explanation ?? JSON.stringify(result, null, 2));
+    return;
+  }
+  const correction = event.target.closest('[data-correction-decision]');
+  if (!correction || !currentInspector?.currentViewMembership) return;
+  const reason = document.getElementById('correctionReason')?.value.trim() ?? '';
+  const result = await postJson('/api/membership-feedback', {
+    viewId: state.activeViewId,
+    membershipId: currentInspector.currentViewMembership.membershipId,
+    targetKind: currentInspector.targetKind,
+    targetId: currentInspector.targetId,
+    decision: correction.dataset.correctionDecision,
+    reason: reason || undefined,
+    scopeMode: 'intent',
+  });
+  writeCorrectionResult(`Saved ${result.decision}.`);
+}
+
+function writeCorrectionResult(value) {
+  const target = document.getElementById('correctionResult');
+  if (target) target.textContent = value;
 }
 
 function showPanel(panel) {

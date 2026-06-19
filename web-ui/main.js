@@ -1,6 +1,7 @@
 import { getJson } from './api.js';
 import { initConversation } from './conversation.js';
 import { initInspector } from './inspector.js';
+import { initOperations } from './operations.js';
 import { initReviewWorkspace } from './review.js';
 import { initShell, refreshStatus, setViewOptions } from './shell.js';
 import { setState, state, subscribe } from './state.js';
@@ -73,6 +74,7 @@ initShell({
 initInspector();
 initViewWorkspace();
 initReviewWorkspace();
+initOperations({ onRefreshViews: refreshViews, onRefreshWorkspace: refreshViewWorkspace });
 initConversation({ onRefreshViews: refreshViews });
 subscribe(renderAskStage);
 await refreshViews();

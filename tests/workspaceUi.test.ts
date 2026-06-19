@@ -18,7 +18,7 @@ describe('workspace dashboard shell', () => {
       expect(document.querySelector(`#page-${page}`)).toBeTruthy();
     }
     expect(document.querySelector('[data-testid="secondary-nav"]')).toBeTruthy();
-    expect(document.querySelectorAll('[data-settings-panel]')).toHaveLength(4);
+    expect(document.querySelectorAll('[data-settings-panel]')).toHaveLength(5);
   });
 
   it('keeps first-run onboarding and trusted agent landing wired', () => {
@@ -46,6 +46,26 @@ describe('workspace dashboard shell', () => {
     expect(actions).toContain('startReviewSession');
   });
 
+  it('restores secondary operations and correction controls', () => {
+    const html = read('web-ui/index.html');
+    const operations = read('web-ui/operations.js');
+    const inspector = read('web-ui/inspector.js');
+
+    expect(html).toContain('id="createPairingButton"');
+    expect(html).toContain('id="runExtractionButton"');
+    expect(html).toContain('id="createScanJobButton"');
+    expect(html).toContain('id="acceptViewButton"');
+    expect(operations).toContain('/api/security/pairing-codes');
+    expect(operations).toContain('/api/import-file');
+    expect(operations).toContain('/api/extract/run');
+    expect(operations).toContain('/api/jobs/codex-scan');
+    expect(operations).toContain('/api/jobs/${encodeURIComponent(jobId)}/retry-failed');
+    expect(operations).toContain('/api/views/${encodeURIComponent(state.activeViewId)}/apply');
+    expect(inspector).toContain('/api/membership-feedback');
+    expect(inspector).toContain('pin_include');
+    expect(inspector).toContain('pin_exclude');
+  });
+
   it('renders view layouts and filters through workspace modules', () => {
     const html = read('web-ui/index.html');
     const workspace = read('web-ui/viewWorkspace.js');
@@ -71,6 +91,7 @@ describe('workspace dashboard shell', () => {
     const sharedFiles = [
       'web-ui/index.html',
       'web-ui/review.js',
+      'web-ui/operations.js',
       'scripts/eval-workspace-ux.ts',
       'docs/12-implementation-plan.md',
       'docs/24-codex-scan-implementation-report.md',
