@@ -67,6 +67,7 @@ import {
   listViewRevisions,
   recordMembershipFeedback,
   rejectViewRevision,
+  undoMembershipFeedback,
 } from '../views/feedbackService.js';
 import {
   createReviewSession,
@@ -873,6 +874,11 @@ app.post('/api/views/:viewId/apply', async (request, reply) => {
 
 app.post('/api/membership-feedback', async (request, reply) => {
   return reply.send(recordMembershipFeedback(db, asRecord(request.body) as Parameters<typeof recordMembershipFeedback>[1]));
+});
+
+app.post('/api/membership-feedback/:feedbackId/undo', async (request, reply) => {
+  const params = request.params as { feedbackId: string };
+  return reply.send(undoMembershipFeedback(db, params.feedbackId));
 });
 
 app.listen({ host, port }).catch(err => {

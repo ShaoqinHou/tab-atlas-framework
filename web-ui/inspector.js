@@ -5,6 +5,7 @@ import { escapeHtml } from './shell.js';
 let currentInspector = null;
 let activeTab = 'overview';
 let returnFocusElement = null;
+let lastCorrectionFeedbackId = '';
 
 export function initInspector() {
   document.getElementById('conversationTab')?.addEventListener('click', () => showPanel('conversation'));
@@ -15,6 +16,7 @@ export function initInspector() {
       closeInspector();
     }
   });
+  showPanel(state.assistantPanel === 'inspector' ? 'inspector' : 'conversation');
 }
 
 export async function openInspector(targetKind, targetId, options = {}) {
@@ -136,8 +138,12 @@ function renderInspectorTab(item, tab) {
             <button type="button" data-correction-decision="pin_include">Pin include</button>
             <button type="button" data-correction-decision="pin_exclude">Pin exclude</button>
             <button type="button" data-correction-decision="reject">Reject</button>
+            <button type="button" data-correction-decision="correct">Correct</button>
           </div>
           <textarea id="correctionReason" rows="2" placeholder="Correction note"></textarea>
+          <input id="correctionMeaning" type="text" placeholder="Corrected meaning">
+          <input id="correctionTags" type="text" placeholder="Preferred tags, comma separated">
+          <input id="correctionSection" type="text" placeholder="Section suggestion">
           <div id="correctionResult" class="muted"></div>
         </div>
       ` : ''}
@@ -173,6 +179,13 @@ async function handleInspectorAction(event) {
     await openInspector('resource', parent.dataset.parentResource, { viewId: state.activeViewId });
     return;
   }
+  const undo = event.target.closest('[data-correction-undo]');
+  if (undo) {
+    const result = await postJson(`/api/membership-feedback/${encodeURIComponent(undo.dataset.correctionUndo)}/undo`, {});
+    lastCorrectionFeedbackId = '';
+    await refreshAfterCorrection(result.message || 'Correction undone.');
+    return;
+  }
   const explain = event.target.closest('[data-explain-membership]');
   if (explain && currentInspector) {
     const viewId = state.activeViewId;
@@ -183,21 +196,61 @@ async function handleInspectorAction(event) {
   const correction = event.target.closest('[data-correction-decision]');
   if (!correction || !currentInspector?.currentViewMembership) return;
   const reason = document.getElementById('correctionReason')?.value.trim() ?? '';
+  const correctedMeaning = document.getElementById('correctionMeaning')?.value.trim() ?? '';
+  const preferredTags = document.getElementById('correctionTags')?.value.split(',').map(tag => tag.trim()).filter(Boolean) ?? [];
+  const sectionSuggestion = document.getElementById('correctionSection')?.value.trim() ?? '';
   const result = await postJson('/api/membership-feedback', {
     viewId: state.activeViewId,
     membershipId: currentInspector.currentViewMembership.membershipId,
     targetKind: currentInspector.targetKind,
     targetId: currentInspector.targetId,
     decision: correction.dataset.correctionDecision,
+    correction: {
+      correctedMeaning: correctedMeaning || undefined,
+      preferredTags,
+      sectionSuggestion: sectionSuggestion || undefined,
+      previousMembership: {
+        state: currentInspector.currentViewMembership.state,
+        section: currentInspector.currentViewMembership.section,
+        reason: currentInspector.currentViewMembership.reason,
+      },
+    },
     reason: reason || undefined,
     scopeMode: 'intent',
   });
-  writeCorrectionResult(`Saved ${result.decision}.`);
+  lastCorrectionFeedbackId = result.id;
+  await refreshAfterCorrection(correctionMessage(result));
 }
 
 function writeCorrectionResult(value) {
   const target = document.getElementById('correctionResult');
-  if (target) target.textContent = value;
+  if (!target) return;
+  target.innerHTML = `
+    <p>${escapeHtml(value)}</p>
+    ${lastCorrectionFeedbackId ? `<button type="button" data-correction-undo="${escapeHtml(lastCorrectionFeedbackId)}">Undo</button>` : ''}
+  `;
+}
+
+async function refreshAfterCorrection(message) {
+  const viewWorkspace = await import('./viewWorkspace.js');
+  viewWorkspace.setWorkspaceFilter('visible');
+  await viewWorkspace.refreshViewWorkspace(state.activeViewId);
+  const targetKind = currentInspector?.targetKind || state.selectedTargetKind;
+  const targetId = currentInspector?.targetId || state.selectedTargetId;
+  if (targetKind && targetId) {
+    const params = state.activeViewId ? `?viewId=${encodeURIComponent(state.activeViewId)}` : '';
+    currentInspector = await getJson(`/api/targets/${encodeURIComponent(targetKind)}/${encodeURIComponent(targetId)}/inspector${params}`);
+    renderInspector();
+  }
+  viewWorkspace.showWorkspaceNotice(message);
+  writeCorrectionResult(message);
+}
+
+function correctionMessage(result) {
+  const scope = result.consequence?.scope || 'intent';
+  const stateLabel = result.consequence?.currentState ? ` Current card state: ${result.consequence.currentState}.` : '';
+  const consequence = result.consequence?.message || 'It will influence future related views for this intent.';
+  return `Saved ${result.decision.replace('_', ' ')}. Scope: ${scope}.${stateLabel} ${consequence}`;
 }
 
 function closeInspector() {
@@ -222,6 +275,7 @@ function showPanel(panel) {
   inspectorTab?.classList.toggle('active', showInspector);
   conversationTab?.setAttribute('aria-selected', String(!showInspector));
   inspectorTab?.setAttribute('aria-selected', String(showInspector));
+  setState({ assistantPanel: panel });
 }
 
 function label(tab) {

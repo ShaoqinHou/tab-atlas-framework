@@ -55,6 +55,11 @@ export interface MembershipFeedbackRecord {
   correction?: unknown;
   reason?: string;
   createdAt: string;
+  consequence?: {
+    scope: 'view_revision' | 'intent' | 'global';
+    currentState?: string;
+    message: string;
+  };
 }
 
 type ViewRevisionRow = {
@@ -225,6 +230,7 @@ export function recordMembershipFeedback(
     sourceGoal: parsed.sourceGoal ?? source.goal,
     sourceRules: parsed.sourceRules ?? source.rules,
   });
+  const consequence = applyMembershipFeedbackConsequence(db, parsed);
   return {
     id,
     viewId: parsed.viewId,
@@ -235,6 +241,47 @@ export function recordMembershipFeedback(
     correction: parsed.correction,
     reason: parsed.reason,
     createdAt,
+    consequence,
+  };
+}
+
+export function undoMembershipFeedback(
+  db: Database.Database,
+  feedbackId: string,
+): { undone: true; feedbackId: string; restoredState?: string; message: string } {
+  const row = db.prepare(`
+    SELECT id, view_id, membership_id, correction_json
+    FROM membership_feedback
+    WHERE id = ?
+  `).get(feedbackId) as { id: string; view_id: string; membership_id: string | null; correction_json: string | null } | undefined;
+  if (!row) throw new Error(`Feedback not found: ${feedbackId}`);
+  const correction = parseJson(row.correction_json ?? '{}') as { previousMembership?: { state?: string; section?: string; reason?: string; conflictNote?: string } } | undefined;
+  const previous = correction?.previousMembership;
+  if (row.membership_id && previous?.state) {
+    db.prepare(`
+      UPDATE memberships
+      SET state = ?,
+          section = COALESCE(?, section),
+          reason = COALESCE(?, reason),
+          conflict_note = ?
+      WHERE id = ? AND view_id = ?
+    `).run(
+      previous.state,
+      previous.section ?? null,
+      previous.reason ?? null,
+      previous.conflictNote ?? null,
+      row.membership_id,
+      row.view_id,
+    );
+  }
+  db.prepare(`DELETE FROM membership_feedback WHERE id = ?`).run(feedbackId);
+  return {
+    undone: true,
+    feedbackId,
+    restoredState: previous?.state,
+    message: previous?.state
+      ? `Removed correction and restored this membership to ${previous.state}.`
+      : 'Removed correction. Re-run refinement if this view needs a prior state restored.',
   };
 }
 
@@ -346,6 +393,70 @@ function feedbackSourceContext(db: Database.Database, viewId: string): {
       ...parseStringArray(spec?.inclusion_rules_json ?? '[]'),
       ...parseStringArray(spec?.exclusion_rules_json ?? '[]'),
     ],
+  };
+}
+
+function applyMembershipFeedbackConsequence(
+  db: Database.Database,
+  input: z.infer<typeof RecordMembershipFeedbackInput>,
+): MembershipFeedbackRecord['consequence'] {
+  if (!input.membershipId) {
+    return {
+      scope: input.scopeMode,
+      message: `Stored ${input.decision.replace('_', ' ')} feedback for future related views.`,
+    };
+  }
+  const correction = input.correction && typeof input.correction === 'object'
+    ? input.correction as { sectionSuggestion?: string; correctedMeaning?: string }
+    : {};
+  const next = consequenceForDecision(input.decision, correction.sectionSuggestion);
+  db.prepare(`
+    UPDATE memberships
+    SET state = ?,
+        section = COALESCE(?, section),
+        conflict_note = COALESCE(?, conflict_note),
+        reason = COALESCE(?, reason)
+    WHERE id = ? AND view_id = ?
+  `).run(
+    next.state,
+    next.section ?? null,
+    next.conflictNote ?? null,
+    next.reason ?? null,
+    input.membershipId,
+    input.viewId,
+  );
+  return {
+    scope: input.scopeMode,
+    currentState: next.state,
+    message: next.message,
+  };
+}
+
+function consequenceForDecision(
+  decision: z.infer<typeof MembershipFeedbackDecision>,
+  sectionSuggestion?: string,
+): { state: string; section?: string; conflictNote?: string; reason?: string; message: string } {
+  if (decision === 'pin_include' || decision === 'accept') {
+    return {
+      state: 'strong_include',
+      section: sectionSuggestion,
+      reason: sectionSuggestion ? `User corrected this into ${sectionSuggestion}.` : undefined,
+      message: 'This card is now pinned as a strong match in the current view and will influence related intent matches.',
+    };
+  }
+  if (decision === 'pin_exclude' || decision === 'reject') {
+    return {
+      state: 'conflict',
+      conflictNote: 'User excluded this for the current intent; kept visible as a correction consequence.',
+      message: 'This card is kept visible as a conflict instead of disappearing, and the exclusion is scoped to this intent.',
+    };
+  }
+  return {
+    state: 'needs_review',
+    section: sectionSuggestion,
+    reason: sectionSuggestion ? `User suggested ${sectionSuggestion}; refine the view to apply the corrected meaning.` : undefined,
+    conflictNote: 'User supplied a correction; refine the view to recalculate membership.',
+    message: 'This correction is stored and the card remains pending refinement for this intent.',
   };
 }
 

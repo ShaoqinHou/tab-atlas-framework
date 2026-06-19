@@ -11,6 +11,7 @@ import {
   getViewRevision,
   recordMembershipFeedback,
   rejectViewRevision,
+  undoMembershipFeedback,
 } from '../src/views/feedbackService.js';
 
 function seed() {
@@ -70,6 +71,80 @@ describe('view revisions and membership feedback', () => {
     expect(evidence).toHaveLength(1);
     expect(evidence[0].confidence).toBe(1);
     expect(evidence[0].text).toContain('not visual inspiration');
+  });
+
+  it('applies visible correction consequence and supports undo', () => {
+    const { db, resourceId } = seed();
+    const feedback = recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'pin_exclude',
+      reason: 'This is a framework note, not a visual UI reference.',
+      correction: {
+        previousMembership: {
+          state: 'strong_include',
+          section: 'Inventory',
+          reason: 'Looks useful for UI.',
+        },
+      },
+    });
+
+    const afterCorrection = db.prepare(`
+      SELECT state, conflict_note
+      FROM memberships
+      WHERE id = 'mem_1'
+    `).get() as { state: string; conflict_note: string | null };
+    expect(feedback.consequence?.scope).toBe('intent');
+    expect(feedback.consequence?.message).toContain('scoped to this intent');
+    expect(afterCorrection.state).toBe('conflict');
+    expect(afterCorrection.conflict_note).toContain('User excluded');
+
+    const undone = undoMembershipFeedback(db, feedback.id);
+    const afterUndo = db.prepare(`
+      SELECT state, section, reason, conflict_note
+      FROM memberships
+      WHERE id = 'mem_1'
+    `).get() as { state: string; section: string | null; reason: string | null; conflict_note: string | null };
+    const feedbackRows = db.prepare('SELECT COUNT(*) AS count FROM membership_feedback WHERE id = ?').get(feedback.id) as { count: number };
+
+    expect(undone.restoredState).toBe('strong_include');
+    expect(afterUndo.state).toBe('strong_include');
+    expect(afterUndo.section).toBe('Inventory');
+    expect(afterUndo.reason).toBe('Looks useful for UI.');
+    expect(afterUndo.conflict_note).toBeNull();
+    expect(feedbackRows.count).toBe(0);
+  });
+
+  it('stores corrected meaning as pending refinement consequence', () => {
+    const { db, resourceId } = seed();
+    const feedback = recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'correct',
+      reason: 'Use as implementation reference instead.',
+      correction: {
+        correctedMeaning: 'Implementation reference',
+        preferredTags: ['project-reference'],
+        sectionSuggestion: 'Implementation',
+      },
+    });
+
+    const membership = db.prepare(`
+      SELECT state, section, reason, conflict_note
+      FROM memberships
+      WHERE id = 'mem_1'
+    `).get() as { state: string; section: string | null; reason: string | null; conflict_note: string | null };
+
+    expect(feedback.consequence?.currentState).toBe('needs_review');
+    expect(feedback.consequence?.message).toContain('pending refinement');
+    expect(membership.state).toBe('needs_review');
+    expect(membership.section).toBe('Implementation');
+    expect(membership.reason).toContain('Implementation');
+    expect(membership.conflict_note).toContain('User supplied a correction');
   });
 
   it('rejects child revisions without changing the accepted parent revision', () => {
