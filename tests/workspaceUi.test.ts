@@ -38,11 +38,23 @@ describe('workspace dashboard shell', () => {
 
   it('uses persistent review sessions and links agent actions into the workspace', () => {
     const review = read('web-ui/review.js');
+    const conversation = read('web-ui/conversation.js');
     const actions = read('web-ui/presentationActions.js');
 
     expect(review).toContain('/api/review-sessions');
     expect(review).toContain('REVIEW_SESSION_STORAGE_KEY');
     expect(review).toContain('data-review-decision');
+    expect(review).toContain('openReviewSessionSnapshot');
+    expect(review).toContain('data-review-visual');
+    expect(review).toContain('youtube-nocookie.com/embed');
+    expect(review).toContain('review-next-card');
+    expect(review).toContain("state.remoteMedia !== 'off'");
+    expect(conversation).toContain('handleCompletedActionResults');
+    expect(conversation).toContain("kind === 'start_review'");
+    expect(conversation).toContain("kind === 'explain_membership'");
+    expect(conversation).toContain("kind === 'add_annotation'");
+    expect(conversation).toContain("kind === 'scan_resources'");
+    expect(conversation).toContain("kind === 'accept_view'");
     expect(actions).toContain('startReviewSession');
     expect(actions).toContain('show_explanation');
     expect(actions).toContain('compare_revisions');
@@ -76,20 +88,42 @@ describe('workspace dashboard shell', () => {
     expect(operations).toContain('/api/jobs/codex-scan');
     expect(operations).toContain('/api/jobs/${encodeURIComponent(jobId)}/retry-failed');
     expect(operations).toContain('/api/views/${encodeURIComponent(state.activeViewId)}/apply');
+    expect(operations).toContain('securityRotationResult');
+    expect(operations).toContain('data-save-rotated-token');
+    expect(operations).toContain('data-extension-repair');
+    expect(operations).toContain('data-ack-rotated-token');
+    expect(operations).toContain('Extension rotation requires re-pairing');
     expect(inspector).toContain('/api/membership-feedback');
+    expect(inspector).toContain('/api/membership-feedback/${encodeURIComponent(undo.dataset.correctionUndo)}/undo');
     expect(inspector).toContain('pin_include');
     expect(inspector).toContain('pin_exclude');
+    expect(inspector).toContain('data-correction-decision="correct"');
+    expect(inspector).toContain('correctionMeaning');
+    expect(inspector).toContain('correctionSection');
+    expect(inspector).toContain('refreshAfterCorrection');
+    expect(inspector).toContain('Scope:');
   });
 
   it('renders view layouts and filters through workspace modules', () => {
     const html = read('web-ui/index.html');
     const workspace = read('web-ui/viewWorkspace.js');
+    const state = read('web-ui/state.js');
 
     expect(html).toContain('data-layout="board"');
     expect(html).toContain('data-layout="gallery"');
     expect(html).toContain('data-layout="map"');
     expect(workspace).toContain('workspaceSearch');
     expect(workspace).toContain('/sections/');
+    expect(workspace).toContain('data-map-section');
+    expect(workspace).toContain('data-focus-section');
+    expect(workspace).toContain('semantic-region');
+    expect(workspace).toContain('hostSummary(section.visibleCards)');
+    expect(workspace).toContain('persistSectionPageCounts');
+    expect(workspace).toContain('restoreWorkspaceScroll');
+    expect(state).toContain('workspaceStateFilters');
+    expect(state).toContain('workspaceQueryFilter');
+    expect(state).toContain('workspaceScrollTop');
+    expect(state).toContain('assistantPanel');
   });
 
   it('renders human workspace cards and inspector controls', () => {
@@ -110,6 +144,7 @@ describe('workspace dashboard shell', () => {
     expect(inspector).toContain('data-parent-resource');
     expect(inspector).toContain('selectedTargetKind');
     expect(inspector).toContain('inspectorTab');
+    expect(inspector).toContain('showPanel(state.assistantPanel');
   });
 
   it('ships the role-play workspace UX evaluation gate', () => {
@@ -126,6 +161,11 @@ describe('workspace dashboard shell', () => {
     expect(evalScript).toContain('TABATLAS_FAKE_CODEX_PROVIDER');
     expect(evalScript).toContain('large-workspace-${size}');
     expect(evalScript).toContain('axeAccessibilityCheck');
+    expect(evalScript).toContain("axeAccessibilityCheck(page, 'ask-conversation')");
+    expect(evalScript).toContain("axeAccessibilityCheck(page, 'board-gallery-map')");
+    expect(evalScript).toContain("axeAccessibilityCheck(page, 'inspector')");
+    expect(evalScript).toContain("axeAccessibilityCheck(page, 'review')");
+    expect(evalScript).toContain("axeAccessibilityCheck(page, 'operations')");
   });
 
   it('does not ship machine-specific local paths in shared docs or UI', () => {
