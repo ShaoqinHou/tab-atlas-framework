@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { addUserAnnotation } from '../src/annotations/service.js';
 import { openDatabase } from '../src/db/index.js';
 import { importSnapshot } from '../src/import/headlessSnapshot.js';
+import { planPresentationActionsFromText } from '../src/presentation/actionPlanner.js';
 import {
   getTargetInspector,
   getViewSectionPage,
@@ -156,6 +157,32 @@ describe('visual workspace projection', () => {
       { kind: 'open_review', queue: 'needs_review' },
     ];
     expect(() => assertPresentationActionsNonDestructive(actions)).not.toThrow();
+  });
+
+  it('plans conversational presentation actions from workspace text', () => {
+    const workspace = projectSemanticViewWorkspace(plan, briefs, {
+      generatedAt: '2026-06-19T00:00:00.000Z',
+    });
+
+    const galleryPlan = planPresentationActionsFromText('show this as a gallery and focus game-centered', {
+      activeViewId: 'view_game',
+      workspace,
+    });
+    expect(galleryPlan.actions).toEqual([
+      { kind: 'set_layout', layout: 'gallery' },
+      { kind: 'focus_section', sectionId: 'game-centered' },
+    ]);
+
+    const evidencePlan = planPresentationActionsFromText('open the strongest item and show evidence', {
+      activeViewId: 'view_game',
+      workspace,
+    });
+    expect(evidencePlan.actions).toContainEqual({
+      kind: 'open_resource',
+      targetKind: 'resource',
+      targetId: 'res_game',
+      inspectorTab: 'evidence',
+    });
   });
 
   it('defines role-play coverage before human pilot use', () => {

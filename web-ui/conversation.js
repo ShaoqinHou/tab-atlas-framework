@@ -1,4 +1,5 @@
 import { postJson } from './api.js';
+import { executePresentationPlan, hasActiveWorkspace, requestPresentationPlan } from './presentationActions.js';
 import { setState, state } from './state.js';
 import { escapeHtml } from './shell.js';
 
@@ -14,6 +15,14 @@ export function initConversation({ onRefreshViews } = {}) {
     input.value = '';
     appendMessage('user', text);
     try {
+      if (hasActiveWorkspace()) {
+        const presentationPlan = await requestPresentationPlan(text);
+        if (presentationPlan.actions?.length) {
+          appendMessage('assistant', presentationPlan.reply);
+          await executePresentationPlan(presentationPlan);
+          return;
+        }
+      }
       const result = await postJson('/api/agent/command', {
         command: text,
         mode: 'heuristic',

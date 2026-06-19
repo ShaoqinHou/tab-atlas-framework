@@ -84,7 +84,7 @@ export function requiredScopeFor(method: string, rawUrl: string): GuardScope {
   if (!pathname.startsWith('/api/')) return 'api:read';
   if (normalizedMethod === 'GET') return 'api:read';
   if (pathname.startsWith('/api/jobs') || pathname.startsWith('/api/extract') || pathname.startsWith('/api/agent/scan')) return 'jobs:write';
-  if (pathname.startsWith('/api/conversations') || pathname.startsWith('/api/agent-actions') || pathname.startsWith('/api/agent/command') || pathname.startsWith('/api/agent/refine')) {
+  if (pathname.startsWith('/api/conversations') || pathname.startsWith('/api/agent-actions') || pathname.startsWith('/api/agent/command') || pathname.startsWith('/api/agent/refine') || pathname.startsWith('/api/presentation')) {
     return 'agent:write';
   }
   return 'api:write';

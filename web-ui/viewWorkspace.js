@@ -58,6 +58,11 @@ export function focusWorkspaceSection(sectionId) {
   setState({ focusedSectionId: sectionId });
 }
 
+export function setWorkspaceFilter(filter) {
+  stateFilter = filter || 'visible';
+  renderWorkspace();
+}
+
 function renderWorkspace() {
   renderFilters();
   const target = document.getElementById('viewWorkspace');

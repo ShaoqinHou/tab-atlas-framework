@@ -31,6 +31,7 @@ import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBri
 import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
 import { buildResourceBrief } from '../resources/briefs.js';
+import { planPresentationActionsFromText } from '../presentation/actionPlanner.js';
 import { getTargetInspector, getViewSectionPage, getViewWorkspace } from '../presentation/workspaceService.js';
 import {
   completeOnboardingStep,
@@ -823,6 +824,18 @@ app.get('/api/resources/:id/inspector', async (request, reply) => {
     targetKind: 'resource',
     targetId: params.id,
     viewId: query.viewId,
+  }));
+});
+
+app.post('/api/presentation/actions', async (request, reply) => {
+  const body = asRecord(request.body);
+  const command = typeof body.command === 'string' ? body.command : '';
+  const activeViewId = typeof body.activeViewId === 'string' ? body.activeViewId : undefined;
+  if (!command.trim()) return reply.status(400).send({ ok: false, error: 'command is required' });
+  const workspace = activeViewId ? getViewWorkspace(db, activeViewId, { maxCardsPerSection: 100 }) : undefined;
+  return reply.send(planPresentationActionsFromText(command, {
+    activeViewId,
+    workspace,
   }));
 });
 
