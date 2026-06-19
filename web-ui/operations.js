@@ -1,4 +1,4 @@
-import { getJson, postJson } from './api.js';
+import { getJson, postJson, saveToken } from './api.js';
 import { escapeHtml } from './shell.js';
 import { state } from './state.js';
 
@@ -128,13 +128,14 @@ async function refreshSecurity() {
       ${(security.capabilities ?? []).map(capability => `
         <article class="ops-row">
           <strong>${escapeHtml(capability.label || capability.kind)}</strong>
-          <span>${escapeHtml(capability.status)} · ${capability.scopes.map(escapeHtml).join(', ')}</span>
+          <span>${escapeHtml(capability.status)} · ${escapeHtml(capability.kind)} · ${capability.scopes.map(escapeHtml).join(', ')}</span>
           <div class="action-row">
-            <button type="button" data-capability-action="rotate" data-capability-id="${escapeHtml(capability.id)}">Rotate</button>
+            <button type="button" data-capability-action="rotate" data-capability-id="${escapeHtml(capability.id)}" data-capability-kind="${escapeHtml(capability.kind)}">Rotate</button>
             <button type="button" data-capability-action="revoke" data-capability-id="${escapeHtml(capability.id)}">Revoke</button>
           </div>
         </article>
       `).join('') || '<p class="muted">No capabilities.</p>'}
+      <div id="securityRotationResult" class="rotation-result"></div>
       <h4>Extension trust</h4>
       <p class="muted">${(security.pairingChallenges ?? []).length} active or historical pairing challenges.</p>
     `;
@@ -195,12 +196,75 @@ async function handleJobAction(event) {
 }
 
 async function handleSecurityAction(event) {
+  const copy = event.target.closest('[data-copy-token]');
+  if (copy) {
+    await navigator.clipboard?.writeText(copy.dataset.copyToken);
+    copy.textContent = 'Copied';
+    return;
+  }
+  const save = event.target.closest('[data-save-rotated-token]');
+  if (save) {
+    saveToken(save.dataset.saveRotatedToken || '');
+    await refreshSecurity();
+    writeSecurityRotation('Stored the rotated dashboard token in this browser. Refresh succeeded with the replacement credential.');
+    return;
+  }
+  if (event.target.closest('[data-ack-rotated-token]')) {
+    writeSecurityRotation('Rotated token acknowledged. TabAtlas did not store it.');
+    return;
+  }
+  const repair = event.target.closest('[data-extension-repair]');
+  if (repair) {
+    await postJson(`/api/security/capabilities/${encodeURIComponent(repair.dataset.extensionRepair)}/revoke`, {});
+    const result = await postJson('/api/security/pairing-codes', { browser: 'extension', label: 'Re-paired extension' });
+    await refreshSecurity();
+    writeSecurityRotation(`Extension capability revoked. Re-pair using challenge ${result.challenge?.id || result.challengeId || 'created'}; the old extension token will not work.`);
+    return;
+  }
   const button = event.target.closest('[data-capability-action]');
   if (!button) return;
   const action = button.dataset.capabilityAction;
   const id = button.dataset.capabilityId;
-  await postJson(`/api/security/capabilities/${encodeURIComponent(id)}/${action}`, {});
+  const kind = button.dataset.capabilityKind;
+  if (action === 'rotate' && kind === 'extension') {
+    writeSecurityRotation(`
+      <strong>Extension rotation requires re-pairing.</strong>
+      <p>TabAtlas cannot push a new token into an installed extension. Revoke this capability and create a new pairing challenge instead.</p>
+      <button type="button" data-extension-repair="${escapeHtml(id)}">Revoke and re-pair</button>
+    `, true);
+    return;
+  }
+  const result = await postJson(`/api/security/capabilities/${encodeURIComponent(id)}/${action}`, {});
+  if (action === 'rotate') {
+    writeRotatedCapability(result);
+    return;
+  }
   await refreshSecurity();
+}
+
+function writeRotatedCapability(result) {
+  const capability = result.capability ?? {};
+  const token = result.token ?? '';
+  const dashboardAction = capability.kind === 'ui'
+    ? `<button type="button" data-save-rotated-token="${escapeHtml(token)}">Replace stored dashboard token</button>`
+    : '';
+  writeSecurityRotation(`
+    <strong>New ${escapeHtml(capability.kind || 'capability')} token. Save it now.</strong>
+    <p>Losing this token can lock out the dashboard or automation that used the old credential.</p>
+    <code class="one-time-token">${escapeHtml(token)}</code>
+    <div class="action-row">
+      <button type="button" data-copy-token="${escapeHtml(token)}">Copy token</button>
+      ${dashboardAction}
+      <button type="button" data-ack-rotated-token>Acknowledge</button>
+    </div>
+  `, true);
+}
+
+function writeSecurityRotation(value, html = false) {
+  const target = document.getElementById('securityRotationResult');
+  if (!target) return;
+  if (html) target.innerHTML = value;
+  else target.textContent = value;
 }
 
 function writeJson(id, value) {
