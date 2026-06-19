@@ -31,6 +31,7 @@ import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBri
 import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
 import { buildResourceBrief } from '../resources/briefs.js';
+import { getTargetInspector, getViewSectionPage, getViewWorkspace } from '../presentation/workspaceService.js';
 import {
   completeOnboardingStep,
   consumeBootstrapSecret,
@@ -770,6 +771,43 @@ app.get('/api/views', async () => {
 app.get('/api/views/:viewId/preview', async (request, reply) => {
   const params = request.params as { viewId: string };
   return reply.send(previewView(db, params.viewId));
+});
+
+app.get('/api/views/:viewId/workspace', async (request, reply) => {
+  const params = request.params as { viewId: string };
+  const query = request.query as { limit?: string };
+  return reply.send(getViewWorkspace(db, params.viewId, {
+    maxCardsPerSection: query.limit ? Number(query.limit) : undefined,
+  }));
+});
+
+app.get('/api/views/:viewId/sections/:sectionId', async (request, reply) => {
+  const params = request.params as { viewId: string; sectionId: string };
+  const query = request.query as { cursor?: string; limit?: string };
+  return reply.send(getViewSectionPage(db, params.viewId, params.sectionId, {
+    cursor: query.cursor ? Number(query.cursor) : undefined,
+    limit: query.limit ? Number(query.limit) : undefined,
+  }));
+});
+
+app.get('/api/targets/:targetKind/:targetId/inspector', async (request, reply) => {
+  const params = request.params as { targetKind: string; targetId: string };
+  const query = request.query as { viewId?: string };
+  return reply.send(getTargetInspector(db, {
+    targetKind: params.targetKind,
+    targetId: params.targetId,
+    viewId: query.viewId,
+  }));
+});
+
+app.get('/api/resources/:id/inspector', async (request, reply) => {
+  const params = request.params as { id: string };
+  const query = request.query as { viewId?: string };
+  return reply.send(getTargetInspector(db, {
+    targetKind: 'resource',
+    targetId: params.id,
+    viewId: query.viewId,
+  }));
 });
 
 app.get('/api/views/:viewId/revisions', async (request, reply) => {

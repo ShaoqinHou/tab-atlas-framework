@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TabAtlas Agent Workspace Wireframe</title>
+<style>
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  color: #20242a;
+  background: #f3f5f8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.shell { min-height: 100vh; display: grid; grid-template-columns: 220px minmax(0,1fr) 340px; }
+.rail { background:#18212b; color:white; padding:18px 14px; }
+.brand { font-weight:800; font-size:20px; margin-bottom:22px; }
+.nav { display:grid; gap:6px; }
+.nav button { text-align:left; border:0; border-radius:8px; padding:10px 12px; background:transparent; color:#d8e0e8; }
+.nav button.active { background:#2f80ed; color:white; }
+.rail small { color:#9fb0bf; display:block; margin:24px 8px 8px; }
+.main { min-width:0; display:grid; grid-template-rows:auto 1fr; }
+.top { background:white; border-bottom:1px solid #dce2e8; padding:14px 18px; display:flex; gap:12px; align-items:center; }
+.prompt { flex:1; border:1px solid #aab4bf; border-radius:10px; padding:11px 14px; color:#56606a; }
+.ask { border:0; background:#2f80ed; color:white; border-radius:9px; padding:11px 16px; }
+.workspace { overflow:auto; padding:20px; }
+.hero { background:white; border:1px solid #dce2e8; border-radius:14px; padding:18px; }
+.hero h1 { font-size:22px; margin:0 0 6px; }
+.hero p { color:#66717d; margin:0; }
+.stats { display:flex; gap:10px; margin-top:16px; flex-wrap:wrap; }
+.stat { background:#f7f9fb; border-radius:9px; padding:9px 12px; min-width:110px; }
+.stat strong { display:block; font-size:19px; }
+.toolbar { display:flex; justify-content:space-between; align-items:center; margin:18px 0 10px; }
+.toggle { display:flex; background:#e8edf2; padding:3px; border-radius:9px; }
+.toggle button { border:0; background:transparent; padding:7px 10px; border-radius:7px; }
+.toggle button.active { background:white; box-shadow:0 1px 3px #0002; }
+.board { display:grid; gap:16px; grid-template-columns:repeat(3,minmax(250px,1fr)); }
+.section { min-width:0; }
+.section-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.section-head h2 { font-size:15px; margin:0; }
+.section-head span { color:#74808c; }
+.card { background:white; border:1px solid #dce2e8; border-radius:12px; overflow:hidden; margin-bottom:10px; }
+.thumb { aspect-ratio:16/9; background:linear-gradient(135deg,#8fb7e8,#314f78); display:grid; place-items:center; color:white; font-weight:700; }
+.card-body { padding:12px; }
+.card-title { font-weight:750; margin-bottom:5px; }
+.reason { color:#59636e; font-size:13px; line-height:1.35; }
+.user-note { margin-top:8px; border-left:3px solid #2f80ed; background:#eef6ff; padding:7px 9px; font-size:12px; }
+.chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:9px; }
+.chip { background:#edf1f5; border-radius:999px; padding:3px 7px; font-size:11px; }
+.chip.weak { background:#fff3cd; }
+.chip.review { background:#ffe6e6; }
+.inspector { background:white; border-left:1px solid #dce2e8; padding:18px; overflow:auto; }
+.inspector h2 { font-size:18px; margin:0 0 4px; }
+.tabs { display:flex; gap:4px; border-bottom:1px solid #dce2e8; margin:16px 0; }
+.tabs button { border:0; background:transparent; padding:8px; }
+.tabs button.active { border-bottom:2px solid #2f80ed; }
+.evidence { border-top:1px solid #e3e7eb; padding:10px 0; }
+.conversation { position:fixed; left:238px; bottom:18px; width:410px; background:white; border:1px solid #cfd7df; border-radius:12px; padding:12px; box-shadow:0 12px 30px #0002; }
+.message { font-size:13px; margin-bottom:8px; }
+.message strong { color:#2f80ed; }
+@media(max-width:1100px) {
+  .shell { grid-template-columns:74px minmax(0,1fr); }
+  .rail .label,.rail small { display:none; }
+  .inspector { display:none; }
+  .board { grid-template-columns:repeat(2,minmax(230px,1fr)); }
+  .conversation { left:92px; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand">TA</div>
+    <div class="nav">
+      <button class="active">✦ <span class="label">Ask TabAtlas</span></button>
+      <button>◉ <span class="label">Review</span></button>
+      <button>▦ <span class="label">Views</span></button>
+    </div>
+    <small>Workspace</small>
+    <div class="nav">
+      <button>⌁ <span class="label">Capture</span></button>
+      <button>⚙ <span class="label">Settings</span></button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="top">
+      <div class="prompt">Make a loose inspiration board, mainly game inspiration…</div>
+      <button class="ask">Ask</button>
+    </div>
+    <div class="workspace">
+      <section class="hero">
+        <h1>Loose game inspiration</h1>
+        <p>42 useful matches across three sections. User-marked inspiration is included even when it is outside games.</p>
+        <div class="stats">
+          <div class="stat"><strong>28</strong>Strong</div>
+          <div class="stat"><strong>8</strong>Weak</div>
+          <div class="stat"><strong>2</strong>Conflicts</div>
+          <div class="stat"><strong>4</strong>Review</div>
+        </div>
+      </section>
+
+      <div class="toolbar">
+        <div><strong>Visual workspace</strong></div>
+        <div class="toggle">
+          <button class="active">Board</button>
+          <button>Gallery</button>
+          <button>Map</button>
+          <button>Compact</button>
+        </div>
+      </div>
+
+      <div class="board">
+        <section class="section">
+          <div class="section-head"><h2>Game-centered</h2><span>22</span></div>
+          <article class="card">
+            <div class="thumb">YouTube preview</div>
+            <div class="card-body">
+              <div class="card-title">Forest atmosphere study</div>
+              <div class="reason">Strong match because your note says this is a forest-level moodboard.</div>
+              <div class="user-note">“Use this as a forest level moodboard.”</div>
+              <div class="chips"><span class="chip">game</span><span class="chip">inspiration</span><span class="chip">user note</span></div>
+            </div>
+          </article>
+          <article class="card">
+            <div class="card-body">
+              <div class="card-title">Inventory UI breakdown</div>
+              <div class="reason">Includes practical interface patterns and game-specific examples.</div>
+              <div class="chips"><span class="chip">UI</span><span class="chip">game design</span></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="section">
+          <div class="section-head"><h2>Cross-domain inspiration</h2><span>12</span></div>
+          <article class="card">
+            <div class="thumb">Visual reference</div>
+            <div class="card-body">
+              <div class="card-title">Architectural light and shadow</div>
+              <div class="reason">You marked it as inspiration; it may help environment composition.</div>
+              <div class="chips"><span class="chip">art</span><span class="chip">moodboard</span></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="section">
+          <div class="section-head"><h2>Needs a quick look</h2><span>8</span></div>
+          <article class="card">
+            <div class="card-body">
+              <div class="card-title">General art tutorial</div>
+              <div class="reason">Only the title suggests relevance. No user note or transcript supports it yet.</div>
+              <div class="chips"><span class="chip weak">weak evidence</span><span class="chip review">review</span></div>
+            </div>
+          </article>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <aside class="inspector">
+    <h2>Forest atmosphere study</h2>
+    <div style="color:#6b7681;font-size:13px">youtube.com · Strong include</div>
+    <div class="tabs"><button class="active">Overview</button><button>Evidence</button><button>Notes</button><button>Related</button></div>
+    <p><strong>Why it belongs</strong></p>
+    <p class="reason">Your note explicitly connects it to a forest level moodboard. Transcript evidence also discusses atmospheric depth.</p>
+    <div class="evidence"><strong>User note</strong><br><span class="reason">Highest-priority evidence</span></div>
+    <div class="evidence"><strong>Transcript</strong><br><span class="reason">Verified content evidence</span></div>
+  </aside>
+</div>
+
+<div class="conversation">
+  <div class="message"><strong>You:</strong> Keep non-game inspiration separate.</div>
+  <div class="message"><strong>TabAtlas:</strong> Done. I kept 12 cross-domain references in their own section and surfaced 8 uncertain links for quick review.</div>
+</div>
+</body>
+</html>
