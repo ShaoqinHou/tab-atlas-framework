@@ -20,6 +20,7 @@
     "acceptance:report": "tsx scripts/acceptance-report.ts",
     "acceptance:browser": "tsx scripts/live-browser-acceptance.ts",
     "acceptance:chromium": "tsx scripts/chromium-extension-acceptance.ts",
+    "acceptance:product-browsers": "tsx scripts/product-browser-acceptance.ts",
     "acceptance:private-library": "tsx scripts/private-library-acceptance.ts",
     "package:app": "tsx scripts/package-app.ts",
     "package:extension": "tsx scripts/package-extension.ts",

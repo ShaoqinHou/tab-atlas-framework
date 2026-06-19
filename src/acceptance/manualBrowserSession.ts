@@ -3,6 +3,8 @@ import { nanoid } from 'nanoid';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import { createPairingChallenge } from '../security/pairingChallenge.js';
+import { revokeCapability } from '../security/localCapability.js';
+import type { BrowserAcceptanceSmoke } from './contracts.js';
 
 export const ProductBrowser = z.enum(['chrome', 'edge']);
 export type ProductBrowser = z.infer<typeof ProductBrowser>;
@@ -36,6 +38,7 @@ export interface ManualBrowserAcceptanceRecord {
   revocationObservedAt?: string;
   popupOpenedConfirmedAt?: string;
   tokenAbsentVerifiedAt?: string;
+  denialAuditId?: string;
   failureCode?: string;
   failureSummary?: string;
   createdAt: string;
@@ -84,7 +87,7 @@ export function getManualBrowserAcceptanceSession(
   const row = db.prepare(`
     SELECT id, browser, status, receiver_url, challenge_id, capability_id,
            baseline_snapshot_count, paired_at, snapshot_id, snapshot_observed_at,
-           revoked_at, revocation_observed_at, popup_opened_confirmed_at,
+           revoked_at, revocation_observed_at, denial_audit_id, popup_opened_confirmed_at,
            token_absent_verified_at, failure_code, failure_summary, created_at, updated_at
     FROM manual_browser_acceptance_sessions
     WHERE id = ?
@@ -132,7 +135,7 @@ export function refreshManualBrowserAcceptanceEvidence(
   }
 
   const current = getManualBrowserAcceptanceSession(db, sessionId);
-  const snapshot = latestSnapshotAfterBaseline(db, current.baselineSnapshotCount, current.browser);
+  const snapshot = latestSnapshotAfterBaseline(db, current);
   if (snapshot && !current.snapshotId) {
     updateSession(db, sessionId, {
       status: 'snapshot_received',
@@ -169,6 +172,7 @@ export function refreshManualBrowserAcceptanceEvidence(
     if (deniedAfterRevoke && !afterSnapshot.revocationObservedAt) {
       updateSession(db, sessionId, {
         status: 'revocation_observed',
+        denialAuditId: deniedAfterRevoke.id,
         revocationObservedAt: deniedAfterRevoke.created_at,
         updatedAt: now,
       });
@@ -176,6 +180,16 @@ export function refreshManualBrowserAcceptanceEvidence(
   }
 
   return finalizeManualBrowserAcceptance(db, sessionId);
+}
+
+export function revokeManualBrowserAcceptanceCapability(
+  db: Database.Database,
+  sessionId: string,
+): ManualBrowserAcceptanceRecord {
+  const session = refreshManualBrowserAcceptanceEvidence(db, sessionId);
+  if (!session.capabilityId) throw new Error('Cannot revoke before pairing capability is known');
+  revokeCapability(db, session.capabilityId);
+  return refreshManualBrowserAcceptanceEvidence(db, sessionId);
 }
 
 export function confirmPopupOpened(
@@ -211,6 +225,50 @@ export function verifySnapshotDoesNotContainToken(
   return finalizeManualBrowserAcceptance(db, sessionId);
 }
 
+export function verifySnapshotDoesNotContainCapabilityMaterial(
+  db: Database.Database,
+  sessionId: string,
+): ManualBrowserAcceptanceRecord {
+  const session = getManualBrowserAcceptanceSession(db, sessionId);
+  if (!session.snapshotId) throw new Error('Cannot verify token absence before snapshot arrival');
+  if (!session.capabilityId) throw new Error('Cannot verify token absence before capability is known');
+  const row = db.prepare('SELECT raw_json FROM snapshots WHERE id = ?').get(session.snapshotId) as { raw_json: string | null } | undefined;
+  const capability = db.prepare('SELECT token_hash FROM local_capabilities WHERE id = ?').get(session.capabilityId) as { token_hash: string } | undefined;
+  if (!row) throw new Error(`Snapshot not found: ${session.snapshotId}`);
+  const raw = row.raw_json ?? '';
+  if (raw.includes(session.capabilityId) || (capability?.token_hash && raw.includes(capability.token_hash))) {
+    return failSession(db, sessionId, 'token_leak', 'Extension capability material appeared in snapshot data.');
+  }
+  updateSession(db, sessionId, {
+    tokenAbsentVerifiedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  return finalizeManualBrowserAcceptance(db, sessionId);
+}
+
+export function manualBrowserSessionToSmoke(
+  session: ManualBrowserAcceptanceRecord,
+): BrowserAcceptanceSmoke {
+  return {
+    browser: session.browser,
+    mode: 'manual',
+    popupOpened: Boolean(session.popupOpenedConfirmedAt),
+    receiverReachable: true,
+    pairedThroughPopup: Boolean(session.capabilityId && session.pairedAt),
+    snapshotExportedThroughPopup: Boolean(session.snapshotId),
+    snapshotArrived: Boolean(session.snapshotId && session.snapshotObservedAt),
+    revocationVisible: Boolean(session.revokedAt && session.revocationObservedAt),
+    tokenAbsentFromSnapshot: Boolean(session.tokenAbsentVerifiedAt),
+    notes: [
+      `session=${session.id}`,
+      session.challengeId ? `challenge=${session.challengeId}` : '',
+      session.capabilityId ? `capability=${session.capabilityId}` : '',
+      session.snapshotId ? `snapshot=${session.snapshotId}` : '',
+      session.denialAuditId ? `denialAudit=${session.denialAuditId}` : '',
+    ].filter(Boolean).join('; '),
+  };
+}
+
 function finalizeManualBrowserAcceptance(db: Database.Database, sessionId: string): ManualBrowserAcceptanceRecord {
   const session = getManualBrowserAcceptanceSession(db, sessionId);
   const passed = Boolean(
@@ -229,19 +287,19 @@ function finalizeManualBrowserAcceptance(db: Database.Database, sessionId: strin
 
 function latestSnapshotAfterBaseline(
   db: Database.Database,
-  baselineCount: number,
-  browser: ProductBrowser,
+  session: ManualBrowserAcceptanceRecord,
 ): { id: string } | undefined {
   const currentCount = snapshotCount(db);
-  if (currentCount <= baselineCount) return undefined;
+  if (currentCount <= session.baselineSnapshotCount) return undefined;
   return db.prepare(`
     SELECT DISTINCT s.id
     FROM snapshots s
     JOIN tab_observations t ON t.snapshot_id = s.id
     WHERE t.browser = ?
+      AND s.captured_at >= ?
     ORDER BY s.captured_at DESC
     LIMIT 1
-  `).get(browser) as { id: string } | undefined;
+  `).get(session.browser, session.createdAt) as { id: string } | undefined;
 }
 
 function snapshotCount(db: Database.Database): number {
@@ -271,6 +329,7 @@ function updateSession(
     snapshotObservedAt: 'snapshot_observed_at',
     revokedAt: 'revoked_at',
     revocationObservedAt: 'revocation_observed_at',
+    denialAuditId: 'denial_audit_id',
     popupOpenedConfirmedAt: 'popup_opened_confirmed_at',
     tokenAbsentVerifiedAt: 'token_absent_verified_at',
     failureCode: 'failure_code',
@@ -299,6 +358,7 @@ type ManualBrowserAcceptanceRow = {
   snapshot_observed_at: string | null;
   revoked_at: string | null;
   revocation_observed_at: string | null;
+  denial_audit_id?: string | null;
   popup_opened_confirmed_at: string | null;
   token_absent_verified_at: string | null;
   failure_code: string | null;
@@ -321,6 +381,7 @@ function fromRow(row: ManualBrowserAcceptanceRow): ManualBrowserAcceptanceRecord
     snapshotObservedAt: row.snapshot_observed_at ?? undefined,
     revokedAt: row.revoked_at ?? undefined,
     revocationObservedAt: row.revocation_observed_at ?? undefined,
+    denialAuditId: row.denial_audit_id ?? undefined,
     popupOpenedConfirmedAt: row.popup_opened_confirmed_at ?? undefined,
     tokenAbsentVerifiedAt: row.token_absent_verified_at ?? undefined,
     failureCode: row.failure_code ?? undefined,

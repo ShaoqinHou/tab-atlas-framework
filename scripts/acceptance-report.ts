@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { acceptanceBlockers, LiveAcceptanceReport, type LiveAcceptanceReport as LiveAcceptanceReportType } from '../src/acceptance/contracts.js';
+import { strictReleaseBlockers } from '../src/acceptance/releaseGatePolicy.js';
 
 const reportPath = process.argv[2];
 if (!reportPath) {
@@ -22,7 +23,14 @@ if (!parsed.success) {
 
 const report = parsed.data;
 const evidence = deriveEvidence(report);
-const blockers = [...new Set([...acceptanceBlockers(report), ...evidence.blockers])];
+const strictBlockers = strictReleaseBlockers({
+  report,
+  backupRestore: report.backupRestoreEvidence,
+  packageFilesExist: evidence.app.exists && evidence.extension.exists,
+  packageHashesMatch: !evidence.app.hashMismatch && !evidence.extension.hashMismatch,
+  requiredPackageContentsPresent: evidence.app.missingEntries.length === 0 && evidence.extension.missingEntries.length === 0,
+});
+const blockers = [...new Set([...acceptanceBlockers(report), ...evidence.blockers, ...strictBlockers])];
 const chromium = report.browserSmokes.find(item => item.browser === 'chromium');
 const chrome = report.browserSmokes.find(item => item.browser === 'chrome');
 const edge = report.browserSmokes.find(item => item.browser === 'edge');
@@ -84,6 +92,8 @@ type ArtifactEvidence = {
   path: string;
   exists: boolean;
   sha256?: string;
+  hashMismatch: boolean;
+  missingEntries: string[];
   blockers: string[];
 };
 
@@ -93,20 +103,23 @@ function verifyArtifact(label: string, artifactPath: string, expectedHash: strin
   const exists = Boolean(artifactPath) && fs.existsSync(resolved);
   if (!exists) {
     blockers.push(`${label} package missing: ${artifactPath || '(empty path)'}`);
-    return { label, path: resolved, exists, blockers };
+    return { label, path: resolved, exists, hashMismatch: true, missingEntries: requiredEntries, blockers };
   }
   const stat = fs.statSync(resolved);
   if (!stat.isFile()) {
     blockers.push(`${label} package is not a file: ${artifactPath}`);
-    return { label, path: resolved, exists, blockers };
+    return { label, path: resolved, exists, hashMismatch: true, missingEntries: requiredEntries, blockers };
   }
   const sha256 = sha256File(resolved);
+  let hashMismatch = false;
   if (expectedHash && expectedHash.toLowerCase() !== sha256.toLowerCase()) {
+    hashMismatch = true;
     blockers.push(`${label} package hash mismatch`);
   }
+  if (!expectedHash) hashMismatch = true;
   const missingEntries = inspectPackageContents(resolved, requiredEntries);
   for (const entry of missingEntries) blockers.push(`${label} package missing content: ${entry}`);
-  return { label, path: resolved, exists, sha256, blockers };
+  return { label, path: resolved, exists, sha256, hashMismatch, missingEntries, blockers };
 }
 
 function inspectPackageContents(zipPath: string, requiredEntries: string[]): string[] {

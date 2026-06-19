@@ -73,6 +73,16 @@ import {
   resumeReviewSession,
   submitReviewSessionDecision,
 } from '../review/sessionService.js';
+import {
+  confirmPopupOpened,
+  createManualBrowserAcceptanceSession,
+  getManualBrowserAcceptanceSession,
+  ProductBrowser,
+  refreshManualBrowserAcceptanceEvidence,
+  revokeManualBrowserAcceptanceCapability,
+  verifySnapshotDoesNotContainCapabilityMaterial,
+  verifySnapshotDoesNotContainToken,
+} from '../acceptance/manualBrowserSession.js';
 
 const host = '127.0.0.1';
 const port = Number(process.env.TABATLAS_PORT ?? 9787);
@@ -341,6 +351,71 @@ app.post('/api/security/pairing-codes/exchange', async (request, reply) => {
     });
     return reply.status(reason === 'global_rate_limited' ? 429 : 400).send({ ok: false, error: reason });
   }
+});
+
+app.post('/api/acceptance/browser-sessions', async (request, reply) => {
+  const body = asRecord(request.body);
+  const parsed = ProductBrowser.safeParse(body.browser);
+  if (!parsed.success) return reply.status(400).send({ ok: false, error: 'browser must be chrome or edge' });
+  const receiverUrl = typeof body.receiverUrl === 'string' && body.receiverUrl.trim()
+    ? body.receiverUrl.trim()
+    : `http://${host}:${port}`;
+  const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
+  const created = createManualBrowserAcceptanceSession(db, {
+    browser: parsed.data,
+    receiverUrl,
+    ttlMs,
+  });
+  writeSecurityAuditRecord(db, {
+    eventType: 'manual_browser_acceptance_create',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    details: { sessionId: created.session.id, browser: created.session.browser, challengeId: created.session.challengeId },
+  });
+  return reply.code(201).send({
+    session: created.session,
+    challengeSecret: created.challengeSecret,
+  });
+});
+
+app.get('/api/acceptance/browser-sessions/:id', async (request) => {
+  const params = request.params as { id: string };
+  return { session: getManualBrowserAcceptanceSession(db, params.id) };
+});
+
+app.post('/api/acceptance/browser-sessions/:id/confirm-popup', async (request) => {
+  const params = request.params as { id: string };
+  return { session: confirmPopupOpened(db, params.id, true) };
+});
+
+app.post('/api/acceptance/browser-sessions/:id/refresh', async (request) => {
+  const params = request.params as { id: string };
+  return { session: refreshManualBrowserAcceptanceEvidence(db, params.id) };
+});
+
+app.post('/api/acceptance/browser-sessions/:id/revoke', async (request) => {
+  const params = request.params as { id: string };
+  const session = revokeManualBrowserAcceptanceCapability(db, params.id);
+  writeSecurityAuditRecord(db, {
+    eventType: 'manual_browser_acceptance_revoke',
+    method: request.method,
+    route: request.url,
+    outcome: 'allowed',
+    capabilityId: session.capabilityId,
+    details: { sessionId: session.id, browser: session.browser },
+  });
+  return { session };
+});
+
+app.post('/api/acceptance/browser-sessions/:id/verify-token-absence', async (request) => {
+  const params = request.params as { id: string };
+  const body = asRecord(request.body);
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const session = token
+    ? verifySnapshotDoesNotContainToken(db, params.id, token)
+    : verifySnapshotDoesNotContainCapabilityMaterial(db, params.id);
+  return { session };
 });
 
 app.post('/api/extract/run', async (request, reply) => {

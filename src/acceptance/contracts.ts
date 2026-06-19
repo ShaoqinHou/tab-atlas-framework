@@ -26,12 +26,23 @@ export const PrivateLibraryCommandSmoke = z.object({
   retrievalRunId: z.string().optional(),
   promptManifestIds: z.array(z.string()).default([]),
   agentRunId: z.string().optional(),
+  providerRole: z.string().optional(),
   providerScope: z.string().optional(),
+  providerModel: z.string().optional(),
+  providerReasoningEffort: z.string().optional(),
   providerThreadId: z.string().nullable().optional(),
   usage: z.object({
     inputTokens: z.number().int().nonnegative().optional(),
     outputTokens: z.number().int().nonnegative().optional(),
     quotaTurns: z.number().int().nonnegative().optional(),
+  }).optional(),
+  hierarchicalPlanning: z.object({
+    mode: z.enum(['direct', 'hierarchical']),
+    chunkCount: z.number().int().nonnegative(),
+    splitChunkCount: z.number().int().nonnegative(),
+    failedChunkCount: z.number().int().nonnegative(),
+    runId: z.string().optional(),
+    evidenceFingerprint: z.string().optional(),
   }).optional(),
   codexTurns: z.number().int().nonnegative(),
   strongIncludeCount: z.number().int().nonnegative(),
@@ -81,6 +92,21 @@ export const SafetyFlags = z.object({
 });
 export type SafetyFlags = z.infer<typeof SafetyFlags>;
 
+export const BackupRestoreEvidence = z.object({
+  backupPath: z.string().min(1),
+  backupSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sourceDatabaseIntegrityOk: z.boolean(),
+  restoredDatabaseIntegrityOk: z.boolean(),
+  requiredTablesPresent: z.array(z.string()).min(1),
+  sourceSnapshotCount: z.number().int().nonnegative(),
+  restoredSnapshotCount: z.number().int().nonnegative(),
+  sourceResourceCount: z.number().int().nonnegative(),
+  restoredResourceCount: z.number().int().nonnegative(),
+  serverStoppedDuringRestore: z.boolean(),
+  completedAt: z.string(),
+});
+export type BackupRestoreEvidence = z.infer<typeof BackupRestoreEvidence>;
+
 export const LiveAcceptanceReport = z.object({
   schemaVersion: z.literal('tabatlas-live-acceptance-v1'),
   generatedAt: z.string(),
@@ -92,6 +118,7 @@ export const LiveAcceptanceReport = z.object({
   }),
   validationCommands: z.array(ValidationCommandResult),
   releaseArtifacts: ReleaseArtifacts,
+  backupRestoreEvidence: BackupRestoreEvidence.optional(),
   safety: SafetyFlags,
   blockers: z.array(z.string()),
   releaseReady: z.boolean(),
@@ -121,6 +148,12 @@ export function acceptanceBlockers(report: LiveAcceptanceReport): string[] {
     if (command.status !== 'passed') blockers.push(`private-library command ${command.commandId} did not pass`);
     if (command.mode !== 'codex') blockers.push(`private-library command ${command.commandId} did not run in codex mode`);
     if (!command.retrievalRunId) blockers.push(`private-library command ${command.commandId} missing retrieval run id`);
+    if (!command.agentRunId) blockers.push(`private-library command ${command.commandId} missing agent run id`);
+    if (!command.providerRole || !command.providerScope || !command.providerModel || !command.providerReasoningEffort) {
+      blockers.push(`private-library command ${command.commandId} missing provider identity`);
+    }
+    if (!command.providerThreadId) blockers.push(`private-library command ${command.commandId} missing provider thread id`);
+    if (!command.usage || command.usage.quotaTurns === undefined) blockers.push(`private-library command ${command.commandId} missing exact usage`);
     if (!command.promptRedactionOk) blockers.push(`private-library command ${command.commandId} prompt redaction not verified`);
   }
   if (report.validationCommands.some(command => !command.passed)) {

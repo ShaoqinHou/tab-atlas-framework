@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS manual_browser_acceptance_sessions (
   snapshot_observed_at TEXT,
   revoked_at TEXT,
   revocation_observed_at TEXT,
+  denial_audit_id TEXT REFERENCES security_audit_events(id) ON DELETE SET NULL,
   popup_opened_confirmed_at TEXT,
   token_absent_verified_at TEXT,
   failure_code TEXT,

@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   countActiveAdminCapabilities,
+  findCapabilityByToken,
   verifyCapabilityToken,
   type CapabilityRecord,
   type CapabilityScope,
@@ -64,7 +65,7 @@ export function authorizeLocalRequest(
     const sessionToken = readSessionTokenFromCookie(request.headers.cookie);
     const sessionVerification = verifyLocalSessionToken(db, sessionToken, requiredScope);
     if (sessionVerification.ok) return { allowed: true, scope: routeScope };
-    return { allowed: false, statusCode: 401, reason: verification.reason };
+    return { allowed: false, statusCode: 401, reason: verification.reason, capabilityId: findCapabilityByToken(db, token)?.id };
   }
   return { allowed: true, scope: routeScope, capability: verification.capability };
 }

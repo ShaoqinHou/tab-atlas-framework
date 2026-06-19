@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { openDatabase } from '../src/db/index.js';
 import {
@@ -55,6 +54,24 @@ function brief(): ResourceBrief {
 }
 
 describe('release closure scaffold', () => {
+  it('loads release acceptance tables through the normal database opener', () => {
+    const db = openDatabase(':memory:');
+    const tables = db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name IN (
+        'manual_browser_acceptance_sessions',
+        'hierarchical_planning_runs',
+        'hierarchical_planning_chunks'
+      )
+      ORDER BY name
+    `).all() as { name: string }[];
+    expect(tables.map(row => row.name)).toEqual([
+      'hierarchical_planning_chunks',
+      'hierarchical_planning_runs',
+      'manual_browser_acceptance_sessions',
+    ]);
+  });
+
   it('invalidates hierarchical checkpoints when user evidence changes', () => {
     const first = brief();
     const second = brief();
@@ -106,7 +123,6 @@ describe('release closure scaffold', () => {
 
   it('returns a pairing secret once without storing it in the acceptance session', () => {
     const db = openDatabase(':memory:');
-    db.exec(fs.readFileSync(new URL('../src/db/schema-v6-release-acceptance.sql', import.meta.url), 'utf8'));
     const created = createManualBrowserAcceptanceSession(db, {
       browser: 'chrome',
       receiverUrl: 'http://127.0.0.1:9787',

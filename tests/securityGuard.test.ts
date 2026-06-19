@@ -74,6 +74,10 @@ describe('local request guard', () => {
     expect(missing.statusCode).toBe(401);
     expect(wrongScope.statusCode).toBe(401);
     expect(revoked.statusCode).toBe(401);
+    const audit = db.prepare('SELECT capability_id FROM security_audit_events ORDER BY created_at DESC LIMIT 1').get() as {
+      capability_id: string | null;
+    };
+    expect(audit.capability_id).toBe(ui.capability.id);
   });
 
   it('allows extension snapshots but denies extension access to general APIs', async () => {

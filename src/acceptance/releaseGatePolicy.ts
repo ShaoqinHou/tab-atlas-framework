@@ -14,6 +14,11 @@ export const REQUIRED_VALIDATION_COMMANDS = [
   'npm run eval:review',
   'npm run acceptance:ports',
   'npm run acceptance:chromium',
+  'npm run acceptance:private-library -- --mode codex --resume',
+  'npm run package:extension',
+  'npm run package:app',
+  'npm run release:manifest',
+  'npm run acceptance:report',
 ] as const;
 
 export const REQUIRED_PRIVATE_LIBRARY_COMMAND_IDS = [
@@ -62,9 +67,8 @@ export function strictReleaseBlockers(input: StrictReleaseEvidenceInput): string
     if (!browserSmokePassed(smoke!)) blockers.push(`${smoke!.browser} acceptance evidence incomplete`);
   }
 
-  const validationMap = new Map(report.validationCommands.map(row => [normalizeCommand(row.command), row]));
   for (const required of REQUIRED_VALIDATION_COMMANDS) {
-    const row = validationMap.get(normalizeCommand(required));
+    const row = report.validationCommands.find(candidate => commandMatches(candidate.command, required));
     if (!row) blockers.push(`required validation missing: ${required}`);
     else if (!row.passed) blockers.push(`required validation failed: ${required}`);
   }
@@ -81,7 +85,10 @@ export function strictReleaseBlockers(input: StrictReleaseEvidenceInput): string
     if (!command.retrievalRunId) blockers.push(`retrieval run ID missing: ${commandId}`);
     if (!command.agentRunId) blockers.push(`agent run ID missing: ${commandId}`);
     if (!command.promptManifestIds.length) blockers.push(`prompt manifest IDs missing: ${commandId}`);
+    if (!command.providerRole) blockers.push(`provider role missing: ${commandId}`);
     if (!command.providerScope) blockers.push(`provider scope missing: ${commandId}`);
+    if (!command.providerModel) blockers.push(`provider model missing: ${commandId}`);
+    if (!command.providerReasoningEffort) blockers.push(`provider reasoning effort missing: ${commandId}`);
     if (!command.providerThreadId) blockers.push(`provider thread ID missing: ${commandId}`);
     if (!command.usage || command.usage.quotaTurns === undefined) blockers.push(`actual usage missing: ${commandId}`);
     if (!command.promptRedactionOk) blockers.push(`prompt redaction evidence failed: ${commandId}`);
@@ -119,4 +126,10 @@ export function browserSmokePassed(smoke: LiveAcceptanceReport['browserSmokes'][
 
 function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function commandMatches(actual: string, required: string): boolean {
+  const normalizedActual = normalizeCommand(actual);
+  const normalizedRequired = normalizeCommand(required);
+  return normalizedActual === normalizedRequired || normalizedActual.startsWith(`${normalizedRequired} `);
 }

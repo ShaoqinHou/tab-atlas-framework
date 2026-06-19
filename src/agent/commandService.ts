@@ -34,6 +34,10 @@ export interface RunAgentCommandResult {
   codexTurnSpent: boolean;
   mode: 'heuristic' | 'codex';
   providerLabel: string;
+  providerRole?: string;
+  providerScope?: string;
+  providerModel?: string;
+  providerReasoningEffort?: string;
   providerThreadId?: string | null;
   validationStatus: 'passed' | 'failed' | 'not_applicable';
   agentRunId?: string;
@@ -46,7 +50,10 @@ export interface RunAgentCommandResult {
     mode: 'direct' | 'hierarchical';
     chunkCount: number;
     splitChunkCount: number;
+    failedChunkCount: number;
     checkpointPath?: string;
+    runId?: string;
+    evidenceFingerprint?: string;
   };
 }
 
@@ -59,6 +66,7 @@ export async function runAgentCommand(
   const provider = typeof providerOrMode === 'object' ? providerOrMode : undefined;
   const mode = typeof providerOrMode === 'string' ? providerOrMode : parsed.mode;
   const providerLabel = mode === 'codex' ? providerLabelFor(provider) : 'heuristic';
+  const providerMetadata = providerMetadataFor(provider);
   let providerThreadId = mode === 'codex' ? providerThreadIdFor(provider) : null;
   const query = deriveCandidateSearchQuery(parsed.text);
   const retrieval = retrieveCandidatesForCommand(db, parsed.text, {
@@ -104,6 +112,15 @@ export async function runAgentCommand(
         maxViews: 4,
         allowWeakMatches: true,
         askReviewForAmbiguous: true,
+        db,
+        retrievalRunId: retrieval.runId,
+        providerIdentity: {
+          commandText: parsed.text,
+          model: providerMetadata.model,
+          reasoningEffort: providerMetadata.reasoningEffort,
+          providerRole: providerMetadata.role,
+          providerScopeKey: providerMetadata.scopeKey,
+        },
       });
       plan = result.value;
       usage = result.usage;
@@ -111,7 +128,10 @@ export async function runAgentCommand(
         mode: result.mode,
         chunkCount: result.chunkCount,
         splitChunkCount: result.splitChunkCount,
+        failedChunkCount: result.failedChunkCount,
         checkpointPath: result.checkpointPath,
+        runId: result.runId,
+        evidenceFingerprint: result.evidenceFingerprint,
       };
       providerThreadId = providerThreadIdFor(provider);
       codexTurnSpent = (result.usage.quotaTurns ?? 0) > 0;
@@ -156,6 +176,10 @@ export async function runAgentCommand(
       codexTurnSpent,
       mode,
       providerLabel,
+      providerRole: providerMetadata.role,
+      providerScope: providerMetadata.scopeKey,
+      providerModel: providerMetadata.model,
+      providerReasoningEffort: providerMetadata.reasoningEffort,
       providerThreadId,
       validationStatus,
       agentRunId,
@@ -190,6 +214,10 @@ export async function runAgentCommand(
     codexTurnSpent,
     mode,
     providerLabel,
+    providerRole: providerMetadata.role,
+    providerScope: providerMetadata.scopeKey,
+    providerModel: providerMetadata.model,
+    providerReasoningEffort: providerMetadata.reasoningEffort,
     providerThreadId,
     validationStatus,
     agentRunId,
@@ -249,6 +277,26 @@ function providerThreadIdFor(provider: LlmProvider | undefined): string | null {
   if (!provider || typeof provider !== 'object') return null;
   const candidate = provider as { threadId?: unknown };
   return typeof candidate.threadId === 'string' ? candidate.threadId : null;
+}
+
+function providerMetadataFor(provider: LlmProvider | undefined): {
+  role?: string;
+  scopeKey?: string;
+  model?: string;
+  reasoningEffort?: string;
+} {
+  const candidate = provider as {
+    role?: unknown;
+    scopeKey?: unknown;
+    model?: unknown;
+    reasoningEffort?: unknown;
+  } | undefined;
+  return {
+    role: typeof candidate?.role === 'string' ? candidate.role : undefined,
+    scopeKey: typeof candidate?.scopeKey === 'string' ? candidate.scopeKey : undefined,
+    model: typeof candidate?.model === 'string' ? candidate.model : undefined,
+    reasoningEffort: typeof candidate?.reasoningEffort === 'string' ? candidate.reasoningEffort : undefined,
+  };
 }
 
 function summarizePreviews(previews: ViewPreview[]): Record<MembershipState, number> {

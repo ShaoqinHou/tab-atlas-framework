@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type Database from 'better-sqlite3';
 import { CheckpointStore } from '../acceptance/checkpointStore.js';
 import type { LlmProvider, LlmUsage } from '../llm/types.js';
 import { runStructured } from '../llm/runStructured.js';
@@ -10,6 +11,7 @@ import {
   type ResourceBrief as ResourceBriefType,
 } from '../shared/schemas.js';
 import { projectResourceBriefsForPrompt, redactSensitiveText } from '../security/urlPrivacy.js';
+import { PROMPT_REDACTION_VERSION } from '../security/urlPrivacy.js';
 import { planSemanticView, type PlanSemanticViewOptions } from './planSemanticView.js';
 import {
   compactChunkDecisions,
@@ -17,12 +19,23 @@ import {
   SemanticChunkResult,
   type SemanticChunkResult as SemanticChunkResultType,
 } from './hierarchicalPlannerContracts.js';
+import {
+  chunkCheckpointKey,
+  hierarchicalEvidenceFingerprint,
+  unresolvedTargetDescriptors,
+  validateSemanticChunkCoverage,
+  type HierarchicalPlannerIdentity,
+} from './hierarchicalPlannerSafety.js';
 
 export interface HierarchicalPlanningOptions extends PlanSemanticViewOptions {
   maxDirectResources?: number;
   maxDirectPromptBytes?: number;
   chunkSize?: number;
   checkpointPath?: string;
+  db?: Database.Database;
+  retrievalRunId?: string;
+  providerIdentity?: Partial<HierarchicalPlannerIdentity>;
+  plannerVersion?: string;
 }
 
 export interface HierarchicalPlanningResult {
@@ -32,7 +45,10 @@ export interface HierarchicalPlanningResult {
   mode: 'direct' | 'hierarchical';
   chunkCount: number;
   splitChunkCount: number;
+  failedChunkCount: number;
   checkpointPath?: string;
+  runId?: string;
+  evidenceFingerprint?: string;
 }
 
 const DEFAULT_MAX_DIRECT_RESOURCES = 60;
@@ -55,56 +71,92 @@ export async function planSemanticViewHierarchical(
       mode: 'direct',
       chunkCount: 0,
       splitChunkCount: 0,
+      failedChunkCount: 0,
     };
   }
 
   const checkpointPath = options.checkpointPath ?? path.join(process.cwd(), '.local', 'hierarchical-semantic-chunks.json');
   const store = new CheckpointStore<SemanticChunkResultType>(checkpointPath);
+  const identity = identityFor(commandText, options);
+  const evidenceFingerprint = hierarchicalEvidenceFingerprint(briefs, identity);
+  const runId = options.db ? ensureHierarchicalRun(options.db, {
+    commandText,
+    retrievalRunId: options.retrievalRunId,
+    identity,
+    evidenceFingerprint,
+    targetCount: targetIdSet(briefs).size,
+    chunkSize: options.chunkSize ?? DEFAULT_CHUNK_SIZE,
+  }) : undefined;
   const system = await fs.readFile(new URL('../../knowledge/prompts/semantic-view-planner.system.md', import.meta.url), 'utf8');
   const chunks = chunkBriefs(briefs, options.chunkSize ?? DEFAULT_CHUNK_SIZE);
   const usage: LlmUsage = {};
   const results: SemanticChunkResultType[] = [];
   let attempts = 0;
   let splitChunkCount = 0;
+  let failedChunkCount = 0;
 
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index] ?? [];
-    const chunkId = chunkIdFor(commandText, chunk, index);
-    const cached = store.get(chunkId);
-    if (cached?.status === 'passed' && cached.result) {
-      results.push(cached.result);
+    const chunkFingerprint = chunkCheckpointKey({ runFingerprint: evidenceFingerprint, ordinal: index, briefs: chunk });
+    const chunkId = chunkIdFor(chunkFingerprint, index);
+    const cached = options.db
+      ? readHierarchicalChunk(options.db, runId!, chunkFingerprint)?.result
+      : store.get(chunkId)?.result;
+    if (cached) {
+      results.push(cached);
       continue;
     }
-    store.start(chunkId);
+    if (options.db) startHierarchicalChunk(options.db, runId!, chunkId, index, chunkFingerprint, chunk);
+    else store.start(chunkId);
     try {
       const result = await runChunk(provider, commandText, chunkId, chunk, system);
       accumulateUsage(usage, result.usage);
       attempts += result.attempts;
-      store.pass(chunkId, result.value);
+      if (options.db) finishHierarchicalChunk(options.db, chunkId, 'passed', result.value, result.usage, result.attempts);
+      else store.pass(chunkId, result.value);
       results.push(result.value);
     } catch (error) {
       if (chunk.length <= 1) {
-        store.fail(chunkId, error);
-        throw error;
+        const failed = failedChunkResult(commandText, chunkId, chunk, error);
+        failedChunkCount += 1;
+        if (options.db) finishHierarchicalChunk(options.db, chunkId, 'failed', failed, {}, 1, error);
+        else store.fail(chunkId, error);
+        results.push(failed);
+        continue;
       }
       splitChunkCount += 1;
-      store.fail(chunkId, error);
+      if (options.db) finishHierarchicalChunk(options.db, chunkId, 'failed', failedChunkResult(commandText, chunkId, chunk, error), {}, 1, error);
+      else store.fail(chunkId, error);
       const midpoint = Math.ceil(chunk.length / 2);
       const left = chunk.slice(0, midpoint);
       const right = chunk.slice(midpoint);
-      for (const [suffix, split] of [['a', left], ['b', right]] as const) {
+      for (const [offset, suffix, split] of [[0, 'a', left], [1, 'b', right]] as const) {
+        const splitOrdinal = (index * 10) + offset + 1;
+        const splitFingerprint = chunkCheckpointKey({ runFingerprint: evidenceFingerprint, ordinal: splitOrdinal, briefs: split });
         const splitId = `${chunkId}-${suffix}`;
-        const cachedSplit = store.get(splitId);
-        if (cachedSplit?.status === 'passed' && cachedSplit.result) {
-          results.push(cachedSplit.result);
+        const cachedSplit = options.db
+          ? readHierarchicalChunk(options.db, runId!, splitFingerprint)?.result
+          : store.get(splitId)?.result;
+        if (cachedSplit) {
+          results.push(cachedSplit);
           continue;
         }
-        store.start(splitId);
-        const splitResult = await runChunk(provider, commandText, splitId, split, system);
-        accumulateUsage(usage, splitResult.usage);
-        attempts += splitResult.attempts;
-        store.pass(splitId, splitResult.value);
-        results.push(splitResult.value);
+        if (options.db) startHierarchicalChunk(options.db, runId!, splitId, splitOrdinal, splitFingerprint, split, chunkId);
+        else store.start(splitId);
+        try {
+          const splitResult = await runChunk(provider, commandText, splitId, split, system);
+          accumulateUsage(usage, splitResult.usage);
+          attempts += splitResult.attempts;
+          if (options.db) finishHierarchicalChunk(options.db, splitId, 'passed', splitResult.value, splitResult.usage, splitResult.attempts);
+          else store.pass(splitId, splitResult.value);
+          results.push(splitResult.value);
+        } catch (splitError) {
+          const failed = failedChunkResult(commandText, splitId, split, splitError);
+          failedChunkCount += 1;
+          if (options.db) finishHierarchicalChunk(options.db, splitId, 'failed', failed, {}, 1, splitError);
+          else store.fail(splitId, splitError);
+          results.push(failed);
+        }
       }
     }
   }
@@ -121,14 +173,21 @@ export async function planSemanticViewHierarchical(
   });
   accumulateUsage(usage, merged.usage);
   attempts += merged.attempts;
+  const finalPlan = surfaceUnresolvedTargets(merged.value, results, briefs);
+  if (options.db && runId) {
+    completeHierarchicalRun(options.db, runId, failedChunkCount > 0 ? 'completed_with_degraded_chunks' : 'passed', finalPlan, usage);
+  }
   return {
-    value: surfaceUnresolvedTargets(merged.value, results),
+    value: finalPlan,
     usage,
     attempts,
     mode: 'hierarchical',
     chunkCount: results.length,
     splitChunkCount,
+    failedChunkCount,
     checkpointPath,
+    runId,
+    evidenceFingerprint,
   };
 }
 
@@ -180,6 +239,7 @@ function chunkValidator(commandText: string, chunkId: string, briefs: ResourceBr
     const errors: string[] = [];
     if (value.commandText !== commandText) errors.push('commandText does not match input command');
     if (value.chunkId !== chunkId) errors.push('chunkId does not match requested chunk');
+    errors.push(...validateSemanticChunkCoverage(value, briefs));
     for (const decision of value.decisions) {
       if (!targetIds.has(decision.targetId)) errors.push(`unknown chunk targetId ${decision.targetId}`);
       for (const ref of decision.evidenceRefs) {
@@ -215,19 +275,19 @@ function planValidator(briefs: ResourceBriefType[]) {
   };
 }
 
-function surfaceUnresolvedTargets(plan: SemanticViewPlan, chunks: SemanticChunkResultType[]): SemanticViewPlan {
-  const unresolved = new Set(chunks.flatMap(chunk => chunk.unresolvedTargets));
-  if (!unresolved.size || !plan.views[0]) return plan;
+function surfaceUnresolvedTargets(plan: SemanticViewPlan, chunks: SemanticChunkResultType[], briefs: ResourceBriefType[]): SemanticViewPlan {
+  const unresolved = unresolvedTargetDescriptors(chunks, briefs);
+  if (!unresolved.length || !plan.views[0]) return plan;
   const existing = new Set(plan.views.flatMap(view => view.memberships.map(membership => membership.targetId)));
-  const additions = [...unresolved]
-    .filter(targetId => !existing.has(targetId))
-    .map(targetId => ({
-      targetKind: 'resource' as const,
-      targetId,
+  const additions = unresolved
+    .filter(target => !existing.has(target.targetId))
+    .map(target => ({
+      targetKind: target.targetKind,
+      targetId: target.targetId,
       state: 'needs_review' as MembershipState,
       confidence: 0.35,
       reason: 'Chunk planning marked this target unresolved; review before accepting.',
-      evidenceRefs: [`planner:unresolved:${targetId}`],
+      evidenceRefs: [`planner:unresolved:${target.targetId}`],
     }));
   if (!additions.length) return plan;
   return SemanticViewPlan.parse({
@@ -255,14 +315,8 @@ function chunkBriefs(briefs: ResourceBriefType[], chunkSize: number): ResourceBr
   return chunks;
 }
 
-function chunkIdFor(commandText: string, briefs: ResourceBriefType[], index: number): string {
-  const hash = crypto.createHash('sha256')
-    .update(commandText)
-    .update('\0')
-    .update(briefs.map(brief => brief.resourceId).join('\0'))
-    .digest('hex')
-    .slice(0, 16);
-  return `semantic_chunk_${index + 1}_${hash}`;
+function chunkIdFor(chunkFingerprint: string, index: number): string {
+  return `semantic_chunk_${index + 1}_${chunkFingerprint.slice(0, 24)}`;
 }
 
 function targetIdSet(briefs: ResourceBriefType[]): Set<string> {
@@ -290,4 +344,203 @@ function accumulateUsage(into: LlmUsage, add: LlmUsage): void {
   if (add.inputTokens) into.inputTokens = (into.inputTokens ?? 0) + add.inputTokens;
   if (add.outputTokens) into.outputTokens = (into.outputTokens ?? 0) + add.outputTokens;
   if (add.quotaTurns) into.quotaTurns = (into.quotaTurns ?? 0) + add.quotaTurns;
+}
+
+function identityFor(commandText: string, options: HierarchicalPlanningOptions): HierarchicalPlannerIdentity {
+  const identity = options.providerIdentity ?? {};
+  return {
+    commandText,
+    model: identity.model ?? 'unknown-model',
+    reasoningEffort: identity.reasoningEffort ?? 'unknown-effort',
+    providerRole: identity.providerRole ?? 'semantic_planner',
+    providerScopeKey: identity.providerScopeKey ?? 'unknown-scope',
+    redactionVersion: identity.redactionVersion ?? PROMPT_REDACTION_VERSION,
+    plannerVersion: identity.plannerVersion ?? options.plannerVersion ?? 'hierarchical-planner-v2',
+  };
+}
+
+function failedChunkResult(
+  commandText: string,
+  chunkId: string,
+  briefs: ResourceBriefType[],
+  error: unknown,
+): SemanticChunkResultType {
+  return SemanticChunkResult.parse({
+    commandText,
+    chunkId,
+    decisions: [],
+    unresolvedTargets: briefs.flatMap(brief => [
+      brief.resourceId,
+      ...brief.atomicItems.map(item => item.itemId),
+    ]),
+    notes: [`chunk failed and degraded to needs_review: ${error instanceof Error ? error.message : String(error)}`],
+  });
+}
+
+function ensureHierarchicalRun(db: Database.Database, input: {
+  commandText: string;
+  retrievalRunId?: string;
+  identity: HierarchicalPlannerIdentity;
+  evidenceFingerprint: string;
+  targetCount: number;
+  chunkSize: number;
+}): string {
+  const existing = db.prepare(`
+    SELECT id
+    FROM hierarchical_planning_runs
+    WHERE evidence_fingerprint = ?
+      AND provider_scope_key = ?
+      AND model = ?
+      AND reasoning_effort = ?
+    LIMIT 1
+  `).get(input.evidenceFingerprint, input.identity.providerScopeKey, input.identity.model, input.identity.reasoningEffort) as { id: string } | undefined;
+  const now = new Date().toISOString();
+  if (existing) {
+    db.prepare(`
+      UPDATE hierarchical_planning_runs
+      SET status = CASE WHEN status = 'passed' THEN status ELSE 'running' END,
+          updated_at = ?
+      WHERE id = ?
+    `).run(now, existing.id);
+    return existing.id;
+  }
+  const id = `hier_run_${crypto.randomUUID()}`;
+  db.prepare(`
+    INSERT INTO hierarchical_planning_runs
+      (id, command_text_hash, retrieval_run_id, provider_role, provider_scope_key, provider_thread_id,
+       model, reasoning_effort, redaction_version, evidence_fingerprint, status, target_count,
+       chunk_size, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)
+  `).run(
+    id,
+    crypto.createHash('sha256').update(input.commandText).digest('hex'),
+    input.retrievalRunId ?? null,
+    input.identity.providerRole,
+    input.identity.providerScopeKey,
+    null,
+    input.identity.model,
+    input.identity.reasoningEffort,
+    input.identity.redactionVersion ?? PROMPT_REDACTION_VERSION,
+    input.evidenceFingerprint,
+    input.targetCount,
+    input.chunkSize,
+    now,
+    now,
+  );
+  return id;
+}
+
+function readHierarchicalChunk(
+  db: Database.Database,
+  runId: string,
+  evidenceFingerprint: string,
+): { result: SemanticChunkResultType } | undefined {
+  const row = db.prepare(`
+    SELECT result_json
+    FROM hierarchical_planning_chunks
+    WHERE run_id = ?
+      AND evidence_fingerprint = ?
+      AND status IN ('passed', 'failed')
+      AND result_json IS NOT NULL
+    LIMIT 1
+  `).get(runId, evidenceFingerprint) as { result_json: string } | undefined;
+  if (!row) return undefined;
+  return { result: SemanticChunkResult.parse(JSON.parse(row.result_json)) };
+}
+
+function startHierarchicalChunk(
+  db: Database.Database,
+  runId: string,
+  chunkId: string,
+  ordinal: number,
+  evidenceFingerprint: string,
+  briefs: ResourceBriefType[],
+  splitParentId?: string,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO hierarchical_planning_chunks
+      (id, run_id, ordinal, evidence_fingerprint, status, target_ids_json, attempts, split_parent_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'running', ?, 0, ?, ?, ?)
+    ON CONFLICT(run_id, ordinal, evidence_fingerprint) DO UPDATE SET
+      status = 'running',
+      attempts = attempts + 1,
+      updated_at = excluded.updated_at
+  `).run(
+    chunkId,
+    runId,
+    ordinal,
+    evidenceFingerprint,
+    JSON.stringify(briefs.flatMap(brief => [brief.resourceId, ...brief.atomicItems.map(item => item.itemId)])),
+    splitParentId ?? null,
+    now,
+    now,
+  );
+}
+
+function finishHierarchicalChunk(
+  db: Database.Database,
+  chunkId: string,
+  status: 'passed' | 'failed',
+  result: SemanticChunkResultType,
+  usage: LlmUsage,
+  attempts: number,
+  error?: unknown,
+): void {
+  db.prepare(`
+    UPDATE hierarchical_planning_chunks
+    SET status = ?,
+        result_json = ?,
+        usage_json = ?,
+        attempts = MAX(attempts, ?),
+        error = ?,
+        updated_at = ?,
+        completed_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    JSON.stringify(result),
+    JSON.stringify(usage),
+    attempts,
+    error === undefined ? null : error instanceof Error ? error.message : String(error),
+    new Date().toISOString(),
+    new Date().toISOString(),
+    chunkId,
+  );
+}
+
+function completeHierarchicalRun(
+  db: Database.Database,
+  runId: string,
+  status: string,
+  plan: SemanticViewPlan,
+  usage: LlmUsage,
+): void {
+  const counts = db.prepare(`
+    SELECT
+      SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+    FROM hierarchical_planning_chunks
+    WHERE run_id = ?
+  `).get(runId) as { completed: number | null; failed: number | null };
+  db.prepare(`
+    UPDATE hierarchical_planning_runs
+    SET status = ?,
+        completed_chunks = ?,
+        failed_chunks = ?,
+        result_json = ?,
+        usage_json = ?,
+        updated_at = ?,
+        completed_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    counts.completed ?? 0,
+    counts.failed ?? 0,
+    JSON.stringify(plan),
+    JSON.stringify(usage),
+    new Date().toISOString(),
+    new Date().toISOString(),
+    runId,
+  );
 }

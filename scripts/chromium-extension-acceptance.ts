@@ -211,7 +211,7 @@ async function runSmoke(input: {
 
 async function ensureServer(url: string): Promise<ServerHandle> {
   if (await health(url)) {
-    return { started: false, serverUrl: url, stop: async () => undefined };
+    return { started: false, serverUrl: url, dbPath: existingServerDatabasePath(url), stop: async () => undefined };
   }
   const parsed = new URL(url);
   const port = parsed.port || '80';
@@ -241,6 +241,20 @@ async function ensureServer(url: string): Promise<ServerHandle> {
       log.end();
     },
   };
+}
+
+function existingServerDatabasePath(url: string): string | undefined {
+  const parsed = new URL(url);
+  const port = parsed.port || '80';
+  const infoPath = path.join(root, '.local', `tabatlas-server-${port}.json`);
+  if (!fs.existsSync(infoPath)) return undefined;
+  try {
+    const info = JSON.parse(fs.readFileSync(infoPath, 'utf8')) as { database?: string };
+    if (!info.database) return undefined;
+    return path.isAbsolute(info.database) ? info.database : path.join(root, info.database);
+  } catch {
+    return undefined;
+  }
 }
 
 async function getAdminToken(url: string): Promise<AdminToken> {

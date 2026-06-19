@@ -112,7 +112,11 @@ export function validateSemanticChunkCoverage(
   const requiredResourceIds = new Set(briefs.map(brief => brief.resourceId));
   const decisionKeys = new Set<string>();
   const coveredResourceIds = new Set<string>();
-  const unresolved = new Set(result.unresolvedTargets);
+  const unresolved = new Set<string>();
+  for (const targetId of result.unresolvedTargets) {
+    if (unresolved.has(targetId)) errors.push(`duplicate unresolved target ${targetId}`);
+    unresolved.add(targetId);
+  }
 
   for (const decision of result.decisions) {
     const key = `${decision.targetKind}:${decision.targetId}`;
@@ -132,6 +136,9 @@ export function validateSemanticChunkCoverage(
   for (const targetId of unresolved) {
     const descriptor = targetMap.get(targetId);
     if (!descriptor) errors.push(`unknown unresolved target ${targetId}`);
+    if (descriptor && decisionKeys.has(`${descriptor.targetKind}:${descriptor.targetId}`)) {
+      errors.push(`target ${descriptor.targetId} appears in both decisions and unresolvedTargets`);
+    }
     if (descriptor?.targetKind === 'resource') coveredResourceIds.add(targetId);
   }
 

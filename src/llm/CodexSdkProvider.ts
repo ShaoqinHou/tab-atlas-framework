@@ -38,7 +38,7 @@ export class CodexSdkProvider implements LlmProvider {
     };
 
     const thread = this.cfg.reuseThread && this.thread ? this.thread : this.codex.startThread(threadOptions);
-    if (this.cfg.reuseThread) this.thread = thread;
+    this.thread = thread;
 
     const fullPrompt = opts?.system ? `${opts.system}\n\n---\n\n${prompt}` : prompt;
     const turn = await thread.run(fullPrompt, opts?.outputSchema ? { outputSchema: opts.outputSchema } : undefined);

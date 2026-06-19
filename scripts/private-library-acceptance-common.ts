@@ -25,9 +25,20 @@ export type CommandSmoke = {
   retrievalRunId?: string;
   promptManifestIds: string[];
   agentRunId?: string;
+  providerRole?: string;
   providerScope?: string;
+  providerModel?: string;
+  providerReasoningEffort?: string;
   providerThreadId?: string | null;
   usage?: LlmUsage;
+  hierarchicalPlanning?: {
+    mode: 'direct' | 'hierarchical';
+    chunkCount: number;
+    splitChunkCount: number;
+    failedChunkCount: number;
+    runId?: string;
+    evidenceFingerprint?: string;
+  };
   codexTurns: number;
   strongIncludeCount: number;
   weakIncludeCount: number;
@@ -76,10 +87,14 @@ export async function runPrivateLibraryCommand(commandId: string, mode: PrivateL
       retrievalRunId: result.retrievalRunId,
       promptManifestIds,
       agentRunId: result.agentRunId,
-      providerScope,
+      providerRole: result.providerRole,
+      providerScope: result.providerScope ?? providerScope,
+      providerModel: result.providerModel,
+      providerReasoningEffort: result.providerReasoningEffort,
       providerThreadId: result.providerThreadId,
       usage: result.usage,
-      codexTurns: mode === 'codex' ? result.usage?.quotaTurns ?? (result.codexTurnSpent ? 1 : 0) : 0,
+      hierarchicalPlanning: result.hierarchicalPlanning,
+      codexTurns: mode === 'codex' ? result.usage?.quotaTurns ?? 0 : 0,
       strongIncludeCount: result.summary.strong_include,
       weakIncludeCount: result.summary.weak_include,
       conflictCount: result.summary.conflict,
@@ -113,7 +128,10 @@ export function failedSmoke(
     selectedCount: 0,
     retrievalSourceCoverage: {},
     promptManifestIds: [],
+    providerRole: 'semantic_planner',
     providerScope: `private-acceptance:${commandId}`,
+    providerModel: 'unknown',
+    providerReasoningEffort: 'medium',
     codexTurns: 0,
     strongIncludeCount: 0,
     weakIncludeCount: 0,

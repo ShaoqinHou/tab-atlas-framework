@@ -137,6 +137,16 @@ export function verifyCapabilityToken(
   return { ok: true, capability: getCapability(db, capability.id) };
 }
 
+export function findCapabilityByToken(db: Database.Database, token: string | undefined): CapabilityRecord | undefined {
+  if (!token) return undefined;
+  const row = db.prepare(`
+    SELECT id, kind, label, scopes_json, status, created_at, expires_at, last_used_at, revoked_at
+    FROM local_capabilities
+    WHERE token_hash = ?
+  `).get(hashSecret(token)) as CapabilityRow | undefined;
+  return row ? capabilityFromRow(row) : undefined;
+}
+
 export function createPairingCode(
   db: Database.Database,
   input: {
