@@ -18,7 +18,6 @@ export const REQUIRED_VALIDATION_COMMANDS = [
   'npm run package:extension',
   'npm run package:app',
   'npm run release:manifest',
-  'npm run acceptance:report',
 ] as const;
 
 export const REQUIRED_PRIVATE_LIBRARY_COMMAND_IDS = [

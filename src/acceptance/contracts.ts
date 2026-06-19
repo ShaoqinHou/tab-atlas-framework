@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BrowserExecutionEvidence } from './browserEvidencePolicy.js';
 
 export const BrowserAcceptanceSmoke = z.object({
   browser: z.enum(['chromium', 'chrome', 'edge']),
@@ -112,6 +113,7 @@ export const LiveAcceptanceReport = z.object({
   generatedAt: z.string(),
   runtime: RuntimePortCompatibility,
   browserSmokes: z.array(BrowserAcceptanceSmoke).min(2),
+  browserEvidence: z.array(BrowserExecutionEvidence).default([]),
   privateLibrarySmoke: z.object({
     ran: z.boolean(),
     commands: z.array(PrivateLibraryCommandSmoke),

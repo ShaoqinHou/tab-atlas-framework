@@ -2,11 +2,13 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { chromium, type Browser } from 'playwright';
 import { manualBrowserSessionToSmoke, type ManualBrowserAcceptanceRecord, type ProductBrowser } from '../src/acceptance/manualBrowserSession.js';
+import { BrowserExecutionEvidence, type BrowserExecutionEvidence as BrowserExecutionEvidenceType } from '../src/acceptance/browserEvidencePolicy.js';
 
 declare const chrome: {
   storage: {
@@ -70,18 +72,18 @@ async function main(args: Args): Promise<void> {
       console.log(`Receiver URL: ${args.serverUrl}`);
       console.log(`Challenge ID: ${created.session.challengeId}`);
       console.log('Driving the packaged extension automatically; the one-time pairing secret is not written to evidence.');
-      const session = await runAutomatedProductBrowserAcceptance({
+      const result = await runAutomatedProductBrowserAcceptance({
         args: productArgs,
         adminToken,
         sessionId: created.session.id,
         challengeId: created.session.challengeId ?? '',
         challengeSecret: created.challengeSecret,
       });
-      await writeSessionEvidence(args.browser, args.serverUrl, adminToken, created.session.id, session);
-      if (session.status !== 'passed') {
-        throw new Error(`Manual ${args.browser} acceptance incomplete: ${session.status}`);
+      await writeSessionEvidence(args.browser, args.serverUrl, adminToken, created.session.id, result.session, result.browserEvidence);
+      if (result.session.status !== 'passed') {
+        throw new Error(`${args.browser} CDP acceptance incomplete: ${result.session.status}`);
       }
-      console.log(`Manual ${args.browser} acceptance passed from server evidence.`);
+      console.log(`${args.browser} CDP acceptance passed from server evidence.`);
       return;
     }
 
@@ -141,14 +143,16 @@ async function writeSessionEvidence(
   token: string,
   sessionId: string,
   knownSession?: ManualBrowserAcceptanceRecord,
+  browserEvidence?: BrowserExecutionEvidenceType,
 ): Promise<void> {
   const session = knownSession ?? await refreshSession(serverUrl, token, sessionId);
-  const smoke = manualBrowserSessionToSmoke(session);
+  const smoke = browserEvidence ? smokeFromBrowserEvidence(browserEvidence) : manualBrowserSessionToSmoke(session);
   const evidence = {
     generatedAt: new Date().toISOString(),
     browser,
     serverUrl,
     session,
+    browserEvidence: browserEvidence ? [browserEvidence] : [],
     browserSmokes: [smoke],
   };
   const out = path.join(outputDir, `product-browser-${browser}.json`);
@@ -197,7 +201,7 @@ async function runAutomatedProductBrowserAcceptance(input: {
   sessionId: string;
   challengeId: string;
   challengeSecret: string;
-}): Promise<ManualBrowserAcceptanceRecord> {
+}): Promise<{ session: ManualBrowserAcceptanceRecord; browserEvidence: BrowserExecutionEvidenceType }> {
   try {
     return await runAutomatedProductBrowserAttempt({ ...input, headless: input.args.headless });
   } catch (error) {
@@ -215,12 +219,14 @@ async function runAutomatedProductBrowserAttempt(input: {
   challengeId: string;
   challengeSecret: string;
   headless: boolean;
-}): Promise<ManualBrowserAcceptanceRecord> {
+}): Promise<{ session: ManualBrowserAcceptanceRecord; browserEvidence: BrowserExecutionEvidenceType }> {
   if (!input.challengeId || !input.challengeSecret) throw new Error('Acceptance session did not include a challenge');
   const extensionDir = extensionDirectory();
   const executable = productBrowserExecutable(input.args.browser);
+  const executablePathHash = sha256Text(path.resolve(executable).toLowerCase());
   const debuggingPort = await freePort();
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), `tabatlas-${input.args.browser}-`));
+  const startedAt = new Date().toISOString();
   let child: ChildProcess | undefined;
   let browser: Browser | undefined;
   try {
@@ -232,6 +238,8 @@ async function runAutomatedProductBrowserAttempt(input: {
       headless: input.headless,
     });
     await waitForDebuggingPort(debuggingPort, child, 30_000);
+    const executableVersion = await browserVersion(debuggingPort);
+    const receiverReachable = await health(input.args.serverUrl);
     const extensionId = await loadUnpackedExtension(debuggingPort, extensionDir);
     await waitForExtensionWorker(debuggingPort, extensionId, 30_000);
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`);
@@ -283,7 +291,31 @@ async function runAutomatedProductBrowserAttempt(input: {
     session = (await postSession(input.args.serverUrl, input.adminToken, input.sessionId, 'verify-token-absence', {
       token: storedToken,
     })).session;
-    return session;
+    const finishedAt = new Date().toISOString();
+    const browserEvidence = BrowserExecutionEvidence.parse({
+      browser: input.args.browser,
+      strategy: input.args.browser === 'chrome' ? 'chrome_product_cdp' : 'edge_product_cdp',
+      automated: true,
+      isolatedProfile: true,
+      executableVersion,
+      executablePathHash,
+      extensionLoadMethod: 'cdp_extensions_load_unpacked',
+      receiverUrl: input.args.serverUrl,
+      acceptanceSessionId: session.id,
+      capabilityId: session.capabilityId,
+      snapshotId: session.snapshotId,
+      denialAuditId: session.denialAuditId,
+      popupOpened: Boolean(session.popupOpenedConfirmedAt),
+      receiverReachable,
+      pairedThroughPopup: Boolean(session.capabilityId && session.pairedAt),
+      snapshotExportedThroughPopup: Boolean(session.snapshotId),
+      snapshotArrived: Boolean(session.snapshotId && session.snapshotObservedAt),
+      revocationObserved: Boolean(session.revocationObservedAt),
+      tokenAbsentFromSnapshot: Boolean(session.tokenAbsentVerifiedAt),
+      startedAt,
+      finishedAt,
+    });
+    return { session, browserEvidence };
   } finally {
     await browser?.close().catch(() => undefined);
     await stopProductBrowser(child, userDataDir);
@@ -412,6 +444,11 @@ async function loadUnpackedExtension(port: number, extensionDir: string): Promis
   return response.id;
 }
 
+async function browserVersion(port: number): Promise<string> {
+  const version = await fetchJson<{ Browser?: string }>(`http://127.0.0.1:${port}/json/version`);
+  return version.Browser ?? 'unknown-product-browser';
+}
+
 async function waitForExtensionWorker(port: number, extensionId: string, timeoutMs: number): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -530,6 +567,42 @@ function parseArgs(raw: string[]): Args {
     else if (arg === '--timeout-ms') parsed.timeoutMs = Number(raw[++index]);
   }
   return parsed;
+}
+
+function smokeFromBrowserEvidence(evidence: BrowserExecutionEvidenceType): {
+  browser: 'chromium' | 'chrome' | 'edge';
+  mode: 'automated' | 'manual';
+  popupOpened: boolean;
+  receiverReachable: boolean;
+  pairedThroughPopup: boolean;
+  snapshotExportedThroughPopup: boolean;
+  snapshotArrived: boolean;
+  revocationVisible: boolean;
+  tokenAbsentFromSnapshot: boolean;
+  notes: string;
+} {
+  return {
+    browser: evidence.browser,
+    mode: evidence.automated ? 'automated' : 'manual',
+    popupOpened: evidence.popupOpened,
+    receiverReachable: evidence.receiverReachable,
+    pairedThroughPopup: evidence.pairedThroughPopup,
+    snapshotExportedThroughPopup: evidence.snapshotExportedThroughPopup,
+    snapshotArrived: evidence.snapshotArrived,
+    revocationVisible: evidence.revocationObserved,
+    tokenAbsentFromSnapshot: evidence.tokenAbsentFromSnapshot,
+    notes: [
+      `strategy=${evidence.strategy}`,
+      `session=${evidence.acceptanceSessionId}`,
+      `capability=${evidence.capabilityId}`,
+      `snapshot=${evidence.snapshotId}`,
+      `denialAudit=${evidence.denialAuditId}`,
+    ].join('; '),
+  };
+}
+
+function sha256Text(value: string): string {
+  return crypto.createHash('sha256').update(value).digest('hex');
 }
 
 function delay(ms: number): Promise<void> {

@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { openDatabase } from '../src/db/index.js';
+import { BrowserExecutionEvidence, type BrowserExecutionEvidence as BrowserExecutionEvidenceType } from '../src/acceptance/browserEvidencePolicy.js';
 
 declare const chrome: {
   storage: {
@@ -35,7 +37,7 @@ const root = process.cwd();
 const outputDir = path.join(root, '.local', 'acceptance');
 const outputPath = path.join(outputDir, 'chromium-smoke.json');
 const screenshotPath = path.join(outputDir, 'chromium-popup.png');
-const defaultServerUrl = 'http://127.0.0.1:9786';
+const defaultServerUrl = 'http://127.0.0.1:9787';
 const serverUrl = process.env.TABATLAS_SERVER_URL ?? defaultServerUrl;
 const explicitHeadless = process.env.TABATLAS_CHROMIUM_HEADLESS;
 const preferHeadless = explicitHeadless !== '0';
@@ -75,22 +77,7 @@ try {
     });
   }
   const extensionCapabilityId = result.extensionCapabilityId;
-  const smoke = {
-    browser: 'chromium',
-    mode: 'automated',
-    popupOpened: result.popupOpened,
-    receiverReachable: result.receiverReachable,
-    pairedThroughPopup: result.pairedThroughPopup,
-    snapshotExportedThroughPopup: result.snapshotExportedThroughPopup,
-    snapshotArrived: result.snapshotArrived,
-    revocationVisible: result.revocationVisible,
-    tokenAbsentFromSnapshot: result.tokenAbsentFromSnapshot,
-    notes: [
-      'Playwright bundled Chromium persistent context.',
-      result.headless ? 'Ran headless.' : 'Ran headful because headless extension support was unavailable or disabled.',
-      fallbackUsed ? 'Headless attempt failed; retried headful.' : '',
-    ].filter(Boolean).join(' '),
-  };
+  const smoke = smokeFromBrowserEvidence(result.browserEvidence);
   fs.writeFileSync(outputPath, JSON.stringify({
     generatedAt: new Date().toISOString(),
     strategy: 'bundled_chromium_automated',
@@ -99,6 +86,7 @@ try {
     extensionDir: result.extensionDir,
     headless: result.headless,
     fallbackUsed,
+    browserEvidence: [result.browserEvidence],
     browserSmokes: [smoke],
     evidence: {
       snapshotBefore: beforeStatus.snapshots,
@@ -141,9 +129,11 @@ async function runSmoke(input: {
   revocationVisible: boolean;
   tokenAbsentFromSnapshot: boolean;
   headless: boolean;
+  browserEvidence: BrowserExecutionEvidenceType;
 }> {
   const extensionDir = extensionDirectory();
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tabatlas-chromium-'));
+  const startedAt = new Date().toISOString();
   let context: BrowserContext | undefined;
   try {
     context = await chromium.launchPersistentContext(userDataDir, {
@@ -154,10 +144,12 @@ async function runSmoke(input: {
         `--load-extension=${extensionDir}`,
       ],
     });
+    const executableVersion = context.browser()?.version() ?? 'bundled-chromium-unknown';
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker', { timeout: 15_000 });
     const extensionId = extensionIdFromWorkerUrl(worker.url());
     const contentPage = await context.newPage();
     await contentPage.goto(`${input.serverUrl}/health`);
+    const receiverReachable = await health(input.serverUrl);
     const popup = await context.newPage();
     await popup.goto(`chrome-extension://${extensionId}/popup.html`);
     await popup.fill('#receiver', input.serverUrl);
@@ -187,21 +179,44 @@ async function runSmoke(input: {
       return text.includes('revoked') || text.includes('unauthorized') || text.includes('unpaired') || text.includes('pairing required');
     }, null, { timeout: 20_000 });
     const statusAfterRevoke = await popup.locator('#status').textContent({ timeout: 10_000 });
-    const tokenAbsentFromSnapshot = input.dbPath
-      ? tokenAbsentFromLatestSnapshot(input.dbPath, storedToken)
-      : storedToken.length === 0;
+    if (!input.dbPath) throw new Error('Chromium acceptance requires a known receiver database path for exact evidence');
+    const dbEvidence = chromiumEvidenceFromDatabase(input.dbPath, capabilityId, storedToken);
+    const finishedAt = new Date().toISOString();
+    const browserEvidence = BrowserExecutionEvidence.parse({
+      browser: 'chromium',
+      strategy: 'bundled_chromium_playwright',
+      automated: true,
+      isolatedProfile: true,
+      executableVersion,
+      extensionLoadMethod: 'playwright_load_extension_flags',
+      receiverUrl: input.serverUrl,
+      acceptanceSessionId: `chromium_playwright_${capabilityId}`,
+      capabilityId,
+      snapshotId: dbEvidence.snapshotId,
+      denialAuditId: dbEvidence.denialAuditId,
+      popupOpened: true,
+      receiverReachable,
+      pairedThroughPopup: statusText?.toLowerCase().includes('paired') ?? false,
+      snapshotExportedThroughPopup: snapshotAfterPair > input.snapshotBefore,
+      snapshotArrived: snapshotAfterPair > input.snapshotBefore,
+      revocationObserved: Boolean(statusAfterRevoke?.toLowerCase().includes('unpaired') || statusAfterRevoke?.toLowerCase().includes('revoked') || statusAfterRevoke?.toLowerCase().includes('token')),
+      tokenAbsentFromSnapshot: dbEvidence.tokenAbsentFromSnapshot,
+      startedAt,
+      finishedAt,
+    });
     return {
       extensionDir,
       extensionCapabilityId: capabilityId,
       popupOpened: true,
-      receiverReachable: statusText?.toLowerCase().includes('receiver: reachable') ?? false,
+      receiverReachable,
       pairedThroughPopup: statusText?.toLowerCase().includes('paired') ?? false,
       snapshotExportedThroughPopup: snapshotAfterPair > input.snapshotBefore,
       snapshotArrived: snapshotAfterPair > input.snapshotBefore,
       snapshotAfter: snapshotAfterPair,
       revocationVisible: Boolean(statusAfterRevoke?.toLowerCase().includes('unpaired') || statusAfterRevoke?.toLowerCase().includes('revoked') || statusAfterRevoke?.toLowerCase().includes('token')),
-      tokenAbsentFromSnapshot,
+      tokenAbsentFromSnapshot: dbEvidence.tokenAbsentFromSnapshot,
       headless: input.headless,
+      browserEvidence,
     };
   } finally {
     await context?.close().catch(() => undefined);
@@ -345,20 +360,66 @@ async function fetchJson<T = unknown>(url: string, options: {
   return await response.json() as T;
 }
 
-function tokenAbsentFromLatestSnapshot(dbPath: string, token: string): boolean {
-  if (!token) return true;
+function chromiumEvidenceFromDatabase(dbPath: string, tokenCapabilityId: string, token: string): {
+  snapshotId: string;
+  denialAuditId: string;
+  tokenAbsentFromSnapshot: boolean;
+} {
   const db = openDatabase(dbPath);
   try {
-    const row = db.prepare(`
-      SELECT raw_json
+    const snapshot = db.prepare(`
+      SELECT id, raw_json
       FROM snapshots
       ORDER BY captured_at DESC
       LIMIT 1
-    `).get() as { raw_json: string } | undefined;
-    return !row?.raw_json.includes(token);
+    `).get() as { id: string; raw_json: string | null } | undefined;
+    const denial = db.prepare(`
+      SELECT id
+      FROM security_audit_events
+      WHERE capability_id = ?
+        AND outcome = 'denied'
+        AND route = '/snapshot'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(tokenCapabilityId) as { id: string } | undefined;
+    if (!snapshot?.id) throw new Error('Chromium acceptance snapshot ID was not found in receiver DB');
+    if (!denial?.id) throw new Error('Chromium acceptance denial audit ID was not found in receiver DB');
+    const raw = snapshot.raw_json ?? '';
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    return {
+      snapshotId: snapshot.id,
+      denialAuditId: denial.id,
+      tokenAbsentFromSnapshot: !token || (!raw.includes(token) && !raw.includes(tokenHash)),
+    };
   } finally {
     db.close();
   }
+}
+
+function smokeFromBrowserEvidence(evidence: BrowserExecutionEvidenceType): {
+  browser: 'chromium' | 'chrome' | 'edge';
+  mode: 'automated' | 'manual';
+  popupOpened: boolean;
+  receiverReachable: boolean;
+  pairedThroughPopup: boolean;
+  snapshotExportedThroughPopup: boolean;
+  snapshotArrived: boolean;
+  revocationVisible: boolean;
+  tokenAbsentFromSnapshot: boolean;
+  notes: string;
+} {
+  return {
+    browser: evidence.browser,
+    mode: evidence.automated ? 'automated' : 'manual',
+    popupOpened: evidence.popupOpened,
+    receiverReachable: evidence.receiverReachable,
+    pairedThroughPopup: evidence.pairedThroughPopup,
+    snapshotExportedThroughPopup: evidence.snapshotExportedThroughPopup,
+    snapshotArrived: evidence.snapshotArrived,
+    revocationVisible: evidence.revocationObserved,
+    tokenAbsentFromSnapshot: evidence.tokenAbsentFromSnapshot,
+    notes: `strategy=${evidence.strategy}; session=${evidence.acceptanceSessionId}; capability=${evidence.capabilityId}; snapshot=${evidence.snapshotId}; denialAudit=${evidence.denialAuditId}`,
+  };
 }
 
 function extensionDirectory(): string {

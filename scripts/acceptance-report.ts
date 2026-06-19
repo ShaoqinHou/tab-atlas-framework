@@ -3,8 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { acceptanceBlockers, LiveAcceptanceReport, type LiveAcceptanceReport as LiveAcceptanceReportType } from '../src/acceptance/contracts.js';
-import { strictReleaseBlockers } from '../src/acceptance/releaseGatePolicy.js';
+import { LiveAcceptanceReport, type LiveAcceptanceReport as LiveAcceptanceReportType } from '../src/acceptance/contracts.js';
+import { auditReleaseEvidence } from '../src/acceptance/releaseEvidenceAudit.js';
 
 const reportPath = process.argv[2];
 if (!reportPath) {
@@ -23,40 +23,46 @@ if (!parsed.success) {
 
 const report = parsed.data;
 const evidence = deriveEvidence(report);
-const strictBlockers = strictReleaseBlockers({
+const audit = auditReleaseEvidence({
   report,
+  browserEvidence: report.browserEvidence,
   backupRestore: report.backupRestoreEvidence,
   packageFilesExist: evidence.app.exists && evidence.extension.exists,
   packageHashesMatch: !evidence.app.hashMismatch && !evidence.extension.hashMismatch,
   requiredPackageContentsPresent: evidence.app.missingEntries.length === 0 && evidence.extension.missingEntries.length === 0,
 });
-const blockers = [...new Set([...acceptanceBlockers(report), ...evidence.blockers, ...strictBlockers])];
+const blockers = [...new Set([...evidence.blockers, ...audit.blockers])];
 const chromium = report.browserSmokes.find(item => item.browser === 'chromium');
 const chrome = report.browserSmokes.find(item => item.browser === 'chrome');
 const edge = report.browserSmokes.find(item => item.browser === 'edge');
-const ready = blockers.length === 0;
 
 console.log(`Acceptance report: ${report.schemaVersion}`);
 console.log(`Generated at: ${report.generatedAt}`);
 console.log(`Caller releaseReady: ${report.releaseReady ? 'yes' : 'no'} (ignored as authority)`);
 console.log(`Runtime compatible: ${report.runtime.receiverListIncludesServer && report.runtime.manifestCoversServer && report.runtime.popupDefaultMatchesServer ? 'yes' : 'no'}`);
 console.log(`Chromium automated popup: ${passedBrowser(chromium) ? 'pass' : 'fail'}`);
-console.log(`Chrome manual popup: ${passedBrowser(chrome) ? 'pass' : 'fail'}`);
-console.log(`Edge manual popup: ${passedBrowser(edge) ? 'pass' : 'fail'}`);
+console.log(`Chrome popup: ${passedBrowser(chrome) ? 'pass' : 'fail'} (${audit.browserStrategies.chrome ?? 'missing strategy'})`);
+console.log(`Edge popup: ${passedBrowser(edge) ? 'pass' : 'fail'} (${audit.browserStrategies.edge ?? 'missing strategy'})`);
 console.log(`Private library commands: ${report.privateLibrarySmoke.ran ? report.privateLibrarySmoke.commands.filter(command => command.status === 'passed').length : 0}/${report.privateLibrarySmoke.commands.length}`);
 console.log(`Validation commands: ${report.validationCommands.filter(command => command.passed).length}/${report.validationCommands.length}`);
 console.log(`App package: ${evidence.app.path}`);
 console.log(`App SHA-256: ${evidence.app.sha256 || '(missing)'}`);
 console.log(`Extension package: ${evidence.extension.path}`);
 console.log(`Extension SHA-256: ${evidence.extension.sha256 || '(missing)'}`);
+console.log(`Release grade: ${audit.grade}`);
 
 if (blockers.length) {
   console.error('Blockers:');
   for (const blocker of blockers) console.error(`- ${blocker}`);
 }
+if (audit.degradedReasons.length) {
+  console.error('Degraded reasons:');
+  for (const reason of audit.degradedReasons) console.error(`- ${reason}`);
+}
 
-console.log(`Release ready: ${ready ? 'yes' : 'no'}`);
-if (!ready) process.exit(1);
+console.log(`Release ready: ${audit.grade === 'release_ready' ? 'yes' : 'no'}`);
+if (blockers.length || audit.grade === 'blocked') process.exit(1);
+if (audit.grade === 'degraded_candidate') process.exit(2);
 
 function deriveEvidence(reportValue: LiveAcceptanceReportType): {
   blockers: string[];
