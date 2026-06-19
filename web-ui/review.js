@@ -7,6 +7,7 @@ import { getCurrentWorkspace } from './viewWorkspace.js';
 const REVIEW_SESSION_STORAGE_KEY = 'tabatlas.workspace.reviewSessionId';
 let snapshot = null;
 let busy = false;
+let selectedDecision = 'important';
 
 export function initReviewWorkspace() {
   document.getElementById('reviewWorkspace')?.addEventListener('click', async event => {
@@ -22,17 +23,27 @@ export function initReviewWorkspace() {
     }
     const inspect = event.target.closest('[data-review-inspect]');
     if (inspect) await openInspector('resource', inspect.dataset.reviewInspect, { viewId: state.activeViewId });
+    const pause = event.target.closest('[data-review-pause]');
+    if (pause) await pauseReview();
+    const resume = event.target.closest('[data-review-resume]');
+    if (resume) await resumeReview();
+    const tag = event.target.closest('[data-review-tag]');
+    if (tag) addCustomTag(tag.dataset.reviewTag);
   });
 
   document.addEventListener('keydown', async event => {
     if (state.page !== 'review' || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (isEditableTarget(event.target)) return;
     const key = event.key.toLowerCase();
+    if (key === 'enter') await submitDecision(selectedDecision);
     if (key === 's') await submitDecision('skip');
     if (key === 'i') await submitDecision('ignore');
-    if (key === '1') await submitDecision('important');
-    if (key === '2') await submitDecision('watch_later');
-    if (key === '3') await submitDecision('project_reference');
-    if (key === '4') await submitDecision('inspiration');
+    if (key === '1') { selectedDecision = 'important'; await submitDecision('important'); }
+    if (key === '2') { selectedDecision = 'watch_later'; await submitDecision('watch_later'); }
+    if (key === '3') { selectedDecision = 'project_reference'; await submitDecision('project_reference'); }
+    if (key === '4') { selectedDecision = 'inspiration'; await submitDecision('inspiration'); }
+    if (key === 'p') await (snapshot?.session.status === 'paused' ? resumeReview() : pauseReview());
+    if (key === 'escape') await pauseReview();
   });
 
   subscribe(async current => {
@@ -133,7 +144,14 @@ function renderReview() {
         <div class="review-preview">
           ${current.summary ? `<p>${escapeHtml(current.summary)}</p>` : `<p>${escapeHtml(current.redactedUrl || current.canonicalUrl)}</p>`}
         </div>
+        <div class="action-row">
+          <a class="button-link" href="${escapeHtml(current.redactedUrl || current.canonicalUrl)}" target="_blank" rel="noreferrer">Open externally</a>
+          ${snapshot.session.status === 'paused'
+            ? '<button type="button" data-review-resume>Resume</button>'
+            : '<button type="button" data-review-pause>Pause</button>'}
+        </div>
         <textarea id="reviewNote" placeholder="Note"></textarea>
+        <input id="reviewTags" type="text" placeholder="Custom tags">
         <div class="decision-grid">
           <button type="button" data-review-decision="important">Important</button>
           <button type="button" data-review-decision="watch_later">Watch later</button>
@@ -163,8 +181,12 @@ function renderReview() {
         <section>
           <h4>Tags</h4>
           <div class="tag-cloud">
-            ${snapshot.frequentTags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('') || '<span>new</span>'}
+            ${snapshot.frequentTags.map(tag => `<button type="button" data-review-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</button>`).join('') || '<span>new</span>'}
           </div>
+        </section>
+        <section class="shortcut-legend">
+          <h4>Shortcuts</h4>
+          <p><kbd>Enter</kbd> Save · <kbd>S</kbd> Skip · <kbd>I</kbd> Ignore · <kbd>1</kbd> Important · <kbd>2</kbd> Watch later · <kbd>3</kbd> Project · <kbd>4</kbd> Inspiration · <kbd>P</kbd> Pause</p>
         </section>
       </aside>
     </div>
@@ -172,15 +194,51 @@ function renderReview() {
 }
 
 function decisionPayload(resourceId, decision, note) {
-  if (decision === 'skip') return { resourceId, action: 'skip', decision: 'none', tags: [], description: note || undefined };
-  if (decision === 'ignore') return { resourceId, action: 'mark_ignore', decision: 'ignore', tags: ['ignore'], description: note || undefined };
+  const customTags = readCustomTags();
+  if (decision === 'skip') return { resourceId, action: 'skip', decision: 'none', tags: customTags, description: note || undefined };
+  if (decision === 'ignore') return { resourceId, action: 'mark_ignore', decision: 'ignore', tags: [...customTags, 'ignore'], description: note || undefined };
   return {
     resourceId,
     action: 'save_and_next',
     decision,
-    tags: [decision.replace(/_/g, '-')],
+    tags: [...new Set([...customTags, decision.replace(/_/g, '-')])],
     description: note || undefined,
   };
+}
+
+async function pauseReview() {
+  if (!snapshot?.session?.id || snapshot.session.status === 'paused') return;
+  snapshot = await postJson(`/api/review-sessions/${encodeURIComponent(snapshot.session.id)}/pause`, {});
+  renderReview();
+}
+
+async function resumeReview() {
+  if (!snapshot?.session?.id) return;
+  snapshot = await postJson(`/api/review-sessions/${encodeURIComponent(snapshot.session.id)}/resume`, {});
+  renderReview();
+}
+
+function addCustomTag(tag) {
+  const input = document.getElementById('reviewTags');
+  if (!input || !tag) return;
+  const tags = new Set(readCustomTags());
+  tags.add(tag);
+  input.value = [...tags].join(', ');
+}
+
+function readCustomTags() {
+  const raw = document.getElementById('reviewTags')?.value ?? '';
+  return raw.split(',').map(tag => tag.trim()).filter(Boolean);
+}
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === 'input'
+    || tag === 'textarea'
+    || tag === 'select'
+    || target.isContentEditable
+    || Boolean(target.closest('[contenteditable="true"]'));
 }
 
 function resourceIdsForQueue(queue) {

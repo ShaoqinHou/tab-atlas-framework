@@ -46,6 +46,18 @@ describe('workspace dashboard shell', () => {
     expect(actions).toContain('startReviewSession');
   });
 
+  it('guards review shortcuts while editing notes', () => {
+    const review = read('web-ui/review.js');
+
+    expect(review).toContain('isEditableTarget(event.target)');
+    expect(review).toContain("tag === 'textarea'");
+    expect(review).toContain("key === 'enter'");
+    expect(review).toContain("key === 'p'");
+    expect(review).toContain('data-review-pause');
+    expect(review).toContain('Open externally');
+    expect(review).toContain('shortcut-legend');
+  });
+
   it('restores secondary operations and correction controls', () => {
     const html = read('web-ui/index.html');
     const operations = read('web-ui/operations.js');

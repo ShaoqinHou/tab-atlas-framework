@@ -931,13 +931,22 @@ button.related-row {
   gap: 6px;
 }
 
-.tag-cloud span {
+.tag-cloud span,
+.tag-cloud button {
   background: #f1f3f5;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
   font-size: 12px;
   padding: 4px 8px;
+}
+
+.shortcut-legend kbd {
+  background: #ffffff;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 1px 5px;
 }
 
 @media (max-width: 1080px) {
