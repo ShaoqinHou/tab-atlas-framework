@@ -221,6 +221,31 @@ describe('visual workspace projection', () => {
     expect(atomicInspector.parentResourceId).toBe(resourceId);
     expect(atomicInspector.visualKind).toBe('atomic_item');
   });
+
+  it('pages a 1000-resource persisted view without returning duplicate section targets', () => {
+    const { db, viewId } = seedLargePersistedWorkspace(1000);
+
+    const workspace = getViewWorkspace(db, viewId, { maxCardsPerSection: 5 });
+    expect(workspace.sections[0].cards).toHaveLength(5);
+    expect(workspace.sections[0].totalCount).toBe(900);
+    expect(workspace.hiddenExcludedCount).toBe(100);
+
+    const seen = new Set<string>();
+    let cursor: number | undefined = 0;
+    let pageCount = 0;
+    while (cursor !== undefined) {
+      const page = getViewSectionPage(db, viewId, workspace.sections[0].id, { cursor, limit: 100 });
+      pageCount += 1;
+      for (const card of page.cards) {
+        expect(seen.has(card.targetId)).toBe(false);
+        seen.add(card.targetId);
+      }
+      cursor = page.nextCursor ?? undefined;
+    }
+
+    expect(pageCount).toBe(9);
+    expect(seen.size).toBe(900);
+  });
 });
 
 function seedPersistedWorkspace(): {
@@ -310,4 +335,49 @@ function seedPersistedWorkspace(): {
     explanation: 'User evidence is prioritized.',
   });
   return { db, viewId: persisted.viewIds[0], resourceId, atomicItemId };
+}
+
+function seedLargePersistedWorkspace(count: number): {
+  db: ReturnType<typeof openDatabase>;
+  viewId: string;
+} {
+  const db = openDatabase(':memory:');
+  importSnapshot(db, {
+    capturedAt: '2026-06-19T00:00:00.000Z',
+    tabs: Array.from({ length: count }, (_, index) => ({
+      browser: index % 2 ? 'edge' : 'chrome',
+      title: `Bulk workspace resource ${index.toString().padStart(4, '0')}`,
+      url: `https://bulk.example.test/resource/${index}`,
+      groupTitle: 'Bulk',
+    })),
+  }, 'presentation_large_test');
+  const rows = db.prepare(`
+    SELECT id
+    FROM resources
+    ORDER BY title_best
+  `).all() as Array<{ id: string }>;
+  const commandId = createUserCommand(db, 'Create a large visual workspace');
+  const persisted = persistSemanticViewPlan(db, commandId, {
+    commandText: 'Create a large visual workspace',
+    views: [{
+      name: 'Large workspace',
+      goal: 'Exercise bounded visual workspace paging.',
+      inclusionRules: ['Include bulk resources.'],
+      exclusionRules: ['Hide every tenth resource.'],
+      sections: ['Bulk'],
+      confidence: 0.8,
+      memberships: rows.map((row, index) => ({
+        targetKind: 'resource',
+        targetId: row.id,
+        section: 'Bulk',
+        state: index % 10 === 0 ? 'exclude' : 'strong_include',
+        confidence: 1 - (index % 100) / 1000,
+        reason: 'Bulk pagination fixture.',
+        evidenceRefs: index % 10 === 0 ? [] : [`title:${row.id}`],
+      })),
+    }],
+    reviewQueues: [],
+    explanation: 'Large fixture.',
+  });
+  return { db, viewId: persisted.viewIds[0] };
 }

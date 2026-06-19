@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import crypto from 'node:crypto';
 import { z } from 'zod';
 import { buildResourceBrief, buildResourceBriefsForIntent } from '../resources/briefs.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
@@ -27,16 +28,52 @@ export function getViewWorkspace(
   viewId: string,
   options: WorkspaceRequestOptions = {},
 ): ViewWorkspaceArtifactType {
-  const loaded = loadViewPlan(db, viewId);
-  const resourceIds = resourceIdsForPlan(db, loaded.plan);
-  const briefs = buildResourceBriefsForIntent(db, resourceIds, {
-    commandText: loaded.plan.commandText,
-    viewId,
+  const view = loadViewHeader(db, viewId);
+  const limit = clampLimit(options.maxCardsPerSection ?? 24, 1, 100);
+  const sectionSummaries = loadSectionSummaries(db, viewId, view.sections);
+  const sections = sectionSummaries.map(section => {
+    const rows = loadMembershipRows(db, {
+      viewId,
+      sectionTitle: section.title,
+      cursor: 0,
+      limit,
+      includeExcluded: false,
+    });
+    return {
+      id: section.id,
+      title: section.title,
+      description: undefined,
+      totalCount: section.totalCount,
+      visibleCount: Math.min(section.totalCount, rows.length),
+      collapsedByDefault: false,
+      cards: cardsForRows(db, view, rows),
+    };
   });
-  return projectSemanticViewWorkspace(loaded.plan, briefs, {
-    maxCardsPerSection: options.maxCardsPerSection ?? 24,
-    generatedAt: options.generatedAt,
-  });
+  const reviewRows = loadReviewRows(db, viewId, 40);
+  const counts = countStates(db, viewId);
+  const included = counts.strong_include + counts.weak_include;
+
+  return {
+    kind: 'semantic_view_workspace',
+    viewName: view.name,
+    goal: view.goal,
+    commandText: view.commandText,
+    layout: 'board',
+    headline: `${included} useful matches across ${sections.length} ${sections.length === 1 ? 'section' : 'sections'}`,
+    subhead: summarySentence(counts),
+    stats: [
+      { id: 'strong', label: 'Strong matches', value: counts.strong_include, tone: 'positive' },
+      { id: 'weak', label: 'Weak matches', value: counts.weak_include, tone: 'warning' },
+      { id: 'conflict', label: 'Conflicts', value: counts.conflict, tone: counts.conflict ? 'danger' : 'neutral' },
+      { id: 'review', label: 'Needs review', value: counts.needs_review, tone: counts.needs_review ? 'warning' : 'neutral' },
+    ],
+    sections,
+    reviewLane: cardsForRows(db, view, reviewRows),
+    hiddenExcludedCount: counts.exclude,
+    suggestedPrompts: suggestedPrompts(view.name, counts),
+    availableLayouts: ['board', 'gallery', 'map', 'compact'],
+    generatedAt: options.generatedAt ?? new Date().toISOString(),
+  };
 }
 
 export function getViewSectionPage(
@@ -46,11 +83,19 @@ export function getViewSectionPage(
   input: { cursor?: number; limit?: number } = {},
 ): ViewSectionPageType {
   const cursor = Math.max(0, input.cursor ?? 0);
-  const limit = Math.min(Math.max(1, input.limit ?? 24), 100);
-  const workspace = getViewWorkspace(db, viewId, { maxCardsPerSection: 10_000 });
-  const section = workspace.sections.find(candidate => candidate.id === sectionId || slug(candidate.title) === sectionId);
+  const limit = clampLimit(input.limit ?? 24, 1, 100);
+  const view = loadViewHeader(db, viewId);
+  const section = loadSectionSummaries(db, viewId, view.sections)
+    .find(candidate => candidate.id === sectionId || slug(candidate.title) === sectionId);
   if (!section) throw new Error(`Section not found: ${sectionId}`);
-  const cards = section.cards.slice(cursor, cursor + limit);
+  const rows = loadMembershipRows(db, {
+    viewId,
+    sectionTitle: section.title,
+    cursor,
+    limit,
+    includeExcluded: false,
+  });
+  const cards = cardsForRows(db, view, rows);
   const nextCursor = cursor + cards.length < section.totalCount ? cursor + cards.length : null;
   return ViewSectionPage.parse({
     viewId,
@@ -74,8 +119,9 @@ export function getTargetInspector(
 ): TargetInspectorType {
   const targetKind = TargetKind.parse(input.targetKind);
   const target = loadTargetBrief(db, targetKind, input.targetId);
-  const card = input.viewId ? cardForTarget(db, input.viewId, targetKind, input.targetId) : undefined;
-  const membership = input.viewId ? membershipForTarget(db, input.viewId, targetKind, input.targetId, target.brief) : undefined;
+  const membershipRow = input.viewId ? membershipRowForTarget(db, input.viewId, targetKind, input.targetId) : undefined;
+  const card = input.viewId && membershipRow ? cardForMembershipRow(db, input.viewId, membershipRow) : undefined;
+  const membership = input.viewId && membershipRow ? membershipForRow(input.viewId, membershipRow, target.brief) : undefined;
   return TargetInspector.parse({
     targetKind,
     targetId: input.targetId,
@@ -97,7 +143,7 @@ export function getTargetInspector(
       createdAt: annotation.createdAt,
     })),
     evidence: evidenceForInspector(target.brief, membership?.evidenceStrength),
-    technicalEvidenceRefs: card?.evidenceRefs ?? [],
+    technicalEvidenceRefs: membershipRow ? parseStringArray(membershipRow.evidence_refs) : [],
     extractionStatus: target.brief.extractionStatus,
     atomicItems: target.brief.atomicItems.map(item => ({
       itemId: item.itemId,
@@ -111,7 +157,7 @@ export function getTargetInspector(
   });
 }
 
-function loadViewPlan(db: Database.Database, viewId: string): { plan: z.infer<typeof SemanticViewPlan>; commandId?: string } {
+function loadViewHeader(db: Database.Database, viewId: string): ViewHeader {
   const view = db.prepare(`
     SELECT id, name, description, query_json, status
     FROM views
@@ -130,101 +176,35 @@ function loadViewPlan(db: Database.Database, viewId: string): { plan: z.infer<ty
   const command = spec?.command_id
     ? db.prepare(`SELECT text FROM user_commands WHERE id = ?`).get(spec.command_id) as { text: string } | undefined
     : undefined;
-
-  const rows = db.prepare(`
-    SELECT id, target_kind, target_id, state, section, confidence, reason, conflict_note, evidence_refs
-    FROM memberships
-    WHERE view_id = ?
-    ORDER BY
-      CASE state
-        WHEN 'strong_include' THEN 0
-        WHEN 'weak_include' THEN 1
-        WHEN 'conflict' THEN 2
-        WHEN 'needs_review' THEN 3
-        ELSE 4
-      END,
-      confidence DESC
-  `).all(viewId) as MembershipRow[];
-
   const query = parseRecord(view.query_json);
-  const commandText = command?.text
-    ?? (typeof query.commandText === 'string' ? query.commandText : `Open ${view.name}`);
-
   return {
-    commandId: spec?.command_id ?? undefined,
-    plan: SemanticViewPlan.parse({
-      commandText,
-      views: [{
-        name: view.name,
-        goal: spec?.goal ?? view.description ?? view.name,
-        description: view.description ?? undefined,
-        inclusionRules: parseStringArray(spec?.inclusion_rules_json),
-        exclusionRules: parseStringArray(spec?.exclusion_rules_json),
-        sections: parseStringArray(spec?.section_rules_json),
-        sortPolicy: spec?.sort_policy ?? undefined,
-        confidence: typeof query.confidence === 'number' ? query.confidence : 0.5,
-        memberships: rows.map(row => ({
-          targetKind: row.target_kind,
-          targetId: row.target_id,
-          section: row.section ?? undefined,
-          state: row.state,
-          confidence: row.confidence,
-          reason: row.reason ?? '',
-          evidenceRefs: parseStringArray(row.evidence_refs),
-          conflict: row.conflict_note ?? undefined,
-        })),
-      }],
-      reviewQueues: [],
-      explanation: view.description ?? '',
-    }),
+    viewId,
+    name: view.name,
+    description: view.description ?? undefined,
+    goal: spec?.goal ?? view.description ?? view.name,
+    commandText: command?.text ?? (typeof query.commandText === 'string' ? query.commandText : `Open ${view.name}`),
+    inclusionRules: parseStringArray(spec?.inclusion_rules_json),
+    exclusionRules: parseStringArray(spec?.exclusion_rules_json),
+    sections: parseStringArray(spec?.section_rules_json),
+    sortPolicy: spec?.sort_policy ?? undefined,
+    confidence: typeof query.confidence === 'number' ? query.confidence : 0.5,
   };
 }
 
-function resourceIdsForPlan(db: Database.Database, plan: z.infer<typeof SemanticViewPlan>): string[] {
-  const ids = new Set<string>();
-  const atomicIds: string[] = [];
-  for (const view of plan.views) {
-    for (const membership of view.memberships) {
-      if (membership.targetKind === 'resource') ids.add(membership.targetId);
-      else atomicIds.push(membership.targetId);
-    }
-  }
-  if (atomicIds.length) {
-    const rows = db.prepare(`
-      SELECT resource_id
-      FROM atomic_items
-      WHERE id IN (${atomicIds.map(() => '?').join(',')})
-    `).all(...atomicIds) as Array<{ resource_id: string }>;
-    for (const row of rows) ids.add(row.resource_id);
-  }
-  return [...ids];
-}
-
-function cardForTarget(
+function cardForMembershipRow(
   db: Database.Database,
   viewId: string,
-  targetKind: TargetKind,
-  targetId: string,
+  row: MembershipRow,
 ): VisualResourceCard | undefined {
-  const workspace = getViewWorkspace(db, viewId, { maxCardsPerSection: 10_000 });
-  return [...workspace.sections.flatMap(section => section.cards), ...workspace.reviewLane]
-    .find(card => card.targetKind === targetKind && card.targetId === targetId);
+  const view = loadViewHeader(db, viewId);
+  return cardsForRows(db, view, [row])[0];
 }
 
-function membershipForTarget(
-  db: Database.Database,
+function membershipForRow(
   viewId: string,
-  targetKind: TargetKind,
-  targetId: string,
+  row: Pick<MembershipRow, 'id' | 'state' | 'section' | 'confidence' | 'reason' | 'evidence_refs'>,
   brief: ResourceBrief,
 ): TargetInspectorType['currentViewMembership'] {
-  const row = db.prepare(`
-    SELECT id, state, section, confidence, reason, evidence_refs
-    FROM memberships
-    WHERE view_id = ? AND target_kind = ? AND target_id = ?
-    LIMIT 1
-  `).get(viewId, targetKind, targetId) as Pick<MembershipRow, 'id' | 'state' | 'section' | 'confidence' | 'reason' | 'evidence_refs'> | undefined;
-  if (!row) return undefined;
   const evidenceRefs = parseStringArray(row.evidence_refs);
   return {
     viewId,
@@ -235,6 +215,162 @@ function membershipForTarget(
     reason: row.reason ?? '',
     evidenceStrength: evidenceStrengthFor(evidenceRefs, brief),
   };
+}
+
+function membershipRowForTarget(
+  db: Database.Database,
+  viewId: string,
+  targetKind: TargetKind,
+  targetId: string,
+): MembershipRow | undefined {
+  return db.prepare(`
+    SELECT id, target_kind, target_id, state, section, confidence, reason, conflict_note, evidence_refs
+    FROM memberships
+    WHERE view_id = ? AND target_kind = ? AND target_id = ?
+    LIMIT 1
+  `).get(viewId, targetKind, targetId) as MembershipRow | undefined;
+}
+
+function loadSectionSummaries(db: Database.Database, viewId: string, declaredSections: string[]): SectionSummary[] {
+  const rows = db.prepare(`
+    SELECT COALESCE(section, '') AS section, COUNT(*) AS total_count
+    FROM memberships
+    WHERE view_id = ? AND state <> 'exclude'
+    GROUP BY COALESCE(section, '')
+  `).all(viewId) as Array<{ section: string; total_count: number }>;
+  const byTitle = new Map(rows.map(row => [row.section || 'Main matches', row.total_count]));
+  const titles = [
+    ...declaredSections,
+    ...rows.map(row => row.section || 'Main matches'),
+  ].filter((title, index, all) => title && all.indexOf(title) === index);
+  return titles
+    .map(title => ({
+      id: sectionId(title),
+      title,
+      totalCount: byTitle.get(title) ?? 0,
+    }))
+    .filter(section => section.totalCount > 0);
+}
+
+function loadMembershipRows(
+  db: Database.Database,
+  input: {
+    viewId: string;
+    sectionTitle: string;
+    cursor: number;
+    limit: number;
+    includeExcluded: boolean;
+  },
+): MembershipRow[] {
+  return db.prepare(`
+    SELECT id, target_kind, target_id, state, section, confidence, reason, conflict_note, evidence_refs
+    FROM memberships
+    WHERE view_id = ?
+      AND COALESCE(section, 'Main matches') = ?
+      ${input.includeExcluded ? '' : "AND state <> 'exclude'"}
+    ORDER BY
+      CASE state
+        WHEN 'strong_include' THEN 0
+        WHEN 'weak_include' THEN 1
+        WHEN 'conflict' THEN 2
+        WHEN 'needs_review' THEN 3
+        ELSE 4
+      END,
+      confidence DESC,
+      target_id ASC
+    LIMIT ? OFFSET ?
+  `).all(input.viewId, input.sectionTitle, input.limit, input.cursor) as MembershipRow[];
+}
+
+function loadReviewRows(db: Database.Database, viewId: string, limit: number): MembershipRow[] {
+  return db.prepare(`
+    SELECT id, target_kind, target_id, state, section, confidence, reason, conflict_note, evidence_refs
+    FROM memberships
+    WHERE view_id = ? AND state IN ('weak_include', 'conflict', 'needs_review')
+    ORDER BY
+      CASE state
+        WHEN 'weak_include' THEN 0
+        WHEN 'conflict' THEN 1
+        WHEN 'needs_review' THEN 2
+        ELSE 3
+      END,
+      confidence DESC,
+      target_id ASC
+    LIMIT ?
+  `).all(viewId, limit) as MembershipRow[];
+}
+
+function countStates(db: Database.Database, viewId: string): Record<z.infer<typeof MembershipState>, number> {
+  const counts = {
+    strong_include: 0,
+    weak_include: 0,
+    conflict: 0,
+    exclude: 0,
+    needs_review: 0,
+  };
+  const rows = db.prepare(`
+    SELECT state, COUNT(*) AS count
+    FROM memberships
+    WHERE view_id = ?
+    GROUP BY state
+  `).all(viewId) as Array<{ state: z.infer<typeof MembershipState>; count: number }>;
+  for (const row of rows) counts[row.state] = row.count;
+  return counts;
+}
+
+function cardsForRows(db: Database.Database, view: ViewHeader, rows: MembershipRow[]): VisualResourceCard[] {
+  if (!rows.length) return [];
+  const resourceIds = resourceIdsForRows(db, rows);
+  const briefs = buildResourceBriefsForIntent(db, resourceIds, {
+    commandText: view.commandText,
+    viewId: view.viewId,
+  });
+  const plan = SemanticViewPlan.parse({
+    commandText: view.commandText,
+    views: [{
+      name: view.name,
+      goal: view.goal,
+      description: view.description,
+      inclusionRules: view.inclusionRules,
+      exclusionRules: view.exclusionRules,
+      sections: view.sections.length ? view.sections : [...new Set(rows.map(row => row.section ?? 'Main matches'))],
+      sortPolicy: view.sortPolicy,
+      confidence: view.confidence,
+      memberships: rows.map(row => ({
+        targetKind: row.target_kind,
+        targetId: row.target_id,
+        section: row.section ?? undefined,
+        state: row.state,
+        confidence: row.confidence,
+        reason: row.reason ?? '',
+        evidenceRefs: parseStringArray(row.evidence_refs),
+        conflict: row.conflict_note ?? undefined,
+      })),
+    }],
+    reviewQueues: [],
+    explanation: view.description ?? '',
+  });
+  return projectSemanticViewWorkspace(plan, briefs, { maxCardsPerSection: rows.length })
+    .sections.flatMap(section => section.cards)
+    .sort((left, right) => compareCards(left, right));
+}
+
+function resourceIdsForRows(db: Database.Database, rows: MembershipRow[]): string[] {
+  const ids = new Set<string>();
+  const atomicIds: string[] = [];
+  for (const row of rows) {
+    if (row.target_kind === 'resource') ids.add(row.target_id);
+    else atomicIds.push(row.target_id);
+  }
+  if (atomicIds.length) {
+    const found = db.prepare(`
+      SELECT resource_id
+      FROM atomic_items
+      WHERE id IN (${atomicIds.map(() => '?').join(',')})
+    `).all(...atomicIds) as Array<{ resource_id: string }>;
+    for (const row of found) ids.add(row.resource_id);
+  }
+  return [...ids];
 }
 
 function loadTargetBrief(
@@ -327,6 +463,51 @@ function labelForEvidence(kind: string, provenance: string, membershipStrength?:
   return 'Title only';
 }
 
+function summarySentence(counts: Record<z.infer<typeof MembershipState>, number>): string {
+  const parts = [
+    counts.weak_include ? `${counts.weak_include} weak` : '',
+    counts.conflict ? `${counts.conflict} conflicting` : '',
+    counts.needs_review ? `${counts.needs_review} needing review` : '',
+  ].filter(Boolean);
+  return parts.length
+    ? `${parts.join(', ')}. Excluded resources stay hidden until requested.`
+    : 'All visible matches have strong supporting evidence.';
+}
+
+function suggestedPrompts(viewName: string, counts: Record<z.infer<typeof MembershipState>, number>): string[] {
+  return [
+    counts.weak_include ? 'Hide weak matches.' : '',
+    counts.conflict ? 'Show only conflicts and explain them.' : '',
+    counts.needs_review ? 'Start a quick review of uncertain items.' : '',
+    `Split ${viewName} into practical and inspirational sections.`,
+    'Show this as a visual gallery.',
+  ].filter(Boolean);
+}
+
+function compareCards(left: VisualResourceCard, right: VisualResourceCard): number {
+  return stateRank(left.state) - stateRank(right.state)
+    || right.confidence - left.confidence
+    || left.targetId.localeCompare(right.targetId);
+}
+
+function stateRank(state: z.infer<typeof MembershipState>): number {
+  switch (state) {
+    case 'strong_include': return 0;
+    case 'weak_include': return 1;
+    case 'conflict': return 2;
+    case 'needs_review': return 3;
+    case 'exclude': return 4;
+  }
+}
+
+function clampLimit(value: number, min: number, max: number): number {
+  return Math.min(Math.max(min, Math.floor(Number.isFinite(value) ? value : min)), max);
+}
+
+function sectionId(title: string): string {
+  return `${slug(title)}-${crypto.createHash('sha1').update(title).digest('hex').slice(0, 6)}`;
+}
+
 function visualKindForBrief(brief: ResourceBrief): TargetInspectorType['visualKind'] {
   if (brief.urlKind.startsWith('youtube_')) return 'video';
   if (brief.urlKind.startsWith('github_')) return 'repository';
@@ -388,4 +569,23 @@ type MembershipRow = {
   reason: string | null;
   conflict_note: string | null;
   evidence_refs: string;
+};
+
+type ViewHeader = {
+  viewId: string;
+  name: string;
+  description?: string;
+  goal: string;
+  commandText: string;
+  inclusionRules: string[];
+  exclusionRules: string[];
+  sections: string[];
+  sortPolicy?: string;
+  confidence: number;
+};
+
+type SectionSummary = {
+  id: string;
+  title: string;
+  totalCount: number;
 };
