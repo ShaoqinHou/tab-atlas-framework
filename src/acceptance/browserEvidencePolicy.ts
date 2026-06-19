@@ -29,6 +29,7 @@ export const BrowserExecutionEvidence = z.object({
   popupOpened: z.boolean(),
   receiverReachable: z.boolean(),
   pairedThroughPopup: z.boolean(),
+  snapshotExportedThroughPopup: z.boolean(),
   snapshotArrived: z.boolean(),
   revocationObserved: z.boolean(),
   tokenAbsentFromSnapshot: z.boolean(),
@@ -66,6 +67,7 @@ export function allBehaviorProofPassed(evidence: BrowserExecutionEvidence): bool
   return evidence.popupOpened
     && evidence.receiverReachable
     && evidence.pairedThroughPopup
+    && evidence.snapshotExportedThroughPopup
     && evidence.snapshotArrived
     && evidence.revocationObserved
     && evidence.tokenAbsentFromSnapshot;
