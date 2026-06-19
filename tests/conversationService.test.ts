@@ -230,7 +230,6 @@ describe('persistent conversational agent actions', () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
     const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
-    const prompts: string[] = [];
     const semanticPlan: SemanticViewPlan = {
       commandText: 'Make a forest inspiration board',
       views: [{
@@ -252,7 +251,9 @@ describe('persistent conversational agent actions', () => {
       reviewQueues: [],
       explanation: 'Codex planned the conversational view.',
     };
-    const provider = queuedJsonProvider([{
+    const conversationPrompts: string[] = [];
+    const semanticPrompts: string[] = [];
+    const conversationProvider = queuedJsonProvider([{
       reply: 'I will preview that view.',
       questions: [],
       assumptions: [],
@@ -264,15 +265,17 @@ describe('persistent conversational agent actions', () => {
         commandText: 'Make a forest inspiration board',
         candidateLimit: 50,
       }],
-    } satisfies AgentTurnPlan, semanticPlan], prompts);
+    } satisfies AgentTurnPlan], conversationPrompts);
+    const semanticProvider = queuedJsonProvider([semanticPlan], semanticPrompts);
 
     const snapshot = await sendConversationMessage(db, {
       threadId: thread.id,
       content: 'Make a forest inspiration board',
-    }, { plannerProvider: provider });
+    }, { plannerProvider: conversationProvider, actionPlannerProvider: semanticProvider });
 
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain('Make a forest inspiration board');
+    expect(conversationPrompts).toHaveLength(1);
+    expect(semanticPrompts).toHaveLength(1);
+    expect(semanticPrompts[0]).toContain('Make a forest inspiration board');
     expect(snapshot.actions[0].status).toBe('succeeded');
     const result = snapshot.actions[0].result as { mode?: string; codexTurnSpent?: boolean; viewIds?: string[] };
     expect(result.mode).toBe('codex');

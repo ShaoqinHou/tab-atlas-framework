@@ -212,15 +212,357 @@ export function createCodexProviderRegistry(
 ): ScopedProviderRegistry {
   return new ScopedProviderRegistry(db, {
     maxTurnsPerThread: options.maxTurnsPerThread,
-    providerFactory: config => new CodexSdkProvider({
-      reasoningEffort: config.reasoningEffort,
-      reuseThread: config.reuseThread,
-      workingDirectory: options.workingDirectory,
-    }),
+    providerFactory: config => process.env.TABATLAS_FAKE_CODEX_PROVIDER === 'workspace_ux'
+      ? new WorkspaceUxFakeProvider(config)
+      : new CodexSdkProvider({
+        reasoningEffort: config.reasoningEffort,
+        reuseThread: config.reuseThread,
+        workingDirectory: options.workingDirectory,
+      }),
   });
 }
 
 function providerThreadIdFor(provider: LlmProvider): string | null {
   const candidate = provider as { threadId?: unknown };
   return typeof candidate.threadId === 'string' ? candidate.threadId : null;
+}
+
+type PromptResource = {
+  resourceId: string;
+  host?: string;
+  title?: string;
+  urlKind?: string;
+  browserGroupTitles?: string[];
+  userAnnotations?: Array<{ id?: string; tags?: string[]; description?: string; decision?: string }>;
+  atomicItems?: Array<{ itemId: string; itemKind?: string; name?: string; summary?: string; evidenceRefs?: string[]; confidence?: number }>;
+  evidence?: Array<{ id: string; kind?: string; text?: string; provenance?: string; confidence?: number }>;
+};
+
+type ChunkDecision = {
+  targetKind: 'resource' | 'atomic_item';
+  targetId: string;
+  state: 'strong_include' | 'weak_include' | 'conflict' | 'exclude' | 'needs_review';
+  confidence: number;
+  reason: string;
+  evidenceRefs: string[];
+};
+
+class WorkspaceUxFakeProvider implements LlmProvider {
+  readonly threadId: string;
+
+  constructor(private readonly config: ProviderFactoryConfig) {
+    this.threadId = `fake_thread_${config.role}_${config.generation}`;
+  }
+
+  async complete(prompt: string): Promise<LlmResult> {
+    const text = JSON.stringify(this.responseFor(prompt));
+    return {
+      text,
+      usage: {
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: Math.ceil(text.length / 4),
+        quotaTurns: 0,
+      },
+    };
+  }
+
+  private responseFor(prompt: string): unknown {
+    if (this.config.role === 'conversation_planner' || prompt.includes('AgentTurnPlan')) {
+      return this.conversationPlan(prompt);
+    }
+    if (prompt.includes('Return only SemanticChunkResult JSON')) {
+      return this.chunkResult(prompt);
+    }
+    return this.semanticPlan(prompt);
+  }
+
+  private conversationPlan(prompt: string): unknown {
+    const latest = latestConversationUserText(prompt);
+    const lower = latest.toLowerCase();
+    if (lower.includes('review')) {
+      return {
+        reply: 'I will open a focused review queue for the uncertain items.',
+        actions: [{
+          id: 'start_review',
+          kind: 'start_review',
+          approval: 'automatic',
+          queue: lower.includes('conflict') ? 'conflict' : lower.includes('weak') || lower.includes('uncertain') ? 'weak' : 'unmarked',
+          rationale: 'Focused review is the fastest way to process uncertain local resources.',
+        }],
+        questions: [],
+        assumptions: [],
+      };
+    }
+    const commandText = latest || 'Build a local visual workspace from the current tab library.';
+    return {
+      reply: 'I will preview that workspace using the local tab library.',
+      actions: [{
+        id: 'plan_view',
+        kind: 'plan_view',
+        approval: 'preview',
+        commandText,
+        candidateLimit: 40,
+        rationale: 'A preview lets you inspect and correct the proposed workspace before accepting it.',
+      }],
+      questions: [],
+      assumptions: ['Using local titles, tab groups, user annotations, extracted summaries, and atomic items only.'],
+    };
+  }
+
+  private chunkResult(prompt: string): unknown {
+    const commandText = commandTextFromPrompt(prompt);
+    const chunkId = textAfterLabel(prompt, 'Chunk ID:') || 'semantic_chunk_workspace_ux';
+    const resources = resourcesFromPrompt(prompt);
+    const decisions = decisionsFor(commandText, resources).slice(0, 80);
+    const decided = new Set(decisions.map(decision => decision.targetId));
+    return {
+      commandText,
+      chunkId,
+      decisions,
+      unresolvedTargets: targetIdsFromResources(resources).filter(targetId => !decided.has(targetId)),
+      notes: ['Deterministic workspace UX fake provider chunk result.'],
+    };
+  }
+
+  private semanticPlan(prompt: string): unknown {
+    const commandText = commandTextFromPrompt(prompt);
+    const resources = resourcesFromPrompt(prompt);
+    const decisions = decisionsFor(commandText, resources);
+    const lower = commandText.toLowerCase();
+    const sections = lower.includes('project') || lower.includes('tab-manager')
+      ? ['Architecture', 'Extraction', 'UX', 'Safety', 'Packaging']
+      : ['Game inspiration', 'Visual references', 'Personal inspiration', 'Cross-domain references'];
+    return {
+      commandText,
+      views: [{
+        name: lower.includes('project') || lower.includes('tab-manager')
+          ? 'Tab manager project workspace'
+          : 'Loose inspiration board',
+        description: 'Deterministic workspace UX role-play view from local resources.',
+        goal: commandText,
+        inclusionRules: [
+          'Prioritize resources that match the requested purpose.',
+          'Keep user annotations ahead of generated evidence.',
+          'Surface ambiguous matches for review instead of hiding them.',
+        ],
+        exclusionRules: ['Exclude clearly unrelated archive or database references from the main board.'],
+        sections,
+        sortPolicy: 'Group by purpose, then confidence and user evidence.',
+        confidence: 0.86,
+        memberships: decisions,
+      }],
+      reviewQueues: [{
+        queueName: 'uncertain',
+        reason: 'Weak, conflicting, and needs-review memberships should be checked by the user.',
+        targetIds: decisions
+          .filter(decision => decision.targetKind === 'resource' && ['weak_include', 'conflict', 'needs_review'].includes(decision.state))
+          .slice(0, 40)
+          .map(decision => decision.targetId),
+      }],
+      explanation: 'Deterministic fake Codex response for the workspace UX role-play gate.',
+    };
+  }
+}
+
+function latestConversationUserText(prompt: string): string {
+  const history = jsonBetweenLabels(prompt, 'Conversation history:', 'Retrieved local context:');
+  if (Array.isArray(history)) {
+    const latest = [...history].reverse().find((message): message is { role: string; content: string } => {
+      return isRecord(message) && message.role === 'user' && typeof message.content === 'string';
+    });
+    if (latest) return latest.content;
+  }
+  const contentMatches = [...prompt.matchAll(/"role"\s*:\s*"user"[\s\S]*?"content"\s*:\s*"((?:\\.|[^"])*)"/g)];
+  const last = contentMatches.at(-1)?.[1];
+  return last ? unescapeJsonString(last) : '';
+}
+
+function commandTextFromPrompt(prompt: string): string {
+  const fromLine = textAfterLabel(prompt, 'Command:');
+  if (fromLine) return fromLine;
+  const mergeInput = jsonFromLastObject(prompt);
+  if (isRecord(mergeInput) && typeof mergeInput.commandText === 'string') return mergeInput.commandText;
+  return 'Build a local TabAtlas workspace.';
+}
+
+function resourcesFromPrompt(prompt: string): PromptResource[] {
+  for (const value of jsonObjectsFromText(prompt)) {
+    if (isRecord(value) && Array.isArray(value.resources)) {
+      return value.resources.filter(isPromptResource);
+    }
+    if (isRecord(value) && Array.isArray(value.chunkResults)) {
+      return resourcesFromChunkResults(value.chunkResults);
+    }
+  }
+  return [];
+}
+
+function resourcesFromChunkResults(chunkResults: unknown[]): PromptResource[] {
+  const resources = new Map<string, PromptResource>();
+  for (const chunk of chunkResults) {
+    if (!isRecord(chunk) || !Array.isArray(chunk.decisions)) continue;
+    for (const decision of chunk.decisions) {
+      if (!isRecord(decision) || typeof decision.targetId !== 'string') continue;
+      if (decision.targetKind === 'resource') {
+        resources.set(decision.targetId, {
+          resourceId: decision.targetId,
+          title: decision.targetId,
+          evidence: [{ id: `planner:${decision.targetId}` }],
+        });
+      }
+    }
+  }
+  return [...resources.values()];
+}
+
+function decisionsFor(commandText: string, resources: PromptResource[]): ChunkDecision[] {
+  const lowerCommand = commandText.toLowerCase();
+  const includeProject = lowerCommand.includes('project') || lowerCommand.includes('tab-manager');
+  const decisions: ChunkDecision[] = [];
+  for (const [index, resource] of resources.entries()) {
+    const haystack = [
+      resource.title,
+      resource.host,
+      resource.urlKind,
+      ...(resource.browserGroupTitles ?? []),
+      ...(resource.userAnnotations ?? []).flatMap(annotation => [
+        annotation.decision,
+        annotation.description,
+        ...(annotation.tags ?? []),
+      ]),
+    ].filter(Boolean).join(' ').toLowerCase();
+    const hasUserSignal = (resource.userAnnotations ?? []).length > 0;
+    const state = haystack.includes('conflict') || haystack.includes('questionable')
+      ? 'conflict'
+      : haystack.includes('archive database') || haystack.includes('unrelated')
+        ? 'exclude'
+        : index % 11 === 0
+          ? 'needs_review'
+          : index % 7 === 0
+            ? 'weak_include'
+            : 'strong_include';
+    const section = includeProject ? projectSectionFor(haystack, index) : inspirationSectionFor(haystack, hasUserSignal);
+    decisions.push({
+      targetKind: 'resource',
+      targetId: resource.resourceId,
+      section,
+      state,
+      confidence: state === 'strong_include' ? 0.88 : state === 'weak_include' ? 0.57 : state === 'conflict' ? 0.62 : state === 'needs_review' ? 0.46 : 0.79,
+      reason: reasonFor(resource, section, state, hasUserSignal),
+      evidenceRefs: state === 'exclude' ? [] : evidenceRefsFor(resource),
+    } as ChunkDecision);
+    if (includeProject && resource.atomicItems?.length) {
+      for (const item of resource.atomicItems.slice(0, 2)) {
+        decisions.push({
+          targetKind: 'atomic_item',
+          targetId: item.itemId,
+          section: projectSectionFor(`${item.name ?? ''} ${item.summary ?? ''} ${haystack}`.toLowerCase(), index + decisions.length),
+          state: index % 5 === 0 ? 'weak_include' : 'strong_include',
+          confidence: item.confidence ?? 0.72,
+          reason: `Atomic item "${item.name ?? item.itemId}" is independently useful for this project workspace.`,
+          evidenceRefs: item.evidenceRefs?.length ? item.evidenceRefs : [`atomic:${item.itemId}`],
+        } as ChunkDecision);
+      }
+    }
+  }
+  return decisions;
+}
+
+function projectSectionFor(text: string, index: number): string {
+  const fallback = ['Architecture', 'Extraction', 'UX', 'Safety', 'Packaging'][index % 5] ?? 'Architecture';
+  if (index % 3 === 0) return fallback;
+  if (text.includes('extract') || text.includes('transcript') || text.includes('capture')) return 'Extraction';
+  if (text.includes('privacy') || text.includes('safe') || text.includes('token') || text.includes('extension')) return 'Safety';
+  if (text.includes('package') || text.includes('install') || text.includes('release')) return 'Packaging';
+  if (text.includes('ux') || text.includes('interface') || text.includes('visual') || text.includes('review')) return 'UX';
+  return fallback;
+}
+
+function inspirationSectionFor(text: string, hasUserSignal: boolean): string {
+  if (hasUserSignal || text.includes('inspiration')) return 'Personal inspiration';
+  if (text.includes('visual') || text.includes('gallery') || text.includes('mood')) return 'Visual references';
+  if (text.includes('game') || text.includes('forest')) return 'Game inspiration';
+  return 'Cross-domain references';
+}
+
+function reasonFor(resource: PromptResource, section: string, state: string, hasUserSignal: boolean): string {
+  if (state === 'exclude') return 'This looks unrelated to the requested workspace and is hidden by default.';
+  if (hasUserSignal) return `User annotation is primary evidence, and the resource fits ${section}.`;
+  const title = resource.title ? `"${resource.title}"` : resource.resourceId;
+  return `${title} matches ${section} through local title, group, or extracted evidence.`;
+}
+
+function evidenceRefsFor(resource: PromptResource): string[] {
+  const annotation = resource.userAnnotations?.find(item => item.id);
+  if (annotation?.id) return [`user_annotation:${annotation.id}`];
+  const evidence = resource.evidence?.find(item => item.id);
+  if (evidence?.id) return [evidence.id];
+  return [`title:${resource.resourceId}`];
+}
+
+function targetIdsFromResources(resources: PromptResource[]): string[] {
+  return resources.flatMap(resource => [
+    resource.resourceId,
+    ...(resource.atomicItems ?? []).map(item => item.itemId),
+  ]);
+}
+
+function jsonBetweenLabels(prompt: string, startLabel: string, endLabel: string): unknown {
+  const start = prompt.indexOf(startLabel);
+  const end = prompt.indexOf(endLabel, start + startLabel.length);
+  if (start === -1 || end === -1) return null;
+  const text = prompt.slice(start + startLabel.length, end).trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function jsonFromLastObject(text: string): unknown {
+  const starts = [...text.matchAll(/\{/g)].map(match => match.index).filter((index): index is number => typeof index === 'number');
+  for (const start of starts.reverse()) {
+    try {
+      return JSON.parse(text.slice(start));
+    } catch {
+      // Try the previous object boundary.
+    }
+  }
+  return null;
+}
+
+function jsonObjectsFromText(text: string): unknown[] {
+  const objects: unknown[] = [];
+  const starts = [...text.matchAll(/\{/g)].map(match => match.index).filter((index): index is number => typeof index === 'number');
+  for (const start of starts.reverse()) {
+    try {
+      objects.push(JSON.parse(text.slice(start)));
+    } catch {
+      // Prompt text before the JSON is expected.
+    }
+  }
+  return objects;
+}
+
+function textAfterLabel(prompt: string, label: string): string {
+  const index = prompt.indexOf(label);
+  if (index === -1) return '';
+  const rest = prompt.slice(index + label.length);
+  return rest.split(/\r?\n/, 1)[0]?.trim() ?? '';
+}
+
+function isPromptResource(value: unknown): value is PromptResource {
+  return isRecord(value) && typeof value.resourceId === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function unescapeJsonString(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
 }

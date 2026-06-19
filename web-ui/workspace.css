@@ -421,6 +421,16 @@ h3 {
   max-width: 720px;
 }
 
+.restore-summary {
+  background: #eef6ff;
+  border: 1px solid #bfdcff;
+  border-radius: 7px;
+  color: #174b7a;
+  font-size: 13px;
+  margin: -4px 0 14px;
+  padding: 8px 10px;
+}
+
 .stats-row {
   display: grid;
   gap: 8px;

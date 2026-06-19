@@ -102,11 +102,14 @@ describe('workspace dashboard shell', () => {
     expect(workspace).toContain('referrerpolicy="no-referrer"');
     expect(workspace).toContain('data-suggested-prompt');
     expect(workspace).toContain('requestSubmit');
+    expect(workspace).toContain('restore-summary');
     expect(inspector).toContain('data-close-inspector');
     expect(inspector).toContain('role="tab"');
     expect(inspector).toContain('role="tabpanel"');
     expect(inspector).toContain('data-related-view');
     expect(inspector).toContain('data-parent-resource');
+    expect(inspector).toContain('selectedTargetKind');
+    expect(inspector).toContain('inspectorTab');
   });
 
   it('ships the role-play workspace UX evaluation gate', () => {
@@ -115,8 +118,14 @@ describe('workspace dashboard shell', () => {
 
     expect(pkg.scripts['eval:workspace-ux']).toBe('tsx scripts/eval-workspace-ux.ts');
     expect(evalScript).toContain('workspaceRoleplayScenarios');
-    expect(evalScript).toContain('large_workspace_budget');
-    expect(evalScript).toContain('lightweightAccessibilityCheck');
+    expect(evalScript).toContain("roleplay('creative-collector')");
+    expect(evalScript).toContain("roleplay('project-builder')");
+    expect(evalScript).toContain("roleplay('skeptical-curator')");
+    expect(evalScript).toContain("roleplay('tab-triage')");
+    expect(evalScript).toContain("roleplay('returning-user')");
+    expect(evalScript).toContain('TABATLAS_FAKE_CODEX_PROVIDER');
+    expect(evalScript).toContain('large-workspace-${size}');
+    expect(evalScript).toContain('axeAccessibilityCheck');
   });
 
   it('does not ship machine-specific local paths in shared docs or UI', () => {

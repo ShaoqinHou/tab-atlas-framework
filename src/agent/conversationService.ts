@@ -81,6 +81,7 @@ export interface SendConversationMessageInput {
 
 export interface SendConversationMessageOptions {
   plannerProvider: LlmProvider;
+  actionPlannerProvider?: LlmProvider;
 }
 
 export interface AgentActionExecutionOptions {
@@ -188,7 +189,9 @@ export async function sendConversationMessage(
   });
   const persistedPlan = persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
   for (const action of actionsReadyWithoutConfirmation(persistedPlan)) {
-    await runPersistedAgentAction(db, action.id, { plannerProvider: options.plannerProvider });
+    await runPersistedAgentAction(db, action.id, {
+      plannerProvider: options.actionPlannerProvider ?? options.plannerProvider,
+    });
   }
   return getConversationSnapshot(db, input.threadId);
 }

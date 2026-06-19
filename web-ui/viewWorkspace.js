@@ -120,6 +120,7 @@ function renderWorkspace() {
         ${workspace.stats.map(stat => `<div class="stat-pill ${stat.tone}"><span>${escapeHtml(stat.label)}</span><strong>${stat.value}</strong></div>`).join('')}
       </div>
     </header>
+    ${state.activeThreadId ? '<p class="restore-summary">Since last time: conversation, workspace, and inspector state are available.</p>' : ''}
     ${workspace.hiddenExcludedCount ? `<details class="excluded-notice"><summary>${workspace.hiddenExcludedCount} excluded hidden</summary><p>Excluded items stay out of the main workspace until explicitly requested.</p></details>` : ''}
     ${renderByLayout(state.layout)}
     <footer class="prompt-row">

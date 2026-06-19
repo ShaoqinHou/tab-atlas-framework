@@ -7,6 +7,9 @@ export const state = {
   layout: read('layout', 'board'),
   focusedSectionId: read('focusedSectionId', ''),
   remoteMedia: read('remoteMedia', 'on'),
+  selectedTargetKind: read('selectedTargetKind', ''),
+  selectedTargetId: read('selectedTargetId', ''),
+  inspectorTab: read('inspectorTab', 'overview'),
   selectedTarget: null,
   settingsPanel: '',
 };

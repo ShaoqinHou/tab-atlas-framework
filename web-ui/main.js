@@ -1,6 +1,6 @@
 import { getJson } from './api.js';
 import { initConversation } from './conversation.js';
-import { initInspector } from './inspector.js';
+import { initInspector, openInspector } from './inspector.js';
 import { initOperations } from './operations.js';
 import { initReviewWorkspace } from './review.js';
 import { initShell, refreshStatus, setViewOptions } from './shell.js';
@@ -17,10 +17,23 @@ async function refreshViews(preferredViewId = state.activeViewId) {
       setState({ activeViewId: views[0].id });
     }
     if (state.activeViewId) await refreshViewWorkspace(state.activeViewId);
+    await restoreInspectorSelection();
     renderAskStage();
   } catch {
     setViewOptions([]);
     renderAskStage();
+  }
+}
+
+async function restoreInspectorSelection() {
+  if (!state.selectedTargetKind || !state.selectedTargetId || !state.activeViewId) return;
+  try {
+    await openInspector(state.selectedTargetKind, state.selectedTargetId, {
+      viewId: state.activeViewId,
+      tab: state.inspectorTab || 'overview',
+    });
+  } catch {
+    setState({ selectedTargetKind: '', selectedTargetId: '' });
   }
 }
 

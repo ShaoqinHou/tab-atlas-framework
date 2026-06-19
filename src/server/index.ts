@@ -551,12 +551,14 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = getCodexProvider({ role: 'conversation_planner', reasoningEffort, scope: `conversation:${params.threadId}` });
+  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
     activeViewId: typeof body.activeViewId === 'string' ? body.activeViewId : undefined,
   }, {
     plannerProvider: provider,
+    actionPlannerProvider: actionProvider,
   });
   return reply.send(snapshot);
 });

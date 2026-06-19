@@ -18,9 +18,14 @@ export function initInspector() {
 }
 
 export async function openInspector(targetKind, targetId, options = {}) {
-  activeTab = options.tab ?? activeTab;
+  activeTab = options.tab ?? state.inspectorTab ?? activeTab;
   returnFocusElement = options.origin ?? returnFocusElement;
   showPanel('inspector');
+  setState({
+    selectedTargetKind: targetKind,
+    selectedTargetId: targetId,
+    inspectorTab: activeTab,
+  });
   const viewId = options.viewId ?? state.activeViewId;
   const params = viewId ? `?viewId=${encodeURIComponent(viewId)}` : '';
   currentInspector = await getJson(`/api/targets/${encodeURIComponent(targetKind)}/${encodeURIComponent(targetId)}/inspector${params}`);
@@ -54,6 +59,7 @@ export function renderInspector() {
   content.querySelectorAll('[data-inspector-tab]').forEach(button => {
     button.addEventListener('click', () => {
       activeTab = button.dataset.inspectorTab;
+      setState({ inspectorTab: activeTab });
       renderInspector();
     });
   });
@@ -197,6 +203,7 @@ function writeCorrectionResult(value) {
 function closeInspector() {
   showPanel('conversation');
   currentInspector = null;
+  setState({ selectedTargetKind: '', selectedTargetId: '' });
   renderInspector();
   if (returnFocusElement && typeof returnFocusElement.focus === 'function') {
     returnFocusElement.focus();

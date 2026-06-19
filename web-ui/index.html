@@ -8,7 +8,7 @@
 </head>
 <body>
   <div class="app-shell" data-testid="app-shell">
-    <aside class="left-rail" aria-label="Primary">
+    <aside class="left-rail" aria-label="Primary" tabindex="0">
       <div class="brand-block">
         <div class="brand-mark" aria-hidden="true">TA</div>
         <div>
@@ -154,14 +154,14 @@
       </section>
     </main>
 
-    <aside class="assistant-panel" data-testid="assistant-panel">
+    <aside class="assistant-panel" data-testid="assistant-panel" tabindex="0">
       <div class="assistant-tabs" role="tablist" aria-label="Assistant panel">
         <button id="conversationTab" class="active" type="button" role="tab" aria-selected="true">Talk</button>
         <button id="inspectorTab" type="button" role="tab" aria-selected="false">Inspect</button>
       </div>
 
       <section id="conversationSurface" class="panel-surface active" data-testid="conversation-surface">
-        <div id="conversationThread" class="conversation-thread" aria-live="polite"></div>
+        <div id="conversationThread" class="conversation-thread" aria-live="polite" tabindex="0"></div>
         <form id="conversationForm" class="composer" data-testid="conversation-form">
           <textarea id="conversationInput" rows="3" placeholder="Ask TabAtlas"></textarea>
           <button class="primary" type="submit">Send</button>
