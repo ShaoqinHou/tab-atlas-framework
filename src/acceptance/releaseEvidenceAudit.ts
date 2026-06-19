@@ -165,6 +165,7 @@ function reportRowMatchesEvidence(
   return row.popupOpened === evidence.popupOpened
     && row.receiverReachable === evidence.receiverReachable
     && row.pairedThroughPopup === evidence.pairedThroughPopup
+    && row.snapshotExportedThroughPopup === evidence.snapshotExportedThroughPopup
     && row.snapshotArrived === evidence.snapshotArrived
     && row.revocationVisible === evidence.revocationObserved
     && row.tokenAbsentFromSnapshot === evidence.tokenAbsentFromSnapshot;
