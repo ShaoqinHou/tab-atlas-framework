@@ -92,6 +92,7 @@ const app = Fastify({ logger: true });
 installLocalRequestGuard(app, db, { host, port });
 const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
+const webUiRoot = path.resolve(process.cwd(), 'web-ui');
 const bootstrapSecret = (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0)
   ? ensureBootstrapSecret(db, {
     directory: process.env.TABATLAS_BOOTSTRAP_DIR ?? path.join(process.cwd(), 'data'),
@@ -135,6 +136,21 @@ app.get('/health', async () => ({ ok: true, app: 'tabatlas', time: new Date().to
 app.get('/', async (_request, reply) => {
   const html = await fs.readFile(indexHtml, 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/web-ui/*', async (request, reply) => {
+  const params = request.params as { '*': string };
+  const requestedPath = params['*'] ?? '';
+  const resolvedPath = path.resolve(webUiRoot, requestedPath);
+  if (!resolvedPath.startsWith(`${webUiRoot}${path.sep}`)) {
+    return reply.status(404).send({ ok: false, error: 'not found' });
+  }
+  try {
+    const content = await fs.readFile(resolvedPath);
+    return reply.type(contentTypeFor(resolvedPath)).send(content);
+  } catch {
+    return reply.status(404).send({ ok: false, error: 'not found' });
+  }
 });
 
 app.post('/snapshot', async (request, reply) => {
@@ -853,6 +869,16 @@ process.once('SIGTERM', () => jobWorker.stop());
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function contentTypeFor(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.js') return 'text/javascript; charset=utf-8';
+  if (extension === '.css') return 'text/css; charset=utf-8';
+  if (extension === '.html') return 'text/html; charset=utf-8';
+  if (extension === '.json') return 'application/json; charset=utf-8';
+  if (extension === '.svg') return 'image/svg+xml; charset=utf-8';
+  return 'application/octet-stream';
 }
 
 function parseJsonArray(value: string): string[] {

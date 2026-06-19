@@ -73,7 +73,7 @@ export function authorizeLocalRequest(
 export function requiredScopeFor(method: string, rawUrl: string): GuardScope {
   const pathname = pathnameFor(rawUrl);
   const normalizedMethod = method.toUpperCase();
-  if (pathname === '/' || pathname === '/health') return 'local_only';
+  if (pathname === '/' || pathname === '/health' || pathname.startsWith('/web-ui/')) return 'local_only';
   if (pathname === '/api/security/pairing-codes/exchange' && normalizedMethod === 'POST') return 'local_only';
   if (pathname === '/api/onboarding' && normalizedMethod === 'GET') return 'local_only';
   if (pathname === '/api/onboarding/bootstrap' && normalizedMethod === 'POST') return 'local_only';
