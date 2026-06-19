@@ -1,11 +1,15 @@
 import { getJson, postJson } from './api.js';
 import { executePresentationPlan } from './presentationActions.js';
+import { openInspector } from './inspector.js';
+import { openReviewSessionSnapshot } from './review.js';
 import { setState, state } from './state.js';
 import { escapeHtml } from './shell.js';
+import { refreshViewWorkspace, showWorkspaceNotice } from './viewWorkspace.js';
 
 let snapshot = null;
 let refreshViewsCallback = null;
 let lastExecutedPresentationMessageId = '';
+const handledActionIds = new Set();
 
 export async function initConversation({ onRefreshViews } = {}) {
   refreshViewsCallback = onRefreshViews;
@@ -65,7 +69,7 @@ async function sendMessage(content) {
     });
     renderConversation();
     await executeLatestPresentationPlan();
-    await openLatestViewResult();
+    await handleCompletedActionResults();
   } catch (error) {
     appendMessage('assistant', `I could not run that request: ${error.message}`);
   }
@@ -131,7 +135,7 @@ async function confirmAction(actionId) {
   await postJson(`/api/agent-actions/${encodeURIComponent(actionId)}/confirm`, {});
   snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
   renderConversation();
-  await openLatestViewResult();
+  await handleCompletedActionResults();
 }
 
 async function cancelAction(actionId) {
@@ -150,13 +154,53 @@ async function executeLatestPresentationPlan() {
   await executePresentationPlan(message.context.presentationPlan);
 }
 
-async function openLatestViewResult() {
-  const actions = [...(snapshot?.actions ?? [])].reverse();
-  const completed = actions.find(action => action.status === 'succeeded' && action.result);
-  const viewId = firstViewId(completed?.result);
-  if (!viewId) return;
-  setState({ activeViewId: viewId, page: 'views' });
-  await refreshViewsCallback?.(viewId);
+async function handleCompletedActionResults() {
+  const actions = snapshot?.actions ?? [];
+  for (const action of actions) {
+    if (action.status !== 'succeeded' || !action.result || handledActionIds.has(action.id)) continue;
+    handledActionIds.add(action.id);
+    await routeActionResult(action);
+  }
+}
+
+async function routeActionResult(action) {
+  const kind = action.kind || action.action?.kind;
+  if (kind === 'plan_view' || kind === 'refine_view') {
+    const viewId = firstViewId(action.result);
+    if (!viewId) return;
+    setState({ activeViewId: viewId, page: 'views' });
+    await refreshViewsCallback?.(viewId);
+    return;
+  }
+  if (kind === 'start_review') {
+    openReviewSessionSnapshot(action.result);
+    return;
+  }
+  if (kind === 'explain_membership') {
+    const viewId = action.action?.viewId || state.activeViewId;
+    const resourceId = action.action?.resourceId;
+    if (resourceId) await openInspector('resource', resourceId, { viewId, tab: 'evidence' });
+    showWorkspaceNotice(action.result.explanation || 'Explanation opened in the inspector.');
+    return;
+  }
+  if (kind === 'add_annotation') {
+    const resourceId = action.action?.resourceId || action.result.targetId;
+    if (resourceId) await openInspector('resource', resourceId, { viewId: state.activeViewId, tab: 'notes' });
+    await refreshViewWorkspace(state.activeViewId);
+    showWorkspaceNotice('Saved note and refreshed the workspace.');
+    return;
+  }
+  if (kind === 'scan_resources') {
+    setState({ page: 'settings', settingsPanel: 'jobs' });
+    showWorkspaceNotice('Scan job was queued. Open Operations > Jobs for progress.');
+    return;
+  }
+  if (kind === 'accept_view') {
+    const viewId = action.action?.viewId || action.result.viewId || state.activeViewId;
+    setState({ activeViewId: viewId, page: 'views' });
+    await refreshViewsCallback?.(viewId);
+    showWorkspaceNotice('View accepted and workspace status refreshed.');
+  }
 }
 
 function firstViewId(result) {

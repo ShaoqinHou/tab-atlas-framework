@@ -14,7 +14,7 @@ import type { LlmProvider } from '../llm/types.js';
 import { runAgentCommand, type RunAgentCommandInput } from './commandService.js';
 import { createCodexScanJob } from './scanService.js';
 import { addUserAnnotation, getUserAnnotationById } from '../annotations/service.js';
-import { getReviewNext } from '../review/service.js';
+import { createReviewSession } from '../review/sessionService.js';
 import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
 import { applyViewPlan, createUserCommand, persistSemanticViewPlan, previewView } from '../views/service.js';
@@ -358,7 +358,18 @@ export async function executeAgentAction(
       });
     }
     case 'start_review':
-      return getReviewNext(db, { queue: action.queue, preload: 2 });
+      return createReviewSession(db, {
+        type: action.queue === 'weak' || action.queue === 'needs_review'
+          ? 'weak_matches'
+          : action.queue === 'conflict'
+            ? 'conflicts'
+            : action.queue === 'extraction_failure'
+              ? 'extraction_failures'
+              : 'unmarked',
+        title: `${action.queue.replace(/_/g, ' ')} review`,
+        commandText: action.queue,
+        preload: 5,
+      });
     case 'scan_resources':
       return runActionEffect(db, action.id, 'scan_job_create', {
         resourceIds: action.resourceIds,
