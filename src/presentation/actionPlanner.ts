@@ -30,7 +30,9 @@ export function planPresentationActionsFromText(
   if (section) actions.push({ kind: 'focus_section', sectionId: section.id });
 
   const states = requestedStates(normalized);
-  if (states.length) actions.push({ kind: 'set_filters', states, tags: [], query: '' });
+  const tags = requestedTags(normalized);
+  const query = requestedQuery(commandText);
+  if (states.length || tags.length || query) actions.push({ kind: 'set_filters', states, tags, query });
 
   if (activeViewId && /\b(review|check|triage)\b/.test(normalized) && /\b(uncertain|weak|conflict|needs review|questionable)\b/.test(normalized)) {
     actions.push({ kind: 'open_review', queue: states.includes('conflict') ? 'conflict' : 'needs_review', sourceViewId: activeViewId });
@@ -44,6 +46,23 @@ export function planPresentationActionsFromText(
       targetId: openTarget.targetId,
       inspectorTab: /\bevidence|why|proof|explain/.test(normalized) ? 'evidence' : 'overview',
     });
+    if (activeViewId && /\bwhy|explain|rationale|belongs?\b/.test(normalized)) {
+      actions.push({
+        kind: 'show_explanation',
+        viewId: activeViewId,
+        targetKind: openTarget.targetKind,
+        targetId: openTarget.targetId,
+      });
+    }
+  }
+
+  if (activeViewId && /\bcompare\b/.test(normalized) && /\brevision|previous|change|diff\b/.test(normalized)) {
+    actions.push({
+      kind: 'compare_revisions',
+      viewId: activeViewId,
+      leftRevisionId: 'latest',
+      rightRevisionId: 'previous',
+    });
   }
 
   if (activeViewId && /\b(show|open|switch)\b/.test(normalized) && /\bview|workspace\b/.test(normalized) && !actions.some(action => action.kind === 'show_view')) {
@@ -55,6 +74,18 @@ export function planPresentationActionsFromText(
     reply: actions.length ? replyFor(actions, workspace) : 'I need a view or a more specific workspace action.',
     actions,
   });
+}
+
+function requestedTags(command: string): string[] {
+  const matches = [...command.matchAll(/\btag(?:ged)?\s+([a-z0-9_-]+)/g)].map(match => match[1]);
+  return [...new Set(matches)];
+}
+
+function requestedQuery(command: string): string {
+  const quoted = command.match(/"([^"]{2,80})"/)?.[1];
+  if (quoted) return quoted;
+  const search = command.match(/\b(?:search|filter)\s+(?:for\s+)?([a-z0-9 _-]{2,80})/)?.[1];
+  return search?.replace(/\b(strong|weak|conflicts?|review|map|gallery|board|compact)\b/g, '').trim() ?? '';
 }
 
 export function isPresentationOnlyCommand(commandText: string): boolean {
@@ -118,9 +149,11 @@ function replyFor(actions: PresentationAction[], workspace?: ViewWorkspaceArtifa
     }
     if (action.kind === 'set_filters') return `filter ${action.states.join(', ')}`;
     if (action.kind === 'open_resource') return `open ${action.targetKind}`;
+    if (action.kind === 'show_explanation') return 'show the explanation';
     if (action.kind === 'open_review') return `open ${action.queue} review`;
+    if (action.kind === 'compare_revisions') return 'compare revisions';
     if (action.kind === 'show_view') return 'show the active view';
-    return action.kind;
+    return 'update the presentation';
   });
   return labels.length ? `I will ${labels.join(', ')}.` : 'Done.';
 }

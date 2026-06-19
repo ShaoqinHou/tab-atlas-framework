@@ -44,6 +44,9 @@ describe('workspace dashboard shell', () => {
     expect(review).toContain('REVIEW_SESSION_STORAGE_KEY');
     expect(review).toContain('data-review-decision');
     expect(actions).toContain('startReviewSession');
+    expect(actions).toContain('show_explanation');
+    expect(actions).toContain('compare_revisions');
+    expect(actions).toContain('resolveRevisionComparison');
   });
 
   it('guards review shortcuts while editing notes', () => {

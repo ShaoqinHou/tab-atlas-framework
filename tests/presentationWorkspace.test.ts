@@ -183,6 +183,28 @@ describe('visual workspace projection', () => {
       targetId: 'res_game',
       inspectorTab: 'evidence',
     });
+
+    const explainPlan = planPresentationActionsFromText('explain why the strongest item belongs', {
+      activeViewId: 'view_game',
+      workspace,
+    });
+    expect(explainPlan.actions).toContainEqual({
+      kind: 'show_explanation',
+      viewId: 'view_game',
+      targetKind: 'resource',
+      targetId: 'res_game',
+    });
+
+    const comparePlan = planPresentationActionsFromText('compare with the previous revision', {
+      activeViewId: 'view_game',
+      workspace,
+    });
+    expect(comparePlan.actions).toContainEqual({
+      kind: 'compare_revisions',
+      viewId: 'view_game',
+      leftRevisionId: 'latest',
+      rightRevisionId: 'previous',
+    });
   });
 
   it('defines role-play coverage before human pilot use', () => {

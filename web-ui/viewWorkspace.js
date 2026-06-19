@@ -5,7 +5,8 @@ import { setState, state, subscribe } from './state.js';
 
 let workspace = null;
 let sectionPages = new Map();
-let stateFilter = 'visible';
+let stateFilters = ['visible'];
+let tagFilters = [];
 let queryFilter = '';
 
 export function initViewWorkspace() {
@@ -18,7 +19,8 @@ export function initViewWorkspace() {
   document.getElementById('viewFilters')?.addEventListener('click', event => {
     const button = event.target.closest('[data-state-filter]');
     if (!button) return;
-    stateFilter = button.dataset.stateFilter;
+    const value = button.dataset.stateFilter;
+    stateFilters = value === 'visible' ? ['visible'] : [value];
     renderFilters();
     renderWorkspace();
   });
@@ -75,8 +77,23 @@ export function focusWorkspaceSection(sectionId) {
 }
 
 export function setWorkspaceFilter(filter) {
-  stateFilter = filter || 'visible';
+  if (typeof filter === 'string') {
+    stateFilters = [filter || 'visible'];
+    tagFilters = [];
+    queryFilter = '';
+  } else {
+    stateFilters = filter.states?.length ? filter.states : ['visible'];
+    tagFilters = filter.tags ?? [];
+    queryFilter = filter.query?.toLowerCase() ?? '';
+  }
+  renderFilters();
   renderWorkspace();
+}
+
+export function showWorkspaceNotice(message) {
+  const target = document.getElementById('viewWorkspace');
+  if (!target) return;
+  target.insertAdjacentHTML('afterbegin', `<div class="notice">${escapeHtml(message)}</div>`);
 }
 
 function renderWorkspace() {
@@ -123,7 +140,7 @@ function renderFilters() {
   ];
   target.innerHTML = `
     <input id="workspaceSearch" class="workspace-search" type="search" placeholder="Filter" value="${escapeHtml(queryFilter)}">
-    ${filters.map(([id, label]) => `<button type="button" class="${stateFilter === id ? 'active' : ''}" data-state-filter="${id}">${label}</button>`).join('')}
+    ${filters.map(([id, label]) => `<button type="button" class="${stateFilters.includes(id) ? 'active' : ''}" data-state-filter="${id}">${label}</button>`).join('')}
   `;
 }
 
@@ -240,9 +257,10 @@ function visibleSections() {
     .map(section => {
       const cards = sectionPages.get(section.id) ?? section.cards;
       const visibleCards = cards.filter(card => {
-        const stateMatches = stateFilter === 'visible' ? card.state !== 'exclude' : card.state === stateFilter;
+        const stateMatches = stateFilters.includes('visible') ? card.state !== 'exclude' : stateFilters.includes(card.state);
+        const tagMatches = !tagFilters.length || tagFilters.some(tag => card.chips.map(chip => chip.toLowerCase()).includes(tag.toLowerCase()));
         const queryMatches = !queryFilter || `${card.title} ${card.host} ${card.summary ?? ''} ${card.reason}`.toLowerCase().includes(queryFilter);
-        return stateMatches && queryMatches;
+        return stateMatches && tagMatches && queryMatches;
       });
       return { ...section, visibleCards };
     })
