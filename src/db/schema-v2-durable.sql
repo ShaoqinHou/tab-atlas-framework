@@ -88,3 +88,20 @@ CREATE INDEX IF NOT EXISTS idx_membership_feedback_target
   ON membership_feedback(target_kind, target_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_membership_feedback_view
   ON membership_feedback(view_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS membership_feedback_undo (
+  feedback_id TEXT PRIMARY KEY REFERENCES membership_feedback(id) ON DELETE CASCADE,
+  membership_id TEXT NOT NULL REFERENCES memberships(id) ON DELETE CASCADE,
+  view_id TEXT NOT NULL REFERENCES views(id) ON DELETE CASCADE,
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  previous_state TEXT NOT NULL,
+  previous_section TEXT,
+  previous_reason TEXT,
+  previous_conflict_note TEXT,
+  previous_accepted_by_user INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_membership_feedback_undo_membership
+  ON membership_feedback_undo(membership_id, created_at DESC);

@@ -1,7 +1,7 @@
 import { getJson, postJson } from './api.js';
 import { openInspector } from './inspector.js';
 import { startReviewSession } from './review.js';
-import { focusWorkspaceSection, getCurrentWorkspace, refreshViewWorkspace, setWorkspaceFilter, showWorkspaceNotice } from './viewWorkspace.js';
+import { focusWorkspaceSection, getCurrentWorkspace, refreshViewWorkspace, setWorkspaceFilter, showRevisionComparison, showWorkspaceNotice } from './viewWorkspace.js';
 import { setState, state } from './state.js';
 
 export async function requestPresentationPlan(command) {
@@ -31,7 +31,7 @@ export async function executePresentationPlan(plan) {
         viewId: state.activeViewId,
       });
     } else if (action.kind === 'open_review') {
-      await startReviewSession(action.queue);
+      await startReviewSession(action.queue, { sourceViewId: action.sourceViewId });
     } else if (action.kind === 'show_explanation') {
       await openInspector(action.targetKind, action.targetId, {
         tab: 'evidence',
@@ -45,7 +45,8 @@ export async function executePresentationPlan(plan) {
       }
     } else if (action.kind === 'compare_revisions') {
       const comparison = await resolveRevisionComparison(action);
-      showWorkspaceNotice(comparison);
+      if (typeof comparison === 'string') showWorkspaceNotice(comparison);
+      else showRevisionComparison(comparison);
     }
   }
   return true;
@@ -56,8 +57,7 @@ async function resolveRevisionComparison(action) {
   const left = action.leftRevisionId === 'latest' ? revisions[0]?.id : action.leftRevisionId;
   const right = action.rightRevisionId === 'previous' ? revisions[1]?.id : action.rightRevisionId;
   if (!left || !right) return 'Revision comparison is unavailable until this view has at least two revisions.';
-  const compared = await getJson(`/api/views/${encodeURIComponent(action.viewId)}/revisions/${encodeURIComponent(left)}/compare?otherRevisionId=${encodeURIComponent(right)}`);
-  return `Compared revision ${compared.left.revisionNumber} with revision ${compared.right.revisionNumber}.`;
+  return getJson(`/api/views/${encodeURIComponent(action.viewId)}/revisions/${encodeURIComponent(left)}/compare?otherRevisionId=${encodeURIComponent(right)}`);
 }
 
 export function hasActiveWorkspace() {

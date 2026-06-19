@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const ReviewSessionType = z.enum([
   'unmarked',
+  'ambiguous',
   'ambiguous_command',
   'weak_matches',
   'conflicts',
@@ -24,6 +25,8 @@ export const ReviewSessionCreateInput = z.object({
   type: ReviewSessionType.default('unmarked'),
   title: z.string().optional(),
   commandText: z.string().optional(),
+  sourceViewId: z.string().optional(),
+  explicitResourceIds: z.array(z.string()).optional(),
   resourceIds: z.array(z.string()).optional(),
   preload: z.number().int().positive().max(20).default(4),
 });

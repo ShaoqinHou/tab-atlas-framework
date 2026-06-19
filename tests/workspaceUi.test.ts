@@ -50,6 +50,8 @@ describe('workspace dashboard shell', () => {
     expect(review).toContain('review-next-card');
     expect(review).toContain("state.remoteMedia !== 'off'");
     expect(conversation).toContain('handleCompletedActionResults');
+    expect(conversation).toContain('actionStateSnapshot');
+    expect(conversation).toContain('previousStates');
     expect(conversation).toContain("kind === 'start_review'");
     expect(conversation).toContain("kind === 'explain_membership'");
     expect(conversation).toContain("kind === 'add_annotation'");
@@ -59,6 +61,7 @@ describe('workspace dashboard shell', () => {
     expect(actions).toContain('show_explanation');
     expect(actions).toContain('compare_revisions');
     expect(actions).toContain('resolveRevisionComparison');
+    expect(actions).toContain('showRevisionComparison');
   });
 
   it('guards review shortcuts while editing notes', () => {
@@ -92,6 +95,9 @@ describe('workspace dashboard shell', () => {
     expect(operations).toContain('data-save-rotated-token');
     expect(operations).toContain('data-extension-repair');
     expect(operations).toContain('data-ack-rotated-token');
+    expect(operations).toContain('data-ack-pairing-secret');
+    expect(operations).toContain('/re-pair');
+    expect(operations).not.toContain("browser: 'extension'");
     expect(operations).toContain('Extension rotation requires re-pairing');
     expect(inspector).toContain('/api/membership-feedback');
     expect(inspector).toContain('/api/membership-feedback/${encodeURIComponent(undo.dataset.correctionUndo)}/undo');
@@ -120,6 +126,8 @@ describe('workspace dashboard shell', () => {
     expect(workspace).toContain('hostSummary(section.visibleCards)');
     expect(workspace).toContain('persistSectionPageCounts');
     expect(workspace).toContain('restoreWorkspaceScroll');
+    expect(workspace).toContain('showRevisionComparison');
+    expect(workspace).toContain('revision-comparison');
     expect(state).toContain('workspaceStateFilters');
     expect(state).toContain('workspaceQueryFilter');
     expect(state).toContain('workspaceScrollTop');
@@ -160,6 +168,12 @@ describe('workspace dashboard shell', () => {
     expect(evalScript).toContain("roleplay('returning-user')");
     expect(evalScript).toContain('TABATLAS_FAKE_CODEX_PROVIDER');
     expect(evalScript).toContain('large-workspace-${size}');
+    expect(evalScript).toContain('integrity-extension-repair');
+    expect(evalScript).toContain('integrity-review-queues');
+    expect(evalScript).toContain('integrity-mixed-conversation');
+    expect(evalScript).toContain('integrity-server-owned-undo');
+    expect(evalScript).toContain('integrity-action-replay');
+    expect(evalScript).toContain('integrity-revision-comparison');
     expect(evalScript).toContain('axeAccessibilityCheck');
     expect(evalScript).toContain("axeAccessibilityCheck(page, 'ask-conversation')");
     expect(evalScript).toContain("axeAccessibilityCheck(page, 'board-gallery-map')");

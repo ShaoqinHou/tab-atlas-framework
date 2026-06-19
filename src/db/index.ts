@@ -26,6 +26,7 @@ function runLightweightMigrations(db: Database.Database): void {
   ensureColumn(db, 'agent_actions', 'execution_started_at', 'TEXT');
   ensureColumn(db, 'agent_actions', 'model_action_key', 'TEXT');
   ensureColumn(db, 'agent_actions', 'action_ordinal', 'INTEGER');
+  ensureColumn(db, 'review_sessions', 'source_view_id', 'TEXT REFERENCES views(id) ON DELETE SET NULL');
   ensureColumn(db, 'codex_provider_threads', 'model', "TEXT NOT NULL DEFAULT 'gpt-5.5'");
   ensureColumn(db, 'codex_provider_threads', 'reasoning_effort', "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn(db, 'codex_provider_threads', 'owner_key', "TEXT NOT NULL DEFAULT 'local'");

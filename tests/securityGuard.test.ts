@@ -2,8 +2,9 @@ import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
 import { createCapability, revokeCapability } from '../src/security/localCapability.js';
 import { createPairingChallenge, exchangePairingChallenge } from '../src/security/pairingChallenge.js';
-import { installLocalRequestGuard, requiredScopeFor } from '../src/security/localRequestGuard.js';
+import { installLocalRequestGuard, requiredScopeFor, writeSecurityAuditRecord } from '../src/security/localRequestGuard.js';
 import { openDatabase } from '../src/db/index.js';
+import { rePairExtensionCapability } from '../src/security/extensionRepair.js';
 
 function guardedApp() {
   const db = openDatabase(':memory:');
@@ -27,6 +28,19 @@ function guardedApp() {
       label: 'Test extension',
       throttleKey: 'test',
     });
+  });
+  app.post('/api/security/capabilities/:id/re-pair', async (request, reply) => {
+    const params = request.params as { id: string };
+    const repaired = rePairExtensionCapability(db, params.id);
+    writeSecurityAuditRecord(db, {
+      eventType: 'extension_repair',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      capabilityId: repaired.revokedCapability.id,
+      details: { browser: repaired.browser, challengeId: repaired.challenge.id, expiresAt: repaired.expiresAt },
+    });
+    return reply.send(repaired);
   });
   return { app, db };
 }
@@ -150,6 +164,52 @@ describe('local request guard', () => {
     expect(snapshot.statusCode).toBe(200);
     expect(generalApi.statusCode).toBe(401);
     expect(JSON.stringify(db.prepare('SELECT * FROM snapshots').all())).not.toContain(payload.token);
+  });
+
+  it('revokes and re-pairs extension capabilities without auditing the secret', async () => {
+    const { app, db } = guardedApp();
+    const admin = createCapability(db, { kind: 'ui', scopes: ['admin'] });
+    const challenge = createPairingChallenge(db, { browser: 'chrome', ttlMs: 60_000 });
+    const paired = exchangePairingChallenge(db, {
+      challengeId: challenge.challenge.id,
+      secret: challenge.secret,
+      browser: 'chrome',
+      label: 'chrome extension',
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/security/capabilities/${paired.capability.id}/re-pair`,
+      headers: { ...localHeaders, 'x-tab-atlas-token': admin.token },
+    });
+    const payload = response.json() as { browser: string; challenge: { id: string; browser: string }; secret: string };
+    const oldSnapshot = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      headers: { ...localHeaders, 'x-tab-atlas-token': paired.token },
+      payload: { capturedAt: '2026-06-18T00:00:00.000Z', tabs: [] },
+    });
+    const exchanged = exchangePairingChallenge(db, {
+      challengeId: payload.challenge.id,
+      secret: payload.secret,
+      browser: 'chrome',
+      label: 'chrome extension repaired',
+    });
+    const newSnapshot = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      headers: { ...localHeaders, 'x-tab-atlas-token': exchanged.token },
+      payload: { capturedAt: '2026-06-18T00:00:01.000Z', tabs: [] },
+    });
+    const audits = JSON.stringify(db.prepare('SELECT * FROM security_audit_events').all());
+
+    expect(response.statusCode).toBe(200);
+    expect(payload.browser).toBe('chrome');
+    expect(payload.challenge.browser).toBe('chrome');
+    expect(oldSnapshot.statusCode).toBe(401);
+    expect(newSnapshot.statusCode).toBe(200);
+    expect(audits).toContain(payload.challenge.id);
+    expect(audits).not.toContain(payload.secret);
   });
 
   it('locks pairing challenges after bounded wrong attempts', async () => {

@@ -61,15 +61,22 @@ async function ensureThread() {
 }
 
 async function sendMessage(content) {
+  const priorActionStates = actionStateSnapshot();
   appendMessage('user', content);
   try {
     snapshot = await postJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}/messages`, {
       content,
       activeViewId: state.activeViewId || undefined,
+      currentLayout: state.layout,
+      currentFilters: {
+        states: state.workspaceStateFilters,
+        tags: state.workspaceTagFilters,
+        query: state.workspaceQueryFilter,
+      },
     });
     renderConversation();
     await executeLatestPresentationPlan();
-    await handleCompletedActionResults();
+    await handleCompletedActionResults(priorActionStates);
   } catch (error) {
     appendMessage('assistant', `I could not run that request: ${error.message}`);
   }
@@ -132,10 +139,11 @@ function renderActionCard(action) {
 
 async function confirmAction(actionId) {
   if (!actionId) return;
+  const priorActionStates = actionStateSnapshot();
   await postJson(`/api/agent-actions/${encodeURIComponent(actionId)}/confirm`, {});
   snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
   renderConversation();
-  await handleCompletedActionResults();
+  await handleCompletedActionResults(priorActionStates);
 }
 
 async function cancelAction(actionId) {
@@ -154,10 +162,17 @@ async function executeLatestPresentationPlan() {
   await executePresentationPlan(message.context.presentationPlan);
 }
 
-async function handleCompletedActionResults() {
+function actionStateSnapshot() {
+  return new Map((snapshot?.actions ?? []).map(action => [action.id, action.status]));
+}
+
+async function handleCompletedActionResults(previousStates = new Map()) {
   const actions = snapshot?.actions ?? [];
   for (const action of actions) {
-    if (action.status !== 'succeeded' || !action.result || handledActionIds.has(action.id)) continue;
+    const previousStatus = previousStates.get(action.id);
+    const becameSucceeded = action.status === 'succeeded'
+      && (!previousStates.has(action.id) || previousStatus !== 'succeeded');
+    if (!becameSucceeded || !action.result || handledActionIds.has(action.id)) continue;
     handledActionIds.add(action.id);
     await routeActionResult(action);
   }

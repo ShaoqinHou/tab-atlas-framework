@@ -91,7 +91,8 @@ function requestedQuery(command: string): string {
 export function isPresentationOnlyCommand(commandText: string): boolean {
   const normalized = commandText.toLowerCase();
   const hasPresentationVerb = /\b(show|switch|focus|open|filter|hide|layout|gallery|board|map|compact|review|inspect|explain|compare)\b/.test(normalized);
-  const hasSemanticIntent = /\b(make|create|build|find|collect|organize|group|classify|plan|search|scan|extract|summari[sz]e|new view|taxonomy)\b/.test(normalized);
+  const hasSemanticIntent = /\b(refine|exclude|include|remove|add|change|update|correct|reclassify|move|make|create|build|find|collect|organize|group|classify|plan|search|scan|extract|summari[sz]e|new view|taxonomy|stricter|looser)\b/.test(normalized)
+    || /\bmake\s+(?:the\s+view\s+)?(?:stricter|looser)\b/.test(normalized);
   return hasPresentationVerb && !hasSemanticIntent;
 }
 

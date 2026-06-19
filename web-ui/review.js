@@ -2,7 +2,6 @@ import { getJson, postJson } from './api.js';
 import { openInspector } from './inspector.js';
 import { escapeHtml } from './shell.js';
 import { setState, state, subscribe } from './state.js';
-import { getCurrentWorkspace } from './viewWorkspace.js';
 
 const REVIEW_SESSION_STORAGE_KEY = 'tabatlas.workspace.reviewSessionId';
 let snapshot = null;
@@ -52,16 +51,16 @@ export function initReviewWorkspace() {
   renderReview();
 }
 
-export async function startReviewSession(queue = 'unmarked') {
+export async function startReviewSession(queue = 'unmarked', options = {}) {
   if (busy) return;
   busy = true;
   try {
-    const resourceIds = resourceIdsForQueue(queue);
+    const sourceViewId = options.sourceViewId || sourceViewIdForQueue(queue);
     snapshot = await postJson('/api/review-sessions', {
       type: reviewTypeForQueue(queue),
       title: titleForQueue(queue),
       commandText: queue,
-      resourceIds: resourceIds.length ? resourceIds : undefined,
+      sourceViewId,
       preload: 5,
     });
     localStorage.setItem(REVIEW_SESSION_STORAGE_KEY, snapshot.session.id);
@@ -327,32 +326,24 @@ function isEditableTarget(target) {
     || Boolean(target.closest('[contenteditable="true"]'));
 }
 
-function resourceIdsForQueue(queue) {
-  const workspace = getCurrentWorkspace();
-  if (!workspace) return [];
-  const cards = queue === 'unmarked'
-    ? workspace.sections.flatMap(section => section.cards)
-    : workspace.reviewLane;
-  return cards
-    .filter(card => card.targetKind === 'resource')
-    .filter(card => {
-      if (queue === 'weak') return card.state === 'weak_include' || card.state === 'needs_review';
-      if (queue === 'conflict') return card.state === 'conflict';
-      return true;
-    })
-    .map(card => card.targetId);
-}
-
 function reviewTypeForQueue(queue) {
   if (queue === 'weak' || queue === 'needs_review') return 'weak_matches';
   if (queue === 'conflict') return 'conflicts';
+  if (queue === 'ambiguous') return 'ambiguous';
   if (queue === 'extraction_failure') return 'extraction_failures';
   return 'unmarked';
+}
+
+function sourceViewIdForQueue(queue) {
+  return ['weak', 'needs_review', 'conflict', 'ambiguous'].includes(queue)
+    ? state.activeViewId || undefined
+    : undefined;
 }
 
 function titleForQueue(queue) {
   if (queue === 'weak' || queue === 'needs_review') return 'Weak match review';
   if (queue === 'conflict') return 'Conflict review';
+  if (queue === 'ambiguous') return 'Ambiguous item review';
   if (queue === 'extraction_failure') return 'Extraction failure review';
   return 'Unmarked review';
 }

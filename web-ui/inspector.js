@@ -209,11 +209,6 @@ async function handleInspectorAction(event) {
       correctedMeaning: correctedMeaning || undefined,
       preferredTags,
       sectionSuggestion: sectionSuggestion || undefined,
-      previousMembership: {
-        state: currentInspector.currentViewMembership.state,
-        section: currentInspector.currentViewMembership.section,
-        reason: currentInspector.currentViewMembership.reason,
-      },
     },
     reason: reason || undefined,
     scopeMode: 'intent',

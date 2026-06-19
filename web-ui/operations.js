@@ -213,12 +213,15 @@ async function handleSecurityAction(event) {
     writeSecurityRotation('Rotated token acknowledged. TabAtlas did not store it.');
     return;
   }
+  if (event.target.closest('[data-ack-pairing-secret]')) {
+    writeSecurityRotation('Pairing secret acknowledged. The one-time secret has been removed from this page.');
+    return;
+  }
   const repair = event.target.closest('[data-extension-repair]');
   if (repair) {
-    await postJson(`/api/security/capabilities/${encodeURIComponent(repair.dataset.extensionRepair)}/revoke`, {});
-    const result = await postJson('/api/security/pairing-codes', { browser: 'extension', label: 'Re-paired extension' });
+    const result = await postJson(`/api/security/capabilities/${encodeURIComponent(repair.dataset.extensionRepair)}/re-pair`, {});
     await refreshSecurity();
-    writeSecurityRotation(`Extension capability revoked. Re-pair using challenge ${result.challenge?.id || result.challengeId || 'created'}; the old extension token will not work.`);
+    writeExtensionRepair(result);
     return;
   }
   const button = event.target.closest('[data-capability-action]');
@@ -257,6 +260,25 @@ function writeRotatedCapability(result) {
       ${dashboardAction}
       <button type="button" data-ack-rotated-token>Acknowledge</button>
     </div>
+  `, true);
+}
+
+function writeExtensionRepair(result) {
+  const challenge = result.challenge ?? {};
+  const browser = result.browser || challenge.browser || 'browser';
+  const challengeId = challenge.id || '';
+  const secret = result.secret || '';
+  writeSecurityRotation(`
+    <strong>${escapeHtml(browser)} extension re-pair challenge</strong>
+    <p>Open the ${escapeHtml(browser)} TabAtlas extension popup and paste both values. The revoked extension token stops working immediately.</p>
+    <div class="pairing-secret-grid">
+      <label>Challenge ID <code class="one-time-token">${escapeHtml(challengeId)}</code></label>
+      <button type="button" data-copy-token="${escapeHtml(challengeId)}">Copy challenge ID</button>
+      <label>Secret <code class="one-time-token">${escapeHtml(secret)}</code></label>
+      <button type="button" data-copy-token="${escapeHtml(secret)}">Copy secret</button>
+    </div>
+    <p class="muted">Expires ${escapeHtml(result.expiresAt || challenge.expiresAt || 'soon')}.</p>
+    <button type="button" data-ack-pairing-secret>Acknowledge</button>
   `, true);
 }
 

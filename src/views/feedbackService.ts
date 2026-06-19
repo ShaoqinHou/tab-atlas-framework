@@ -5,6 +5,7 @@ import {
   evaluateFeedbackForIntent,
   saveFeedbackIntentContext,
 } from '../preferences/feedbackContextService.js';
+import { redactSensitiveText } from '../security/urlPrivacy.js';
 
 export const ViewRevisionStatus = z.enum(['proposed', 'accepted', 'superseded', 'rejected']);
 export const MembershipFeedbackDecision = z.enum(['accept', 'reject', 'correct', 'pin_include', 'pin_exclude']);
@@ -45,6 +46,51 @@ export interface ViewRevisionRecord {
   createdAt: string;
 }
 
+export interface ViewRevisionComparison {
+  left: ViewRevisionRecord;
+  right: ViewRevisionRecord;
+  comparable: boolean;
+  unavailableReason?: string;
+  summary: {
+    added: number;
+    removed: number;
+    changed: number;
+    goalChanged: boolean;
+    rulesChanged: boolean;
+  };
+  changes: {
+    addedTargets: RevisionTargetChange[];
+    removedTargets: RevisionTargetChange[];
+    membershipChanges: RevisionMembershipChange[];
+    goalChange?: { from: string; to: string };
+    ruleChanges: Array<{ kind: 'added' | 'removed'; rule: string }>;
+  };
+}
+
+export interface RevisionTargetChange {
+  targetKind: 'resource' | 'atomic_item';
+  targetId: string;
+  parentResourceId?: string;
+  title: string;
+  host: string;
+  state?: string;
+  section?: string;
+  confidence?: number;
+}
+
+export interface RevisionMembershipChange extends RevisionTargetChange {
+  before: {
+    state: string;
+    section?: string;
+    confidence: number;
+  };
+  after: {
+    state: string;
+    section?: string;
+    confidence: number;
+  };
+}
+
 export interface MembershipFeedbackRecord {
   id: string;
   viewId: string;
@@ -61,6 +107,18 @@ export interface MembershipFeedbackRecord {
     message: string;
   };
 }
+
+type MembershipUndoSnapshot = {
+  id: string;
+  view_id: string;
+  target_kind: 'resource' | 'atomic_item';
+  target_id: string;
+  state: string;
+  section: string | null;
+  reason: string | null;
+  conflict_note: string | null;
+  accepted_by_user: number;
+};
 
 type ViewRevisionRow = {
   id: string;
@@ -128,7 +186,15 @@ export function createViewRevision(
 }
 
 export function listViewRevisions(db: Database.Database, viewId: string): ViewRevisionRecord[] {
-  const rows = db.prepare(`
+  const latest = getLatestViewRevision(db, viewId);
+  const rows = latest
+    ? db.prepare(`
+        SELECT id, lineage_id, view_id, parent_revision_id, command_id, revision_number, status, snapshot_json, created_at
+        FROM view_revisions
+        WHERE lineage_id = ?
+        ORDER BY revision_number DESC
+      `).all(latest.lineageId) as ViewRevisionRow[]
+    : db.prepare(`
     SELECT id, lineage_id, view_id, parent_revision_id, command_id, revision_number, status, snapshot_json, created_at
     FROM view_revisions
     WHERE view_id = ?
@@ -188,13 +254,69 @@ export function rejectViewRevision(db: Database.Database, revisionId: string): V
   return getViewRevision(db, revisionId);
 }
 
-export function compareViewRevisions(db: Database.Database, leftRevisionId: string, rightRevisionId: string): {
-  left: ViewRevisionRecord;
-  right: ViewRevisionRecord;
-} {
+export function compareViewRevisions(db: Database.Database, leftRevisionId: string, rightRevisionId: string): ViewRevisionComparison {
+  const left = getViewRevision(db, leftRevisionId);
+  const right = getViewRevision(db, rightRevisionId);
+  if (left.lineageId !== right.lineageId) {
+    return {
+      left,
+      right,
+      comparable: false,
+      unavailableReason: 'Revisions are from different lineages.',
+      summary: { added: 0, removed: 0, changed: 0, goalChanged: false, rulesChanged: false },
+      changes: { addedTargets: [], removedTargets: [], membershipChanges: [], ruleChanges: [] },
+    };
+  }
+  const leftSnapshot = normalizeRevisionSnapshot(left.snapshot);
+  const rightSnapshot = normalizeRevisionSnapshot(right.snapshot);
+  const leftMembers = new Map(leftSnapshot.memberships.map(member => [memberKey(member), member]));
+  const rightMembers = new Map(rightSnapshot.memberships.map(member => [memberKey(member), member]));
+  const addedTargets = [...leftMembers.entries()]
+    .filter(([key]) => !rightMembers.has(key))
+    .map(([, member]) => targetChangeForMember(db, member));
+  const removedTargets = [...rightMembers.entries()]
+    .filter(([key]) => !leftMembers.has(key))
+    .map(([, member]) => targetChangeForMember(db, member));
+  const membershipChanges = [...leftMembers.entries()].flatMap(([key, after]) => {
+    const before = rightMembers.get(key);
+    if (!before || !membershipChanged(before, after)) return [];
+    return [{
+      ...targetChangeForMember(db, after),
+      before: {
+        state: before.state,
+        section: before.section,
+        confidence: before.confidence,
+      },
+      after: {
+        state: after.state,
+        section: after.section,
+        confidence: after.confidence,
+      },
+    }];
+  });
+  const goalChange = leftSnapshot.goal === rightSnapshot.goal ? undefined : {
+    from: rightSnapshot.goal,
+    to: leftSnapshot.goal,
+  };
+  const ruleChanges = diffRules(rightSnapshot.rules, leftSnapshot.rules);
   return {
-    left: getViewRevision(db, leftRevisionId),
-    right: getViewRevision(db, rightRevisionId),
+    left,
+    right,
+    comparable: true,
+    summary: {
+      added: addedTargets.length,
+      removed: removedTargets.length,
+      changed: membershipChanges.length,
+      goalChanged: Boolean(goalChange),
+      rulesChanged: ruleChanges.length > 0,
+    },
+    changes: {
+      addedTargets,
+      removedTargets,
+      membershipChanges,
+      goalChange,
+      ruleChanges,
+    },
   };
 }
 
@@ -205,32 +327,44 @@ export function recordMembershipFeedback(
   const parsed = RecordMembershipFeedbackInput.parse(input);
   const id = `feedback_${nanoid()}`;
   const createdAt = new Date().toISOString();
-  db.prepare(`
-    INSERT INTO membership_feedback
-      (id, view_id, membership_id, target_kind, target_id, decision, correction_json, reason, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    parsed.viewId,
-    parsed.membershipId ?? null,
-    parsed.targetKind,
-    parsed.targetId,
-    parsed.decision,
-    parsed.correction === undefined ? null : JSON.stringify(parsed.correction),
-    parsed.reason ?? null,
-    createdAt,
-  );
-  const source = feedbackSourceContext(db, parsed.viewId);
-  saveFeedbackIntentContext(db, {
-    feedbackId: id,
-    mode: parsed.scopeMode,
-    sourceViewId: parsed.viewId,
-    sourceRevisionId: parsed.sourceRevisionId ?? source.revisionId,
-    sourceCommandText: parsed.sourceCommandText ?? source.commandText,
-    sourceGoal: parsed.sourceGoal ?? source.goal,
-    sourceRules: parsed.sourceRules ?? source.rules,
-  });
-  const consequence = applyMembershipFeedbackConsequence(db, parsed);
+  const correction = sanitizeCorrection(parsed.correction);
+  const consequence = db.transaction(() => {
+    const undo = parsed.membershipId
+      ? loadUndoSnapshot(db, {
+        membershipId: parsed.membershipId,
+        viewId: parsed.viewId,
+        targetKind: parsed.targetKind,
+        targetId: parsed.targetId,
+      })
+      : null;
+    db.prepare(`
+      INSERT INTO membership_feedback
+        (id, view_id, membership_id, target_kind, target_id, decision, correction_json, reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      parsed.viewId,
+      parsed.membershipId ?? null,
+      parsed.targetKind,
+      parsed.targetId,
+      parsed.decision,
+      correction === undefined ? null : JSON.stringify(correction),
+      parsed.reason ?? null,
+      createdAt,
+    );
+    if (undo) storeUndoSnapshot(db, id, undo, createdAt);
+    const source = feedbackSourceContext(db, parsed.viewId);
+    saveFeedbackIntentContext(db, {
+      feedbackId: id,
+      mode: parsed.scopeMode,
+      sourceViewId: parsed.viewId,
+      sourceRevisionId: parsed.sourceRevisionId ?? source.revisionId,
+      sourceCommandText: parsed.sourceCommandText ?? source.commandText,
+      sourceGoal: parsed.sourceGoal ?? source.goal,
+      sourceRules: parsed.sourceRules ?? source.rules,
+    });
+    return applyMembershipFeedbackConsequence(db, { ...parsed, correction });
+  })();
   return {
     id,
     viewId: parsed.viewId,
@@ -238,7 +372,7 @@ export function recordMembershipFeedback(
     targetKind: parsed.targetKind,
     targetId: parsed.targetId,
     decision: parsed.decision,
-    correction: parsed.correction,
+    correction,
     reason: parsed.reason,
     createdAt,
     consequence,
@@ -250,37 +384,51 @@ export function undoMembershipFeedback(
   feedbackId: string,
 ): { undone: true; feedbackId: string; restoredState?: string; message: string } {
   const row = db.prepare(`
-    SELECT id, view_id, membership_id, correction_json
-    FROM membership_feedback
-    WHERE id = ?
-  `).get(feedbackId) as { id: string; view_id: string; membership_id: string | null; correction_json: string | null } | undefined;
+    SELECT f.id, f.view_id, f.membership_id,
+           u.previous_state, u.previous_section, u.previous_reason, u.previous_conflict_note, u.previous_accepted_by_user
+    FROM membership_feedback f
+    LEFT JOIN membership_feedback_undo u ON u.feedback_id = f.id
+    WHERE f.id = ?
+  `).get(feedbackId) as {
+    id: string;
+    view_id: string;
+    membership_id: string | null;
+    previous_state: string | null;
+    previous_section: string | null;
+    previous_reason: string | null;
+    previous_conflict_note: string | null;
+    previous_accepted_by_user: number | null;
+  } | undefined;
   if (!row) throw new Error(`Feedback not found: ${feedbackId}`);
-  const correction = parseJson(row.correction_json ?? '{}') as { previousMembership?: { state?: string; section?: string; reason?: string; conflictNote?: string } } | undefined;
-  const previous = correction?.previousMembership;
-  if (row.membership_id && previous?.state) {
-    db.prepare(`
-      UPDATE memberships
-      SET state = ?,
-          section = COALESCE(?, section),
-          reason = COALESCE(?, reason),
-          conflict_note = ?
-      WHERE id = ? AND view_id = ?
-    `).run(
-      previous.state,
-      previous.section ?? null,
-      previous.reason ?? null,
-      previous.conflictNote ?? null,
-      row.membership_id,
-      row.view_id,
-    );
-  }
-  db.prepare(`DELETE FROM membership_feedback WHERE id = ?`).run(feedbackId);
+  db.transaction(() => {
+    if (row.membership_id && row.previous_state) {
+      assertLatestFeedbackForMembership(db, feedbackId, row.membership_id);
+      db.prepare(`
+        UPDATE memberships
+        SET state = ?,
+            section = ?,
+            reason = ?,
+            conflict_note = ?,
+            accepted_by_user = ?
+        WHERE id = ? AND view_id = ?
+      `).run(
+        row.previous_state,
+        row.previous_section,
+        row.previous_reason,
+        row.previous_conflict_note,
+        row.previous_accepted_by_user ?? 0,
+        row.membership_id,
+        row.view_id,
+      );
+    }
+    db.prepare(`DELETE FROM membership_feedback WHERE id = ?`).run(feedbackId);
+  })();
   return {
     undone: true,
     feedbackId,
-    restoredState: previous?.state,
-    message: previous?.state
-      ? `Removed correction and restored this membership to ${previous.state}.`
+    restoredState: row.previous_state ?? undefined,
+    message: row.previous_state
+      ? `Removed correction and restored this membership to ${row.previous_state}.`
       : 'Removed correction. Re-run refinement if this view needs a prior state restored.',
   };
 }
@@ -343,6 +491,209 @@ export function buildPreferenceEvidence(
         feedbackId: feedback.id,
       }];
     });
+}
+
+function loadUndoSnapshot(
+  db: Database.Database,
+  input: {
+    membershipId: string;
+    viewId: string;
+    targetKind: 'resource' | 'atomic_item';
+    targetId: string;
+  },
+): MembershipUndoSnapshot {
+  const row = db.prepare(`
+    SELECT id, view_id, target_kind, target_id, state, section, reason, conflict_note, accepted_by_user
+    FROM memberships
+    WHERE id = ? AND view_id = ? AND target_kind = ? AND target_id = ?
+  `).get(input.membershipId, input.viewId, input.targetKind, input.targetId) as MembershipUndoSnapshot | undefined;
+  if (!row) {
+    throw new Error('Membership does not match the supplied view and target');
+  }
+  return row;
+}
+
+function storeUndoSnapshot(
+  db: Database.Database,
+  feedbackId: string,
+  snapshot: MembershipUndoSnapshot,
+  createdAt: string,
+): void {
+  db.prepare(`
+    INSERT INTO membership_feedback_undo
+      (feedback_id, membership_id, view_id, target_kind, target_id, previous_state, previous_section,
+       previous_reason, previous_conflict_note, previous_accepted_by_user, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    feedbackId,
+    snapshot.id,
+    snapshot.view_id,
+    snapshot.target_kind,
+    snapshot.target_id,
+    snapshot.state,
+    snapshot.section,
+    snapshot.reason,
+    snapshot.conflict_note,
+    snapshot.accepted_by_user,
+    createdAt,
+  );
+}
+
+function assertLatestFeedbackForMembership(
+  db: Database.Database,
+  feedbackId: string,
+  membershipId: string,
+): void {
+  const latest = db.prepare(`
+    SELECT f.id
+    FROM membership_feedback f
+    JOIN membership_feedback_undo u ON u.feedback_id = f.id
+    WHERE f.membership_id = ?
+    ORDER BY f.rowid DESC
+    LIMIT 1
+  `).get(membershipId) as { id: string } | undefined;
+  if (latest && latest.id !== feedbackId) {
+    throw new Error('Cannot undo a stale correction after a newer correction was applied');
+  }
+}
+
+function sanitizeCorrection(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const rest = { ...(value as Record<string, unknown>) };
+  delete rest.previousMembership;
+  return rest;
+}
+
+function normalizeRevisionSnapshot(snapshot: unknown): {
+  goal: string;
+  rules: string[];
+  memberships: Array<{
+    targetKind: 'resource' | 'atomic_item';
+    targetId: string;
+    state: string;
+    section?: string;
+    confidence: number;
+  }>;
+} {
+  const root = snapshot && typeof snapshot === 'object' ? snapshot as Record<string, unknown> : {};
+  const view = root.view && typeof root.view === 'object' ? root.view as Record<string, unknown> : root;
+  const memberships = Array.isArray(view.memberships)
+    ? view.memberships.flatMap(item => normalizeRevisionMembership(item))
+    : [];
+  return {
+    goal: stringValue(view.goal),
+    rules: [
+      ...stringArray(view.rules),
+      ...stringArray(view.inclusionRules),
+      ...stringArray(view.exclusionRules),
+    ],
+    memberships,
+  };
+}
+
+function normalizeRevisionMembership(value: unknown): Array<{
+  targetKind: 'resource' | 'atomic_item';
+  targetId: string;
+  state: string;
+  section?: string;
+  confidence: number;
+}> {
+  if (!value || typeof value !== 'object') return [];
+  const raw = value as Record<string, unknown>;
+  const targetKind = raw.targetKind === 'atomic_item' ? 'atomic_item' : raw.targetKind === 'resource' ? 'resource' : null;
+  const targetId = typeof raw.targetId === 'string' ? raw.targetId : '';
+  const state = typeof raw.state === 'string' ? raw.state : '';
+  if (!targetKind || !targetId || !state) return [];
+  return [{
+    targetKind,
+    targetId,
+    state,
+    section: typeof raw.section === 'string' ? raw.section : undefined,
+    confidence: typeof raw.confidence === 'number' ? raw.confidence : 0,
+  }];
+}
+
+function memberKey(member: { targetKind: string; targetId: string }): string {
+  return `${member.targetKind}:${member.targetId}`;
+}
+
+function membershipChanged(
+  before: { state: string; section?: string; confidence: number },
+  after: { state: string; section?: string; confidence: number },
+): boolean {
+  return before.state !== after.state
+    || (before.section ?? '') !== (after.section ?? '')
+    || Math.abs(before.confidence - after.confidence) >= 0.001;
+}
+
+function targetChangeForMember(
+  db: Database.Database,
+  member: {
+    targetKind: 'resource' | 'atomic_item';
+    targetId: string;
+    state: string;
+    section?: string;
+    confidence: number;
+  },
+): RevisionTargetChange {
+  const target = targetInfo(db, member.targetKind, member.targetId);
+  return {
+    ...target,
+    state: member.state,
+    section: member.section,
+    confidence: member.confidence,
+  };
+}
+
+function targetInfo(
+  db: Database.Database,
+  targetKind: 'resource' | 'atomic_item',
+  targetId: string,
+): Pick<RevisionTargetChange, 'targetKind' | 'targetId' | 'parentResourceId' | 'title' | 'host'> {
+  if (targetKind === 'resource') {
+    const row = db.prepare(`
+      SELECT title_best, host
+      FROM resources
+      WHERE id = ?
+    `).get(targetId) as { title_best: string | null; host: string } | undefined;
+    return {
+      targetKind,
+      targetId,
+      title: redactSensitiveText(row?.title_best ?? '(untitled resource)'),
+      host: row?.host ?? '',
+    };
+  }
+  const row = db.prepare(`
+    SELECT ai.resource_id, ai.name, r.host
+    FROM atomic_items ai
+    JOIN resources r ON r.id = ai.resource_id
+    WHERE ai.id = ?
+  `).get(targetId) as { resource_id: string; name: string; host: string } | undefined;
+  return {
+    targetKind,
+    targetId,
+    parentResourceId: row?.resource_id,
+    title: redactSensitiveText(row?.name ?? '(untitled item)'),
+    host: row?.host ?? '',
+  };
+}
+
+function diffRules(before: string[], after: string[]): Array<{ kind: 'added' | 'removed'; rule: string }> {
+  const beforeSet = new Set(before);
+  const afterSet = new Set(after);
+  return [
+    ...after.filter(rule => !beforeSet.has(rule)).map(rule => ({ kind: 'added' as const, rule })),
+    ...before.filter(rule => !afterSet.has(rule)).map(rule => ({ kind: 'removed' as const, rule })),
+  ];
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
 function parseJson(value: string): unknown {

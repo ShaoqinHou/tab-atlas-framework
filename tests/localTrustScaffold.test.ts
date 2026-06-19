@@ -11,6 +11,8 @@ import {
   rotateCapability,
   verifyCapabilityToken,
 } from '../src/security/localCapability.js';
+import { exchangePairingChallenge, createPairingChallenge } from '../src/security/pairingChallenge.js';
+import { rePairExtensionCapability } from '../src/security/extensionRepair.js';
 
 describe('local trust capability scaffold', () => {
   it('loads v4 local trust schema', () => {
@@ -70,5 +72,38 @@ describe('local trust capability scaffold', () => {
 
     const expired = createPairingCode(db, { ttlMs: -1 });
     expect(() => exchangePairingCode(db, expired.code)).toThrow(/expired/);
+  });
+
+  it('re-pairs extension capabilities with browser-specific one-time challenges', () => {
+    const db = openDatabase(':memory:');
+    const chromeChallenge = createPairingChallenge(db, { browser: 'chrome', ttlMs: 60_000 });
+    const chrome = exchangePairingChallenge(db, {
+      challengeId: chromeChallenge.challenge.id,
+      secret: chromeChallenge.secret,
+      browser: 'chrome',
+      label: 'chrome extension',
+    });
+    const edge = createCapability(db, {
+      kind: 'extension',
+      scopes: ['snapshot:write'],
+      label: 'edge extension',
+    });
+
+    const repairedChrome = rePairExtensionCapability(db, chrome.capability.id);
+    const repairedEdge = rePairExtensionCapability(db, edge.capability.id);
+    const exchanged = exchangePairingChallenge(db, {
+      challengeId: repairedChrome.challenge.id,
+      secret: repairedChrome.secret,
+      browser: 'chrome',
+      label: 'chrome extension repaired',
+    });
+
+    expect(repairedChrome.browser).toBe('chrome');
+    expect(repairedChrome.challenge.browser).toBe('chrome');
+    expect(repairedEdge.browser).toBe('edge');
+    expect(repairedEdge.challenge.browser).toBe('edge');
+    expect(verifyCapabilityToken(db, chrome.token, 'snapshot:write')).toEqual({ ok: false, reason: 'revoked_token' });
+    expect(verifyCapabilityToken(db, exchanged.token, 'snapshot:write')).toMatchObject({ ok: true });
+    expect(JSON.stringify(db.prepare('SELECT * FROM pairing_challenges').all())).not.toContain(repairedChrome.secret);
   });
 });

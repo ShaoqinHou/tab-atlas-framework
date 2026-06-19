@@ -211,7 +211,7 @@ const ShowExplanationAction = z.object({
 
 const OpenReviewAction = z.object({
   kind: z.literal('open_review'),
-  queue: z.enum(['unmarked', 'weak', 'conflict', 'needs_review', 'extraction_failure']),
+  queue: z.enum(['unmarked', 'weak', 'conflict', 'needs_review', 'ambiguous', 'extraction_failure']),
   sourceViewId: z.string().optional(),
 });
 

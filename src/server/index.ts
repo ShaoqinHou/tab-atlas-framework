@@ -57,6 +57,7 @@ import {
   listPairingChallenges,
   PairingChallengeError,
 } from '../security/pairingChallenge.js';
+import { rePairExtensionCapability } from '../security/extensionRepair.js';
 import { importPathPolicyFromEnv, listCaptureRoots, listRecentCaptureFiles, validateImportPath } from '../security/importPathPolicy.js';
 import { installLocalRequestGuard, writeSecurityAuditRecord } from '../security/localRequestGuard.js';
 import { applyViewPlan, previewView } from '../views/service.js';
@@ -312,10 +313,48 @@ app.post('/api/security/capabilities/:id/rotate', async (request, reply) => {
   return reply.send(rotated);
 });
 
+app.post('/api/security/capabilities/:id/re-pair', async (request, reply) => {
+  const params = request.params as { id: string };
+  const body = asRecord(request.body);
+  try {
+    const repaired = rePairExtensionCapability(db, params.id, {
+      ttlMs: typeof body.ttlMs === 'number' ? body.ttlMs : undefined,
+    });
+    writeSecurityAuditRecord(db, {
+      eventType: 'extension_repair',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      capabilityId: repaired.revokedCapability.id,
+      details: {
+        browser: repaired.browser,
+        challengeId: repaired.challenge.id,
+        expiresAt: repaired.expiresAt,
+      },
+    });
+    return reply.send(repaired);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = /Chrome or Edge|extension capabilities/.test(message) ? 400 : 404;
+    writeSecurityAuditRecord(db, {
+      eventType: 'extension_repair',
+      method: request.method,
+      route: request.url,
+      outcome: 'denied',
+      capabilityId: params.id,
+      reason: message,
+    });
+    return reply.status(status).send({ ok: false, error: message });
+  }
+});
+
 app.post('/api/security/pairing-codes', async (request, reply) => {
   const body = asRecord(request.body);
   const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
   const browser = typeof body.browser === 'string' ? body.browser : 'unknown';
+  if (browser !== 'unknown' && !ProductBrowser.safeParse(browser).success) {
+    return reply.status(400).send({ ok: false, error: 'browser must be chrome or edge' });
+  }
   const created = createPairingChallenge(db, {
     kind: 'extension',
     scopes: ['snapshot:write'],
@@ -557,6 +596,8 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
     threadId: params.threadId,
     content,
     activeViewId: typeof body.activeViewId === 'string' ? body.activeViewId : undefined,
+    currentLayout: typeof body.currentLayout === 'string' ? body.currentLayout : undefined,
+    currentFilters: body.currentFilters,
   }, {
     plannerProvider: provider,
     actionPlannerProvider: actionProvider,

@@ -113,6 +113,30 @@ export function showWorkspaceNotice(message) {
   target.insertAdjacentHTML('afterbegin', `<div class="notice">${escapeHtml(message)}</div>`);
 }
 
+export function showRevisionComparison(comparison) {
+  const target = document.getElementById('viewWorkspace');
+  if (!target) return;
+  if (!comparison?.comparable) {
+    showWorkspaceNotice(comparison?.unavailableReason || 'Revision comparison is unavailable.');
+    return;
+  }
+  const changes = comparison.changes ?? {};
+  target.insertAdjacentHTML('afterbegin', `
+    <section class="revision-comparison" role="region" aria-label="Revision comparison">
+      <header>
+        <p class="kicker">Revision comparison</p>
+        <h3>Revision ${escapeHtml(comparison.left?.revisionNumber)} vs ${escapeHtml(comparison.right?.revisionNumber)}</h3>
+        <p class="muted">${comparison.summary?.added ?? 0} added · ${comparison.summary?.removed ?? 0} removed · ${comparison.summary?.changed ?? 0} changed</p>
+      </header>
+      ${renderGoalChange(changes.goalChange)}
+      ${renderRuleChanges(changes.ruleChanges ?? [])}
+      ${renderComparisonList('Added targets', changes.addedTargets ?? [])}
+      ${renderComparisonList('Removed targets', changes.removedTargets ?? [])}
+      ${renderMembershipChanges(changes.membershipChanges ?? [])}
+    </section>
+  `);
+}
+
 function renderWorkspace() {
   const target = document.getElementById('viewWorkspace');
   if (!target) return;
@@ -145,6 +169,57 @@ function renderWorkspace() {
     </footer>
   `;
   restoreWorkspaceScroll(target);
+}
+
+function renderGoalChange(change) {
+  if (!change) return '';
+  return `
+    <section>
+      <h4>Goal</h4>
+      <p><span>Before</span> ${escapeHtml(change.from || '(none)')}</p>
+      <p><span>After</span> ${escapeHtml(change.to || '(none)')}</p>
+    </section>
+  `;
+}
+
+function renderRuleChanges(changes) {
+  if (!changes.length) return '';
+  return `
+    <section>
+      <h4>Rules</h4>
+      ${changes.map(change => `<p><span>${escapeHtml(change.kind)}</span> ${escapeHtml(change.rule)}</p>`).join('')}
+    </section>
+  `;
+}
+
+function renderComparisonList(title, items) {
+  if (!items.length) return '';
+  return `
+    <section>
+      <h4>${escapeHtml(title)}</h4>
+      ${items.map(item => `
+        <article class="comparison-row">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.targetKind)} · ${escapeHtml(item.host)} · ${escapeHtml(item.state || '')} · ${escapeHtml(item.section || 'Unsectioned')} · ${Math.round((item.confidence ?? 0) * 100)}%</span>
+        </article>
+      `).join('')}
+    </section>
+  `;
+}
+
+function renderMembershipChanges(items) {
+  if (!items.length) return '';
+  return `
+    <section>
+      <h4>Membership changes</h4>
+      ${items.map(item => `
+        <article class="comparison-row">
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(item.before.state)} → ${escapeHtml(item.after.state)} · ${escapeHtml(item.before.section || 'Unsectioned')} → ${escapeHtml(item.after.section || 'Unsectioned')} · ${Math.round((item.before.confidence ?? 0) * 100)}% → ${Math.round((item.after.confidence ?? 0) * 100)}%</span>
+        </article>
+      `).join('')}
+    </section>
+  `;
 }
 
 function renderFilters() {
