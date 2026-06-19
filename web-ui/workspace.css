@@ -753,6 +753,118 @@ h3 {
   margin: 6px 0;
 }
 
+.review-workspace {
+  min-height: 520px;
+}
+
+.review-start {
+  align-items: center;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  min-height: 430px;
+}
+
+.review-start-grid,
+.decision-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-layout {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+
+.review-current {
+  display: grid;
+  gap: 12px;
+}
+
+.review-current-header {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.review-preview {
+  align-items: center;
+  aspect-ratio: 16 / 9;
+  background:
+    linear-gradient(135deg, rgba(9, 105, 218, 0.08), transparent 45%),
+    linear-gradient(315deg, rgba(45, 164, 78, 0.08), transparent 38%),
+    #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  padding: 18px;
+}
+
+.review-preview p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+  max-width: 720px;
+}
+
+.review-side {
+  display: grid;
+  gap: 14px;
+}
+
+.progress-block {
+  background: #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+}
+
+.progress-block span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress-block progress {
+  width: 100%;
+}
+
+.next-list {
+  display: grid;
+  gap: 8px;
+}
+
+.next-list button {
+  align-items: start;
+  display: grid;
+  justify-content: stretch;
+  text-align: left;
+}
+
+.next-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-cloud span {
+  background: #f1f3f5;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 76px minmax(0, 1fr);
@@ -801,14 +913,19 @@ h3 {
 
   .workspace-header,
   .view-toolbar,
-  .workspace-hero {
+  .workspace-hero,
+  .review-start {
     align-items: stretch;
     flex-direction: column;
   }
 
   .header-actions,
   .field-row,
-  .compact-row {
+  .compact-row,
+  .review-layout,
+  .review-current-header,
+  .review-start,
+  .decision-grid {
     grid-template-columns: 1fr;
   }
 

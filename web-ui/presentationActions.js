@@ -1,5 +1,6 @@
 import { postJson } from './api.js';
 import { openInspector } from './inspector.js';
+import { startReviewSession } from './review.js';
 import { focusWorkspaceSection, getCurrentWorkspace, refreshViewWorkspace, setWorkspaceFilter } from './viewWorkspace.js';
 import { setState, state } from './state.js';
 
@@ -30,7 +31,7 @@ export async function executePresentationPlan(plan) {
         viewId: state.activeViewId,
       });
     } else if (action.kind === 'open_review') {
-      setState({ page: 'review' });
+      await startReviewSession(action.queue);
     }
   }
   return true;
