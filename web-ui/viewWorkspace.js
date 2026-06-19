@@ -9,10 +9,17 @@ let stateFilter = 'visible';
 let queryFilter = '';
 
 export function initViewWorkspace() {
+  renderFilters();
+  const remoteToggle = document.getElementById('remoteMediaToggle');
+  if (remoteToggle) {
+    remoteToggle.checked = state.remoteMedia !== 'off';
+    remoteToggle.addEventListener('change', () => setState({ remoteMedia: remoteToggle.checked ? 'on' : 'off' }));
+  }
   document.getElementById('viewFilters')?.addEventListener('click', event => {
     const button = event.target.closest('[data-state-filter]');
     if (!button) return;
     stateFilter = button.dataset.stateFilter;
+    renderFilters();
     renderWorkspace();
   });
 
@@ -26,11 +33,20 @@ export function initViewWorkspace() {
   document.getElementById('viewWorkspace')?.addEventListener('click', async event => {
     const cardButton = event.target.closest('[data-target-kind][data-target-id]');
     if (cardButton) {
-      await openInspector(cardButton.dataset.targetKind, cardButton.dataset.targetId, { viewId: state.activeViewId });
+      await openInspector(cardButton.dataset.targetKind, cardButton.dataset.targetId, {
+        viewId: state.activeViewId,
+        origin: cardButton,
+      });
       return;
     }
     const loadMore = event.target.closest('[data-load-section]');
     if (loadMore) await loadMoreSection(loadMore.dataset.loadSection);
+    const prompt = event.target.closest('[data-suggested-prompt]');
+    if (prompt) {
+      const input = document.getElementById('conversationInput');
+      input.value = prompt.dataset.suggestedPrompt;
+      document.getElementById('conversationForm')?.requestSubmit();
+    }
   });
 
   subscribe(() => {
@@ -64,7 +80,6 @@ export function setWorkspaceFilter(filter) {
 }
 
 function renderWorkspace() {
-  renderFilters();
   const target = document.getElementById('viewWorkspace');
   if (!target) return;
   if (!workspace) {
@@ -192,21 +207,25 @@ function renderCompact() {
 }
 
 function renderCard(card, variant) {
-  const thumbnail = card.media?.thumbnailUrl
-    ? `<img src="${escapeHtml(card.media.thumbnailUrl)}" alt="">`
+  const thumbnail = card.media?.thumbnailUrl && state.remoteMedia !== 'off'
+    ? `<img src="${escapeHtml(card.media.thumbnailUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
     : `<div class="media-fallback">${iconFor(card.visualKind)}</div>`;
   return `
     <button type="button" class="resource-card ${variant} attention-${escapeHtml(card.attention)}" data-target-kind="${escapeHtml(card.targetKind)}" data-target-id="${escapeHtml(card.targetId)}">
       <div class="card-media">${thumbnail}</div>
       <div class="card-body">
+        <div class="card-meta">${escapeHtml(card.host)} · ${escapeHtml(humanKind(card.visualKind))} · ${escapeHtml(card.section)}</div>
         <div class="card-title-row">
           <strong>${escapeHtml(card.title)}</strong>
           <span>${Math.round(card.confidence * 100)}%</span>
         </div>
-        <p>${escapeHtml(card.summary || card.reason)}</p>
+        ${card.userSignal ? `<p class="user-signal">${escapeHtml(card.userSignal)}</p>` : ''}
+        ${card.summary ? `<p>${escapeHtml(card.summary)}</p>` : ''}
+        <p class="why-line">${escapeHtml(card.reason)}</p>
         <div class="chip-row">
-          <span>${escapeHtml(card.state)}</span>
-          <span>${escapeHtml(card.evidenceStrength)}</span>
+          <span>${escapeHtml(humanState(card.state))}</span>
+          <span>${escapeHtml(humanEvidence(card.evidenceStrength))}</span>
+          <span>${escapeHtml(card.extractionStatus)}</span>
           ${card.atomicItemCount ? `<span>${card.atomicItemCount} items</span>` : ''}
         </div>
       </div>
@@ -255,4 +274,39 @@ function iconFor(kind) {
     unknown: '?',
   };
   return escapeHtml(labels[kind] ?? '?');
+}
+
+function humanEvidence(value) {
+  const labels = {
+    user_direct: 'User note',
+    user_feedback: 'Prior correction',
+    verified_content: 'Verified content',
+    generated_analysis: 'AI analysis',
+    title_only: 'Title only',
+  };
+  return labels[value] ?? value;
+}
+
+function humanState(value) {
+  const labels = {
+    strong_include: 'Strong match',
+    weak_include: 'Weak match',
+    conflict: 'Conflict',
+    needs_review: 'Needs review',
+    exclude: 'Excluded',
+  };
+  return labels[value] ?? value;
+}
+
+function humanKind(value) {
+  const labels = {
+    video: 'Video',
+    article: 'Article',
+    repository: 'Repository',
+    document: 'Document',
+    search: 'Search',
+    atomic_item: 'Atomic item',
+    unknown: 'Resource',
+  };
+  return labels[value] ?? value;
 }

@@ -6,6 +6,7 @@ export const state = {
   activeThreadId: read('activeThreadId', ''),
   layout: read('layout', 'board'),
   focusedSectionId: read('focusedSectionId', ''),
+  remoteMedia: read('remoteMedia', 'on'),
   selectedTarget: null,
   settingsPanel: '',
 };

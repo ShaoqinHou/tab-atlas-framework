@@ -1,18 +1,25 @@
 import { getJson, postJson } from './api.js';
-import { state } from './state.js';
+import { setState, state } from './state.js';
 import { escapeHtml } from './shell.js';
 
 let currentInspector = null;
 let activeTab = 'overview';
+let returnFocusElement = null;
 
 export function initInspector() {
   document.getElementById('conversationTab')?.addEventListener('click', () => showPanel('conversation'));
   document.getElementById('inspectorTab')?.addEventListener('click', () => showPanel('inspector'));
   document.getElementById('inspectorContent')?.addEventListener('click', handleInspectorAction);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.getElementById('inspectorSurface')?.classList.contains('active')) {
+      closeInspector();
+    }
+  });
 }
 
 export async function openInspector(targetKind, targetId, options = {}) {
   activeTab = options.tab ?? activeTab;
+  returnFocusElement = options.origin ?? returnFocusElement;
   showPanel('inspector');
   const viewId = options.viewId ?? state.activeViewId;
   const params = viewId ? `?viewId=${encodeURIComponent(viewId)}` : '';
@@ -34,14 +41,15 @@ export function renderInspector() {
   const tabs = ['overview', 'evidence', 'notes', 'related'];
   content.innerHTML = `
     <div class="inspector-header">
+      <button type="button" class="icon-button inspector-close" data-close-inspector aria-label="Close inspector">×</button>
       <p class="kicker">${escapeHtml(currentInspector.targetKind)}</p>
       <h3>${escapeHtml(currentInspector.title)}</h3>
       <p class="muted">${escapeHtml(currentInspector.host || currentInspector.urlKind)}</p>
     </div>
     <div class="inspector-tabs" role="tablist">
-      ${tabs.map(tab => `<button type="button" class="${tab === activeTab ? 'active' : ''}" data-inspector-tab="${tab}">${label(tab)}</button>`).join('')}
+      ${tabs.map(tab => `<button type="button" role="tab" aria-selected="${tab === activeTab}" class="${tab === activeTab ? 'active' : ''}" data-inspector-tab="${tab}">${label(tab)}</button>`).join('')}
     </div>
-    <div class="inspector-body">${renderInspectorTab(currentInspector, activeTab)}</div>
+    <div class="inspector-body" role="tabpanel">${renderInspectorTab(currentInspector, activeTab)}</div>
   `;
   content.querySelectorAll('[data-inspector-tab]').forEach(button => {
     button.addEventListener('click', () => {
@@ -85,10 +93,10 @@ function renderInspectorTab(item, tab) {
         <section>
           <h4>Views</h4>
           ${item.relatedViews.map(view => `
-            <div class="related-row">
+            <button type="button" class="related-row" data-related-view="${escapeHtml(view.viewId)}">
               <strong>${escapeHtml(view.name)}</strong>
               <span>${escapeHtml(view.state)}${view.section ? ` · ${escapeHtml(view.section)}` : ''}</span>
-            </div>
+            </button>
           `).join('') || '<p class="muted">No related views.</p>'}
         </section>
         <section>
@@ -138,11 +146,27 @@ function renderInspectorTab(item, tab) {
           `).join('')}
         </section>
       ` : ''}
+      ${item.parentResourceId ? `<button type="button" data-parent-resource="${escapeHtml(item.parentResourceId)}">Open parent resource</button>` : ''}
     </div>
   `;
 }
 
 async function handleInspectorAction(event) {
+  if (event.target.closest('[data-close-inspector]')) {
+    closeInspector();
+    return;
+  }
+  const relatedView = event.target.closest('[data-related-view]');
+  if (relatedView) {
+    setState({ activeViewId: relatedView.dataset.relatedView, page: 'views' });
+    closeInspector();
+    return;
+  }
+  const parent = event.target.closest('[data-parent-resource]');
+  if (parent) {
+    await openInspector('resource', parent.dataset.parentResource, { viewId: state.activeViewId });
+    return;
+  }
   const explain = event.target.closest('[data-explain-membership]');
   if (explain && currentInspector) {
     const viewId = state.activeViewId;
@@ -168,6 +192,15 @@ async function handleInspectorAction(event) {
 function writeCorrectionResult(value) {
   const target = document.getElementById('correctionResult');
   if (target) target.textContent = value;
+}
+
+function closeInspector() {
+  showPanel('conversation');
+  currentInspector = null;
+  renderInspector();
+  if (returnFocusElement && typeof returnFocusElement.focus === 'function') {
+    returnFocusElement.focus();
+  }
 }
 
 function showPanel(panel) {

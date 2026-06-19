@@ -77,6 +77,23 @@ describe('workspace dashboard shell', () => {
     expect(workspace).toContain('/sections/');
   });
 
+  it('renders human workspace cards and inspector controls', () => {
+    const workspace = read('web-ui/viewWorkspace.js');
+    const inspector = read('web-ui/inspector.js');
+
+    expect(workspace).toContain('user-signal');
+    expect(workspace).toContain('why-line');
+    expect(workspace).toContain('User note');
+    expect(workspace).toContain('referrerpolicy="no-referrer"');
+    expect(workspace).toContain('data-suggested-prompt');
+    expect(workspace).toContain('requestSubmit');
+    expect(inspector).toContain('data-close-inspector');
+    expect(inspector).toContain('role="tab"');
+    expect(inspector).toContain('role="tabpanel"');
+    expect(inspector).toContain('data-related-view');
+    expect(inspector).toContain('data-parent-resource');
+  });
+
   it('ships the role-play workspace UX evaluation gate', () => {
     const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
     const evalScript = read('scripts/eval-workspace-ux.ts');
