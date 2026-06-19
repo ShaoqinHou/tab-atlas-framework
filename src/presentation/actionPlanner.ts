@@ -57,6 +57,13 @@ export function planPresentationActionsFromText(
   });
 }
 
+export function isPresentationOnlyCommand(commandText: string): boolean {
+  const normalized = commandText.toLowerCase();
+  const hasPresentationVerb = /\b(show|switch|focus|open|filter|hide|layout|gallery|board|map|compact|review|inspect|explain|compare)\b/.test(normalized);
+  const hasSemanticIntent = /\b(make|create|build|find|collect|organize|group|classify|plan|search|scan|extract|summari[sz]e|new view|taxonomy)\b/.test(normalized);
+  return hasPresentationVerb && !hasSemanticIntent;
+}
+
 function requestedLayout(command: string): WorkspaceLayout | undefined {
   for (const layout of ['board', 'gallery', 'map', 'compact'] as const) {
     if (new RegExp(`\\b${layout}\\b`).test(command)) return layout;

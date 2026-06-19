@@ -24,10 +24,16 @@ describe('workspace dashboard shell', () => {
   it('keeps first-run onboarding and trusted agent landing wired', () => {
     const html = read('web-ui/index.html');
     const shell = read('web-ui/shell.js');
+    const conversation = read('web-ui/conversation.js');
 
     expect(html).toContain('id="settings-onboarding"');
     expect(html).toContain('id="conversationForm"');
     expect(shell).toContain('/api/onboarding/bootstrap');
+    expect(conversation).toContain('/api/conversations');
+    expect(conversation).toContain('/messages');
+    expect(conversation).toContain('content,');
+    expect(conversation).not.toContain('/api/agent/command');
+    expect(conversation).not.toContain("mode: 'heuristic'");
   });
 
   it('uses persistent review sessions and links agent actions into the workspace', () => {

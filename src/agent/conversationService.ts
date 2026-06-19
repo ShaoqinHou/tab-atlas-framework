@@ -20,6 +20,8 @@ import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackServ
 import { applyViewPlan, createUserCommand, persistSemanticViewPlan, previewView } from '../views/service.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
 import { withPromptManifestRecorder } from '../security/promptManifest.js';
+import { isPresentationOnlyCommand, planPresentationActionsFromText } from '../presentation/actionPlanner.js';
+import { getViewWorkspace } from '../presentation/workspaceService.js';
 import { materializeAgentTurnPlan } from './actionIdentity.js';
 import {
   claimActionEffect,
@@ -74,6 +76,7 @@ export interface ConversationSnapshot {
 export interface SendConversationMessageInput {
   threadId: string;
   content: string;
+  activeViewId?: string;
 }
 
 export interface SendConversationMessageOptions {
@@ -166,6 +169,16 @@ export async function sendConversationMessage(
   });
   const history = listConversationMessages(db, input.threadId);
   const context = buildConversationContext(db, input.content);
+  const presentationPlan = planPresentationTurn(db, input);
+  if (presentationPlan) {
+    appendConversationMessage(db, {
+      threadId: input.threadId,
+      role: 'assistant',
+      content: presentationPlan.reply,
+      context: { presentationPlan, retrievedContext: context },
+    });
+    return getConversationSnapshot(db, input.threadId);
+  }
   const plan = await planConversationTurn(db, options.plannerProvider, history, context);
   const assistant = appendConversationMessage(db, {
     threadId: input.threadId,
@@ -178,6 +191,23 @@ export async function sendConversationMessage(
     await runPersistedAgentAction(db, action.id, { plannerProvider: options.plannerProvider });
   }
   return getConversationSnapshot(db, input.threadId);
+}
+
+function planPresentationTurn(
+  db: Database.Database,
+  input: SendConversationMessageInput,
+): ReturnType<typeof planPresentationActionsFromText> | null {
+  if (!input.activeViewId || !isPresentationOnlyCommand(input.content)) return null;
+  try {
+    const workspace = getViewWorkspace(db, input.activeViewId, { maxCardsPerSection: 100 });
+    const plan = planPresentationActionsFromText(input.content, {
+      activeViewId: input.activeViewId,
+      workspace,
+    });
+    return plan.actions.length ? plan : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function planConversationTurn(

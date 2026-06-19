@@ -282,6 +282,46 @@ describe('persistent conversational agent actions', () => {
     expect(view.origin).toBe('codex');
   });
 
+  it('persists obvious presentation-only commands without calling semantic planning', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const provider: LlmProvider = {
+      async complete() {
+        throw new Error('Presentation-only command should not call Codex');
+      },
+    };
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Switch to gallery',
+      activeViewId: viewId,
+    }, { plannerProvider: provider });
+    const assistant = snapshot.messages.find(message => message.role === 'assistant');
+    const context = assistant?.context as { presentationPlan?: { actions: Array<{ kind: string; layout?: string }> } } | undefined;
+
+    expect(snapshot.messages.map(message => message.content)).toContain('Switch to gallery');
+    expect(context?.presentationPlan?.actions).toContainEqual({ kind: 'set_layout', layout: 'gallery' });
+    expect(snapshot.actions).toHaveLength(0);
+  });
+
+  it('does not treat mixed semantic requests as presentation-only', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const prompts: string[] = [];
+    const provider = queuedProvider([noActionPlan('I will plan the new view.')], prompts);
+
+    await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Create a new taxonomy and show it as a gallery',
+      activeViewId: viewId,
+    }, { plannerProvider: provider });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Create a new taxonomy and show it as a gallery');
+  });
+
   it('concurrent plan_view execution creates one deterministic view set', async () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);

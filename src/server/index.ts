@@ -554,6 +554,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
+    activeViewId: typeof body.activeViewId === 'string' ? body.activeViewId : undefined,
   }, {
     plannerProvider: provider,
   });
