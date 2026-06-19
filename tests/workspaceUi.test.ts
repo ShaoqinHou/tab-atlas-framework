@@ -51,10 +51,21 @@ describe('workspace dashboard shell', () => {
     expect(workspace).toContain('/sections/');
   });
 
+  it('ships the role-play workspace UX evaluation gate', () => {
+    const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
+    const evalScript = read('scripts/eval-workspace-ux.ts');
+
+    expect(pkg.scripts['eval:workspace-ux']).toBe('tsx scripts/eval-workspace-ux.ts');
+    expect(evalScript).toContain('workspaceRoleplayScenarios');
+    expect(evalScript).toContain('large_workspace_budget');
+    expect(evalScript).toContain('lightweightAccessibilityCheck');
+  });
+
   it('does not ship machine-specific local paths in shared docs or UI', () => {
     const sharedFiles = [
       'web-ui/index.html',
       'web-ui/review.js',
+      'scripts/eval-workspace-ux.ts',
       'docs/12-implementation-plan.md',
       'docs/24-codex-scan-implementation-report.md',
     ];

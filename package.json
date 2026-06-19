@@ -16,6 +16,7 @@
     "eval:onboarding": "tsx scripts/eval-onboarding.ts",
     "eval:retrieval": "tsx scripts/eval-retrieval.ts",
     "eval:review": "tsx scripts/eval-review.ts",
+    "eval:workspace-ux": "tsx scripts/eval-workspace-ux.ts",
     "acceptance:ports": "tsx scripts/check-extension-config.ts",
     "acceptance:report": "tsx scripts/acceptance-report.ts",
     "acceptance:browser": "tsx scripts/live-browser-acceptance.ts",

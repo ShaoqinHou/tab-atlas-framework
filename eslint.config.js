@@ -42,4 +42,12 @@ export default [
       },
     },
   },
+  {
+    files: ['web-ui/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
 ];
