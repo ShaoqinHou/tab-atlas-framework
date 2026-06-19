@@ -5,9 +5,10 @@ import { setState, state, subscribe } from './state.js';
 
 let workspace = null;
 let sectionPages = new Map();
-let stateFilters = ['visible'];
-let tagFilters = [];
-let queryFilter = '';
+let stateFilters = csvList(state.workspaceStateFilters) || ['visible'];
+let tagFilters = csvList(state.workspaceTagFilters);
+let queryFilter = (state.workspaceQueryFilter || '').toLowerCase();
+let lastRenderSignature = renderSignature(state);
 
 export function initViewWorkspace() {
   renderFilters();
@@ -21,6 +22,7 @@ export function initViewWorkspace() {
     if (!button) return;
     const value = button.dataset.stateFilter;
     stateFilters = value === 'visible' ? ['visible'] : [value];
+    persistWorkspaceFilters();
     renderFilters();
     renderWorkspace();
   });
@@ -28,11 +30,17 @@ export function initViewWorkspace() {
   document.getElementById('viewFilters')?.addEventListener('input', event => {
     if (event.target.id === 'workspaceSearch') {
       queryFilter = event.target.value.trim().toLowerCase();
+      persistWorkspaceFilters();
       renderWorkspace();
     }
   });
 
   document.getElementById('viewWorkspace')?.addEventListener('click', async event => {
+    const focusSection = event.target.closest('[data-focus-section]');
+    if (focusSection) {
+      focusWorkspaceSection(focusSection.dataset.focusSection);
+      return;
+    }
     const cardButton = event.target.closest('[data-target-kind][data-target-id]');
     if (cardButton) {
       await openInspector(cardButton.dataset.targetKind, cardButton.dataset.targetId, {
@@ -51,8 +59,15 @@ export function initViewWorkspace() {
     }
   });
 
-  subscribe(() => {
-    if (workspace) renderWorkspace();
+  document.getElementById('viewWorkspace')?.addEventListener('scroll', event => {
+    setState({ workspaceScrollTop: String(event.currentTarget.scrollTop) });
+  });
+
+  subscribe(current => {
+    const nextSignature = renderSignature(current);
+    if (!workspace || nextSignature === lastRenderSignature) return;
+    lastRenderSignature = nextSignature;
+    renderWorkspace();
   });
 }
 
@@ -65,6 +80,7 @@ export async function refreshViewWorkspace(viewId = state.activeViewId) {
   }
   workspace = await getJson(`/api/views/${encodeURIComponent(viewId)}/workspace?limit=24`);
   sectionPages = new Map(workspace.sections.map(section => [section.id, section.cards.slice()]));
+  await restoreSectionPages();
   renderWorkspace();
 }
 
@@ -86,6 +102,7 @@ export function setWorkspaceFilter(filter) {
     tagFilters = filter.tags ?? [];
     queryFilter = filter.query?.toLowerCase() ?? '';
   }
+  persistWorkspaceFilters();
   renderFilters();
   renderWorkspace();
 }
@@ -127,6 +144,7 @@ function renderWorkspace() {
       ${workspace.suggestedPrompts.map(prompt => `<button type="button" data-suggested-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join('')}
     </footer>
   `;
+  restoreWorkspaceScroll(target);
 }
 
 function renderFilters() {
@@ -181,27 +199,23 @@ function renderGallery() {
 }
 
 function renderMap() {
-  const hosts = new Map();
-  for (const section of visibleSections()) {
-    for (const card of section.visibleCards) {
-      const host = card.host || 'local';
-      if (!hosts.has(host)) hosts.set(host, []);
-      hosts.get(host).push(card);
-    }
-  }
+  const sections = visibleSections();
   return `
     <div class="map-layout" data-testid="workspace-map">
-      ${[...hosts.entries()].map(([host, cards], index) => `
-        <section class="map-cluster" style="--cluster-index:${index}">
+      ${sections.map((section, index) => `
+        <section class="map-cluster semantic-region" style="--cluster-index:${index}" data-map-section="${escapeHtml(section.id)}">
           <header>
-            <span class="map-node"></span>
+            <button type="button" class="map-node" data-focus-section="${escapeHtml(section.id)}" aria-label="Focus ${escapeHtml(section.title)}"></button>
             <div>
-              <h4>${escapeHtml(host)}</h4>
-              <p class="muted">${cards.length} item${cards.length === 1 ? '' : 's'}</p>
+              <h4>${escapeHtml(section.title)}</h4>
+              <p class="muted">${section.visibleCards.length} item${section.visibleCards.length === 1 ? '' : 's'} · ${hostSummary(section.visibleCards)}</p>
             </div>
           </header>
+          <div class="map-region-stats">
+            ${stateSummary(section.visibleCards).map(([label, count]) => `<span>${escapeHtml(label)} ${count}</span>`).join('')}
+          </div>
           <div class="map-items">
-            ${cards.slice(0, 8).map(card => renderCard(card, 'map')).join('')}
+            ${section.visibleCards.slice(0, 8).map(card => renderCard(card, 'map')).join('')}
           </div>
         </section>
       `).join('')}
@@ -273,6 +287,7 @@ async function loadMoreSection(sectionId) {
   const current = sectionPages.get(sectionId) ?? [];
   const page = await getJson(`/api/views/${encodeURIComponent(state.activeViewId)}/sections/${encodeURIComponent(sectionId)}?cursor=${current.length}&limit=24`);
   sectionPages.set(sectionId, [...current, ...page.cards]);
+  persistSectionPageCounts();
   renderWorkspace();
 }
 
@@ -328,4 +343,77 @@ function humanKind(value) {
     unknown: 'Resource',
   };
   return labels[value] ?? value;
+}
+
+function persistWorkspaceFilters() {
+  setState({
+    workspaceStateFilters: stateFilters.join(','),
+    workspaceTagFilters: tagFilters.join(','),
+    workspaceQueryFilter: queryFilter,
+  });
+}
+
+function csvList(value) {
+  const items = String(value ?? '').split(',').map(item => item.trim()).filter(Boolean);
+  return items.length ? items : [];
+}
+
+function persistSectionPageCounts() {
+  const counts = Object.fromEntries([...sectionPages.entries()].map(([sectionId, cards]) => [sectionId, cards.length]));
+  setState({ sectionPageCounts: JSON.stringify(counts) });
+}
+
+async function restoreSectionPages() {
+  if (!workspace) return;
+  const counts = parseRecord(state.sectionPageCounts);
+  for (const section of workspace.sections) {
+    const targetCount = typeof counts[section.id] === 'number' ? counts[section.id] : 0;
+    let current = sectionPages.get(section.id) ?? [];
+    while (current.length < targetCount && current.length < section.totalCount) {
+      const page = await getJson(`/api/views/${encodeURIComponent(state.activeViewId)}/sections/${encodeURIComponent(section.id)}?cursor=${current.length}&limit=24`);
+      current = [...current, ...page.cards];
+      sectionPages.set(section.id, current);
+      if (!page.nextCursor) break;
+    }
+  }
+}
+
+function parseRecord(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function restoreWorkspaceScroll(target) {
+  const top = Number(state.workspaceScrollTop || 0);
+  if (!Number.isFinite(top) || top <= 0) return;
+  requestAnimationFrame(() => { target.scrollTop = top; });
+}
+
+function hostSummary(cards) {
+  const hosts = [...new Set(cards.map(card => card.host).filter(Boolean))];
+  if (!hosts.length) return 'local';
+  if (hosts.length === 1) return hosts[0];
+  return `${hosts.slice(0, 2).join(', ')} +${hosts.length - 2}`;
+}
+
+function stateSummary(cards) {
+  const counts = new Map();
+  for (const card of cards) counts.set(humanState(card.state), (counts.get(humanState(card.state)) ?? 0) + 1);
+  return [...counts.entries()];
+}
+
+function renderSignature(current) {
+  return [
+    current.page,
+    current.layout,
+    current.focusedSectionId,
+    current.remoteMedia,
+    current.workspaceStateFilters,
+    current.workspaceTagFilters,
+    current.workspaceQueryFilter,
+  ].join('|');
 }
