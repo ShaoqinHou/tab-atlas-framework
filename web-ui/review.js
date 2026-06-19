@@ -72,6 +72,15 @@ export async function startReviewSession(queue = 'unmarked') {
   }
 }
 
+export function openReviewSessionSnapshot(nextSnapshot) {
+  snapshot = nextSnapshot;
+  if (snapshot?.session?.id) {
+    localStorage.setItem(REVIEW_SESSION_STORAGE_KEY, snapshot.session.id);
+  }
+  setState({ page: 'review' });
+  renderReview();
+}
+
 async function restoreReviewSession() {
   const id = localStorage.getItem(REVIEW_SESSION_STORAGE_KEY);
   if (!id) {
@@ -137,12 +146,21 @@ function renderReview() {
           <div>
             <p class="kicker">${escapeHtml(snapshot.session.title || snapshot.session.type)}</p>
             <h3>${escapeHtml(current.title || current.canonicalUrl)}</h3>
-            <p class="muted">${escapeHtml(current.host)} · ${escapeHtml(current.urlKind)}</p>
+            <p class="muted">${escapeHtml(current.host)} · ${escapeHtml(current.urlKind)} · ${escapeHtml(current.extractionStatus)}</p>
           </div>
           <button type="button" data-review-inspect="${escapeHtml(current.resourceId)}">Inspect</button>
         </header>
-        <div class="review-preview">
+        ${renderReviewVisual(current, 'current')}
+        <div class="review-context">
+          <div class="metadata-grid">
+            <div><span>Groups</span><strong>${escapeHtml(current.browserGroupTitles?.join(', ') || 'none')}</strong></div>
+            <div><span>Transcript</span><strong>${transcriptStatus(current)}</strong></div>
+            <div><span>Evidence</span><strong>${current.evidence?.length ?? 0}</strong></div>
+            <div><span>Atomic items</span><strong>${current.atomicItems?.length ?? 0}</strong></div>
+          </div>
           ${current.summary ? `<p>${escapeHtml(current.summary)}</p>` : `<p>${escapeHtml(current.redactedUrl || current.canonicalUrl)}</p>`}
+          ${current.userAnnotations?.length ? `<p class="user-signal">${escapeHtml(current.userAnnotations[0].description || current.userAnnotations[0].tags.join(', '))}</p>` : ''}
+          <p class="why-line">${escapeHtml(evidenceSummary(current))}</p>
         </div>
         <div class="action-row">
           <a class="button-link" href="${escapeHtml(current.redactedUrl || current.canonicalUrl)}" target="_blank" rel="noreferrer">Open externally</a>
@@ -171,9 +189,10 @@ function renderReview() {
           <h4>Next</h4>
           <div class="next-list">
             ${snapshot.next.slice(0, 3).map(item => `
-              <button type="button" data-review-inspect="${escapeHtml(item.resourceId)}">
+              <button type="button" class="review-next-card" data-review-inspect="${escapeHtml(item.resourceId)}">
+                ${renderReviewVisual(item, 'next')}
                 <strong>${escapeHtml(item.title || item.canonicalUrl)}</strong>
-                <span>${escapeHtml(item.host)}</span>
+                <span>${escapeHtml(item.host)} · ${escapeHtml(item.extractionStatus)}</span>
               </button>
             `).join('') || '<p class="muted">No more queued items.</p>'}
           </div>
@@ -204,6 +223,73 @@ function decisionPayload(resourceId, decision, note) {
     tags: [...new Set([...customTags, decision.replace(/_/g, '-')])],
     description: note || undefined,
   };
+}
+
+function renderReviewVisual(resource, variant) {
+  const media = reviewMedia(resource);
+  const placeholder = `<div class="review-media-placeholder">${escapeHtml(iconFor(resource.urlKind))}</div>`;
+  const thumbnail = media.thumbnailUrl && state.remoteMedia !== 'off'
+    ? `<img src="${escapeHtml(media.thumbnailUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : placeholder;
+  const embed = media.embedUrl && state.remoteMedia !== 'off' && variant === 'current'
+    ? `<iframe src="${escapeHtml(media.embedUrl)}" title="${escapeHtml(resource.title || 'Video preview')}" loading="lazy" referrerpolicy="no-referrer" allow="accelerometer; encrypted-media; picture-in-picture" allowfullscreen></iframe>`
+    : '';
+  return `
+    <div class="review-preview review-preview-${variant}" data-review-visual="${variant}">
+      ${embed || thumbnail}
+    </div>
+  `;
+}
+
+function reviewMedia(resource) {
+  const videoId = youtubeVideoId(resource.canonicalUrl || resource.redactedUrl || '');
+  if (videoId) {
+    return {
+      thumbnailUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}`,
+    };
+  }
+  const og = resource.evidence?.find(item => /thumbnail|open[_ -]?graph|image/i.test(`${item.kind} ${item.text}`));
+  return og?.text?.startsWith('https://') ? { thumbnailUrl: og.text } : {};
+}
+
+function youtubeVideoId(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.hostname === 'youtu.be') return sanitizeVideoId(url.pathname.slice(1));
+    if (url.hostname.endsWith('youtube.com')) {
+      if (url.pathname === '/watch') return sanitizeVideoId(url.searchParams.get('v') || '');
+      const match = url.pathname.match(/^\/(?:shorts|embed)\/([^/?]+)/);
+      return sanitizeVideoId(match?.[1] || '');
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function sanitizeVideoId(value) {
+  return /^[A-Za-z0-9_-]{6,20}$/.test(value) ? value : '';
+}
+
+function transcriptStatus(resource) {
+  return resource.evidence?.some(item => /transcript/i.test(`${item.kind} ${item.provenance} ${item.text}`))
+    ? 'available'
+    : resource.urlKind?.startsWith('youtube_') ? 'metadata only' : 'not applicable';
+}
+
+function evidenceSummary(resource) {
+  const first = resource.evidence?.[0];
+  if (!first) return 'No extracted evidence yet; use title, host, and notes.';
+  return `${first.kind} from ${first.provenance}: ${first.text}`.slice(0, 220);
+}
+
+function iconFor(urlKind) {
+  if (urlKind?.startsWith('youtube_')) return '▶';
+  if (urlKind?.startsWith('github_')) return '{}';
+  if (urlKind === 'pdf' || urlKind === 'docs') return 'Doc';
+  if (urlKind === 'search') return 'Q';
+  return 'A';
 }
 
 async function pauseReview() {

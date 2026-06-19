@@ -260,6 +260,11 @@ h3 {
   padding: 16px;
 }
 
+.workspace-layout {
+  overflow: auto;
+  max-height: calc(100vh - 120px);
+}
+
 .stage-empty {
   align-items: center;
   display: flex;
@@ -672,10 +677,29 @@ h3 {
 .map-node {
   background: var(--green);
   border-radius: 999px;
+  border-color: rgba(45, 164, 78, 0.4);
   box-shadow: 0 0 0 8px rgba(45, 164, 78, 0.12);
   flex: 0 0 auto;
   height: 12px;
+  min-height: 12px;
+  padding: 0;
   width: 12px;
+}
+
+.map-region-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.map-region-stats span {
+  background: #eef6ff;
+  border: 1px solid #c9def6;
+  border-radius: 999px;
+  color: #174b7a;
+  font-size: 12px;
+  padding: 3px 7px;
 }
 
 .map-items {
@@ -838,6 +862,31 @@ button.related-row {
   margin-top: 8px;
 }
 
+.notice,
+.rotation-result {
+  background: #eef6ff;
+  border: 1px solid #bfdcff;
+  border-radius: 7px;
+  color: #174b7a;
+  font-size: 13px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+}
+
+.rotation-result:empty {
+  display: none;
+}
+
+.one-time-token {
+  background: #ffffff;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  display: block;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+  padding: 8px;
+}
+
 .review-workspace {
   min-height: 520px;
 }
@@ -885,7 +934,39 @@ button.related-row {
   border: 1px solid var(--line);
   border-radius: 8px;
   display: flex;
+  justify-content: center;
+  overflow: hidden;
   padding: 18px;
+}
+
+.review-preview-current {
+  padding: 0;
+}
+
+.review-preview-next {
+  aspect-ratio: 16 / 10;
+  border-radius: 6px;
+  padding: 0;
+  width: 100%;
+}
+
+.review-preview img,
+.review-preview iframe {
+  border: 0;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.review-media-placeholder {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 32px;
+  font-weight: 700;
+  height: 100%;
+  justify-content: center;
+  width: 100%;
 }
 
 .review-preview p {
@@ -893,6 +974,16 @@ button.related-row {
   line-height: 1.5;
   margin: 0;
   max-width: 720px;
+}
+
+.review-context {
+  display: grid;
+  gap: 10px;
+}
+
+.review-context p {
+  line-height: 1.45;
+  margin-bottom: 0;
 }
 
 .review-side {
@@ -926,8 +1017,13 @@ button.related-row {
 .next-list button {
   align-items: start;
   display: grid;
+  gap: 7px;
   justify-content: stretch;
   text-align: left;
+}
+
+.review-next-card {
+  min-width: 0;
 }
 
 .next-list span {
