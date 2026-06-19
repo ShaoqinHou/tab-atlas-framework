@@ -72,6 +72,8 @@ export function renderShellState(current) {
   if (current.page === 'settings' && current.settingsPanel) {
     document.getElementById(`settings-${current.settingsPanel}`)?.scrollIntoView({ block: 'start' });
   }
+  const select = document.getElementById('activeViewSelect');
+  if (select && select.value !== current.activeViewId) select.value = current.activeViewId;
 }
 
 export async function refreshStatus() {

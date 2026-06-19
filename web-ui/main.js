@@ -1,7 +1,9 @@
 import { getJson } from './api.js';
 import { initConversation } from './conversation.js';
+import { initInspector } from './inspector.js';
 import { initShell, refreshStatus, setViewOptions } from './shell.js';
 import { setState, state, subscribe } from './state.js';
+import { initViewWorkspace, refreshViewWorkspace } from './viewWorkspace.js';
 
 let views = [];
 
@@ -12,6 +14,7 @@ async function refreshViews(preferredViewId = state.activeViewId) {
     if (!preferredViewId && views[0]) {
       setState({ activeViewId: views[0].id });
     }
+    if (state.activeViewId) await refreshViewWorkspace(state.activeViewId);
     renderAskStage();
   } catch {
     setViewOptions([]);
@@ -61,10 +64,13 @@ initShell({
     await refreshViews();
   },
   onViewChange: async () => {
+    await refreshViewWorkspace();
     renderAskStage();
   },
 });
 
+initInspector();
+initViewWorkspace();
 initConversation({ onRefreshViews: refreshViews });
 subscribe(renderAskStage);
 await refreshViews();
