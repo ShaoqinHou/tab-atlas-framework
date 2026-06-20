@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium, type BrowserContext } from 'playwright';
 import { openDatabase } from '../src/db/index.js';
-import { BrowserExecutionEvidence, type BrowserExecutionEvidence as BrowserExecutionEvidenceType } from '../src/acceptance/browserEvidencePolicy.js';
+import {
+  BrowserExecutionEvidence,
+  pairingBrowserForExecution,
+  type BrowserExecutionEvidence as BrowserExecutionEvidenceType,
+  type ExtensionPairingBrowser,
+} from '../src/acceptance/browserEvidencePolicy.js';
 
 declare const chrome: {
   storage: {
@@ -41,6 +46,8 @@ const defaultServerUrl = 'http://127.0.0.1:9787';
 const serverUrl = process.env.TABATLAS_SERVER_URL ?? defaultServerUrl;
 const explicitHeadless = process.env.TABATLAS_CHROMIUM_HEADLESS;
 const preferHeadless = explicitHeadless !== '0';
+const executionBrowser = 'chromium' as const;
+const pairingBrowser = pairingBrowserForExecution(executionBrowser);
 
 fs.mkdirSync(outputDir, { recursive: true });
 
@@ -52,7 +59,7 @@ try {
   const beforeStatus = await fetchJson<{ snapshots: number }>(`${server.serverUrl}/api/status`, {
     token: admin.token,
   });
-  const firstChallenge = await createPairingChallenge(server.serverUrl, admin.token, 'chromium');
+  const firstChallenge = await createPairingChallenge(server.serverUrl, admin.token, pairingBrowser);
   let result;
   try {
     result = await runSmoke({
@@ -66,7 +73,7 @@ try {
   } catch (error) {
     if (!preferHeadless || explicitHeadless !== undefined) throw error;
     fallbackUsed = true;
-    const retryChallenge = await createPairingChallenge(server.serverUrl, admin.token, 'chromium');
+    const retryChallenge = await createPairingChallenge(server.serverUrl, admin.token, pairingBrowser);
     result = await runSmoke({
       serverUrl: server.serverUrl,
       adminToken: admin.token,
@@ -86,6 +93,8 @@ try {
     extensionDir: result.extensionDir,
     headless: result.headless,
     fallbackUsed,
+    executionBrowser,
+    pairingBrowser,
     browserEvidence: [result.browserEvidence],
     browserSmokes: [smoke],
     evidence: {
@@ -183,7 +192,7 @@ async function runSmoke(input: {
     const dbEvidence = chromiumEvidenceFromDatabase(input.dbPath, capabilityId, storedToken);
     const finishedAt = new Date().toISOString();
     const browserEvidence = BrowserExecutionEvidence.parse({
-      browser: 'chromium',
+      browser: executionBrowser,
       strategy: 'bundled_chromium_playwright',
       automated: true,
       isolatedProfile: true,
@@ -298,14 +307,14 @@ async function getAdminToken(url: string): Promise<AdminToken> {
   };
 }
 
-async function createPairingChallenge(url: string, token: string, browser: string): Promise<PairingChallenge> {
+async function createPairingChallenge(url: string, token: string, browser: ExtensionPairingBrowser): Promise<PairingChallenge> {
   const payload = await fetchJson<{ challenge: { id: string }; secret: string }>(`${url}/api/security/pairing-codes`, {
     method: 'POST',
     token,
     body: {
       browser,
       ttlMs: 5 * 60_000,
-      label: 'Automated Chromium acceptance',
+      label: 'Automated bundled Chromium acceptance (Chrome-compatible extension pairing identity)',
     },
   });
   return { challengeId: payload.challenge.id, secret: payload.secret };

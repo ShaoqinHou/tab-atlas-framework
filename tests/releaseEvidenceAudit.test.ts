@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { LiveAcceptanceReport } from '../src/acceptance/contracts.js';
 import {
   BrowserExecutionEvidence,
+  ExtensionPairingBrowser,
+  pairingBrowserForExecution,
   validateBrowserExecutionEvidence,
 } from '../src/acceptance/browserEvidencePolicy.js';
+import { ProductBrowser } from '../src/acceptance/manualBrowserSession.js';
 import {
   RELEASE_VALIDATION_COMMANDS,
   REQUIRED_BACKUP_TABLES,
@@ -143,6 +146,29 @@ function report() {
 }
 
 describe('release evidence audit', () => {
+  it('maps execution browsers to Chrome-compatible extension pairing identities', () => {
+    expect(pairingBrowserForExecution('chromium')).toBe('chrome');
+    expect(pairingBrowserForExecution('chrome')).toBe('chrome');
+    expect(pairingBrowserForExecution('edge')).toBe('edge');
+    expect(ExtensionPairingBrowser.safeParse('chromium').success).toBe(false);
+  });
+
+  it('keeps bundled Chromium execution evidence distinct from pairing identity', () => {
+    const chromium = browserEvidence('chromium');
+
+    expect(validateBrowserExecutionEvidence(chromium)).toEqual([]);
+    expect(chromium.browser).toBe('chromium');
+    expect(chromium.strategy).toBe('bundled_chromium_playwright');
+    expect(pairingBrowserForExecution(chromium.browser)).toBe('chrome');
+  });
+
+  it('keeps server pairing browser validation limited to product browser identities', () => {
+    expect(ProductBrowser.safeParse('chrome').success).toBe(true);
+    expect(ProductBrowser.safeParse('edge').success).toBe(true);
+    expect(ProductBrowser.safeParse('chromium').success).toBe(false);
+    expect(ProductBrowser.safeParse('firefox').success).toBe(false);
+  });
+
   it('labels installed Chrome and Edge CDP runs as automated product-browser evidence', () => {
     const chrome = browserEvidence('chrome');
     const edge = browserEvidence('edge');
