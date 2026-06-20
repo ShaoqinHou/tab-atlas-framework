@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS review_sessions (
   title TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   command_text TEXT,
+  source_view_id TEXT REFERENCES views(id) ON DELETE SET NULL,
   filters_json TEXT NOT NULL DEFAULT '{}',
   current_index INTEGER NOT NULL DEFAULT 0,
   total_items INTEGER NOT NULL DEFAULT 0,

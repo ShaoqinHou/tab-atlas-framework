@@ -230,7 +230,6 @@ describe('persistent conversational agent actions', () => {
     const { db, resourceId } = seed();
     const thread = createConversationThread(db);
     const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
-    const prompts: string[] = [];
     const semanticPlan: SemanticViewPlan = {
       commandText: 'Make a forest inspiration board',
       views: [{
@@ -252,7 +251,9 @@ describe('persistent conversational agent actions', () => {
       reviewQueues: [],
       explanation: 'Codex planned the conversational view.',
     };
-    const provider = queuedJsonProvider([{
+    const conversationPrompts: string[] = [];
+    const semanticPrompts: string[] = [];
+    const conversationProvider = queuedJsonProvider([{
       reply: 'I will preview that view.',
       questions: [],
       assumptions: [],
@@ -264,15 +265,17 @@ describe('persistent conversational agent actions', () => {
         commandText: 'Make a forest inspiration board',
         candidateLimit: 50,
       }],
-    } satisfies AgentTurnPlan, semanticPlan], prompts);
+    } satisfies AgentTurnPlan], conversationPrompts);
+    const semanticProvider = queuedJsonProvider([semanticPlan], semanticPrompts);
 
     const snapshot = await sendConversationMessage(db, {
       threadId: thread.id,
       content: 'Make a forest inspiration board',
-    }, { plannerProvider: provider });
+    }, { plannerProvider: conversationProvider, actionPlannerProvider: semanticProvider });
 
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain('Make a forest inspiration board');
+    expect(conversationPrompts).toHaveLength(1);
+    expect(semanticPrompts).toHaveLength(1);
+    expect(semanticPrompts[0]).toContain('Make a forest inspiration board');
     expect(snapshot.actions[0].status).toBe('succeeded');
     const result = snapshot.actions[0].result as { mode?: string; codexTurnSpent?: boolean; viewIds?: string[] };
     expect(result.mode).toBe('codex');
@@ -280,6 +283,131 @@ describe('persistent conversational agent actions', () => {
     expect(result.viewIds).toHaveLength(1);
     const view = db.prepare('SELECT origin FROM views WHERE id = ?').get(result.viewIds?.[0]) as { origin: string };
     expect(view.origin).toBe('codex');
+  });
+
+  it('persists obvious presentation-only commands without calling semantic planning', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const provider: LlmProvider = {
+      async complete() {
+        throw new Error('Presentation-only command should not call Codex');
+      },
+    };
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Switch to gallery',
+      activeViewId: viewId,
+    }, { plannerProvider: provider });
+    const assistant = snapshot.messages.find(message => message.role === 'assistant');
+    const context = assistant?.context as { presentationPlan?: { actions: Array<{ kind: string; layout?: string }> } } | undefined;
+
+    expect(snapshot.messages.map(message => message.content)).toContain('Switch to gallery');
+    expect(context?.presentationPlan?.actions).toContainEqual({ kind: 'set_layout', layout: 'gallery' });
+    expect(snapshot.actions).toHaveLength(0);
+  });
+
+  it('does not treat mixed semantic requests as presentation-only', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const prompts: string[] = [];
+    const provider = queuedProvider([noActionPlan('I will plan the new view.')], prompts);
+
+    await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Create a new taxonomy and show it as a gallery',
+      activeViewId: viewId,
+    }, { plannerProvider: provider });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('Create a new taxonomy and show it as a gallery');
+  });
+
+  it('composes gallery presentation and active-view refinement in one turn', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const conversationProvider = queuedProvider([{
+      reply: 'I will keep the gallery and refine the view.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'action_refine_exclude_tutorials',
+        kind: 'refine_view',
+        approval: 'preview',
+        rationale: 'Exclude pure tutorials from the active view.',
+        viewId,
+        instruction: 'Exclude pure tutorials.',
+      }],
+    }]);
+    const semanticProvider = queuedJsonProvider([semanticPlanFor(resourceId, evidenceRef, 'Refined inspiration')]);
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Switch to gallery and exclude pure tutorials.',
+      activeViewId: viewId,
+      currentLayout: 'board',
+      currentFilters: { states: 'visible' },
+    }, { plannerProvider: conversationProvider, actionPlannerProvider: semanticProvider });
+    const assistant = [...snapshot.messages].reverse().find(message => message.role === 'assistant');
+    const context = assistant?.context as { presentationPlan?: { actions: Array<{ kind: string; layout?: string }> } } | undefined;
+
+    expect(context?.presentationPlan?.actions).toContainEqual({ kind: 'set_layout', layout: 'gallery' });
+    expect(snapshot.actions[0]).toMatchObject({ kind: 'refine_view', status: 'succeeded' });
+  });
+
+  it('supplies active-view context to semantic conversation planning', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    const thread = createConversationThread(db);
+    const prompts: string[] = [];
+    const provider = queuedProvider([noActionPlan('I will make it stricter.')], prompts);
+
+    await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Keep this layout but make the view stricter.',
+      activeViewId: viewId,
+      currentLayout: 'gallery',
+      currentFilters: { states: 'weak_include' },
+    }, { plannerProvider: provider });
+
+    expect(prompts[0]).toContain('"activeViewId": "' + viewId + '"');
+    expect(prompts[0]).toContain('"currentLayout": "gallery"');
+    expect(prompts[0]).toContain('"latestRevisionId"');
+    expect(prompts[0]).toContain('"membershipCounts"');
+  });
+
+  it('presentation review commands carry the active source view', async () => {
+    const { db, resourceId } = seed();
+    const viewId = createAcceptedCandidateView(db, resourceId);
+    db.prepare(`
+      UPDATE memberships
+      SET state = 'needs_review'
+      WHERE view_id = ?
+    `).run(viewId);
+    const thread = createConversationThread(db);
+    const provider: LlmProvider = {
+      async complete() {
+        throw new Error('Review presentation command should not require semantic planning');
+      },
+    };
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Review the uncertain items in this view.',
+      activeViewId: viewId,
+    }, { plannerProvider: provider });
+    const assistant = snapshot.messages.find(message => message.role === 'assistant');
+    const context = assistant?.context as { presentationPlan?: { actions: Array<{ kind: string; sourceViewId?: string }> } } | undefined;
+
+    expect(context?.presentationPlan?.actions).toContainEqual({
+      kind: 'open_review',
+      queue: 'needs_review',
+      sourceViewId: viewId,
+    });
   });
 
   it('concurrent plan_view execution creates one deterministic view set', async () => {

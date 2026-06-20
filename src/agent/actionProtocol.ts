@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PresentationAction } from '../presentation/contracts.js';
 
 export const AgentActionApproval = z.enum(['automatic', 'preview', 'confirm']);
 
@@ -25,6 +26,7 @@ const StartReviewAction = BaseAction.extend({
   kind: z.literal('start_review'),
   approval: z.literal('automatic'),
   queue: z.string().default('unmarked'),
+  sourceViewId: z.string().optional(),
 });
 
 const ScanResourcesAction = BaseAction.extend({
@@ -81,13 +83,15 @@ export type AgentAction = z.infer<typeof AgentAction>;
 export const AgentTurnPlan = z.object({
   reply: z.string(),
   actions: z.array(AgentAction).default([]),
+  presentationActions: z.array(PresentationAction).optional(),
   questions: z.array(z.string()).default([]),
   assumptions: z.array(z.string()).default([]),
 });
 export type AgentTurnPlan = z.infer<typeof AgentTurnPlan>;
 
 export function validateAgentTurnPlan(raw: unknown): AgentTurnPlan {
-  const plan = AgentTurnPlan.parse(raw);
+  const parsed = AgentTurnPlan.parse(raw);
+  const plan = { ...parsed, presentationActions: parsed.presentationActions ?? [] };
   const ids = new Set<string>();
   for (const action of plan.actions) {
     if (ids.has(action.id)) throw new Error(`Duplicate agent action id: ${action.id}`);

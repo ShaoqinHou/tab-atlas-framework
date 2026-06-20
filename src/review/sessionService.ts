@@ -19,6 +19,7 @@ export interface ReviewSessionSnapshot {
     title?: string;
     status: string;
     commandText?: string;
+    sourceViewId?: string;
     currentIndex: number;
     totalItems: number;
     createdAt: string;
@@ -40,15 +41,21 @@ export function createReviewSession(
   input: ReviewSessionCreateInputValue = {},
 ): ReviewSessionSnapshot {
   const parsed = ReviewSessionCreateInput.parse(input);
-  const resourceIds = parsed.resourceIds?.length ? parsed.resourceIds : selectResourcesForSession(db, parsed.type, parsed.commandText);
+  const explicitIds = parsed.explicitResourceIds?.length ? parsed.explicitResourceIds : parsed.resourceIds;
+  const resourceIds = explicitIds?.length
+    ? dedupeIds(explicitIds)
+    : selectResourcesForSession(db, parsed.type, {
+      commandText: parsed.commandText,
+      sourceViewId: parsed.sourceViewId,
+    });
   const id = `review_session_${nanoid()}`;
   const now = new Date().toISOString();
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO review_sessions
-        (id, session_type, title, status, command_text, filters_json, current_index, total_items, created_at, updated_at)
-      VALUES (?, ?, ?, 'active', ?, '{}', 0, ?, ?, ?)
-    `).run(id, parsed.type, parsed.title ?? null, parsed.commandText ?? null, resourceIds.length, now, now);
+        (id, session_type, title, status, command_text, source_view_id, filters_json, current_index, total_items, created_at, updated_at)
+      VALUES (?, ?, ?, 'active', ?, ?, '{}', 0, ?, ?, ?)
+    `).run(id, parsed.type, parsed.title ?? null, parsed.commandText ?? null, parsed.sourceViewId ?? null, resourceIds.length, now, now);
     const insert = db.prepare(`
       INSERT INTO review_session_items (id, session_id, resource_id, position, status)
       VALUES (?, ?, ?, ?, 'pending')
@@ -72,6 +79,7 @@ export function getReviewSession(db: Database.Database, sessionId: string, prelo
       title: session.title ?? undefined,
       status: session.status,
       commandText: session.command_text ?? undefined,
+      sourceViewId: session.source_view_id ?? undefined,
       currentIndex: session.current_index,
       totalItems: session.total_items,
       createdAt: session.created_at,
@@ -156,16 +164,33 @@ export function resumeReviewSession(db: Database.Database, sessionId: string): R
   return getReviewSession(db, sessionId);
 }
 
-function selectResourcesForSession(db: Database.Database, type: ReviewSessionType, commandText?: string): string[] {
+function selectResourcesForSession(
+  db: Database.Database,
+  type: ReviewSessionType,
+  input: { commandText?: string; sourceViewId?: string },
+): string[] {
   if (type === 'extraction_failures') {
-    return (db.prepare(`
-      SELECT DISTINCT resource_id AS id
+    return dedupeIds((db.prepare(`
+      SELECT resource_id AS id
       FROM extraction_artifacts
       WHERE status LIKE 'failed%' OR error_code IS NOT NULL
+      UNION
+      SELECT resource_id AS id
+      FROM resource_extraction_state
+      WHERE status LIKE 'failed%' OR last_error IS NOT NULL
       LIMIT 200
-    `).all() as Array<{ id: string }>).map(row => row.id);
+    `).all() as Array<{ id: string }>).map(row => row.id));
   }
-  const terms = (commandText ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(term => term.length >= 3).slice(0, 10);
+  if (type === 'weak_matches') {
+    return input.sourceViewId ? sourceViewResourceIds(db, input.sourceViewId, ['weak_include', 'needs_review']) : [];
+  }
+  if (type === 'conflicts') {
+    return input.sourceViewId ? sourceViewResourceIds(db, input.sourceViewId, ['conflict']) : [];
+  }
+  if (type === 'ambiguous') {
+    return input.sourceViewId ? sourceViewResourceIds(db, input.sourceViewId, ['weak_include', 'needs_review', 'conflict']) : [];
+  }
+  const terms = (input.commandText ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(term => term.length >= 3).slice(0, 10);
   const resources = db.prepare(`
     SELECT r.id, r.title_best, r.host, r.redacted_url,
            COALESCE((
@@ -178,6 +203,12 @@ function selectResourcesForSession(db: Database.Database, type: ReviewSessionTyp
       SELECT 1 FROM user_annotations ua
       WHERE ua.target_kind = 'resource' AND ua.target_id = r.id
     )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM atomic_items ai
+        JOIN user_annotations ua ON ua.target_kind = 'atomic_item' AND ua.target_id = ai.id
+        WHERE ai.resource_id = r.id
+      )
     ORDER BY r.last_seen_at DESC
     LIMIT 500
   `).all() as Array<{ id: string; title_best: string | null; host: string; redacted_url: string; groups: string }>;
@@ -185,6 +216,37 @@ function selectResourcesForSession(db: Database.Database, type: ReviewSessionTyp
   return resources
     .filter(row => terms.some(term => `${row.title_best ?? ''} ${row.host} ${row.redacted_url} ${row.groups}`.toLowerCase().includes(term)))
     .map(row => row.id);
+}
+
+function sourceViewResourceIds(db: Database.Database, sourceViewId: string, states: string[]): string[] {
+  if (!states.length) return [];
+  const rows = db.prepare(`
+    SELECT resource_id, MIN(position) AS first_seen
+    FROM (
+      SELECT
+        CASE
+          WHEN m.target_kind = 'resource' THEN m.target_id
+          ELSE ai.resource_id
+        END AS resource_id,
+        m.rowid AS position
+      FROM memberships m
+      LEFT JOIN atomic_items ai ON ai.id = m.target_id AND m.target_kind = 'atomic_item'
+      WHERE m.view_id = ?
+        AND m.state IN (${states.map(() => '?').join(',')})
+        AND (
+          m.target_kind = 'resource'
+          OR ai.resource_id IS NOT NULL
+        )
+    )
+    WHERE resource_id IS NOT NULL
+    GROUP BY resource_id
+    ORDER BY first_seen
+  `).all(sourceViewId, ...states) as Array<{ resource_id: string | null }>;
+  return rows.flatMap(row => row.resource_id ? [row.resource_id] : []);
+}
+
+function dedupeIds(ids: string[]): string[] {
+  return [...new Set(ids.filter(Boolean))];
 }
 
 function nextSessionItems(db: Database.Database, sessionId: string, preload: number): Array<{ resource_id: string; position: number }> {
@@ -255,7 +317,7 @@ function frequentTags(db: Database.Database): string[] {
 
 function getSessionRow(db: Database.Database, sessionId: string): ReviewSessionRow {
   const row = db.prepare(`
-    SELECT id, session_type, title, status, command_text, current_index, total_items, created_at, updated_at
+    SELECT id, session_type, title, status, command_text, source_view_id, current_index, total_items, created_at, updated_at
     FROM review_sessions
     WHERE id = ?
   `).get(sessionId) as ReviewSessionRow | undefined;
@@ -283,6 +345,7 @@ type ReviewSessionRow = {
   title: string | null;
   status: string;
   command_text: string | null;
+  source_view_id: string | null;
   current_index: number;
   total_items: number;
   created_at: string;

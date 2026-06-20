@@ -31,6 +31,8 @@ import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBri
 import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
 import { buildResourceBrief } from '../resources/briefs.js';
+import { planPresentationActionsFromText } from '../presentation/actionPlanner.js';
+import { getTargetInspector, getViewSectionPage, getViewWorkspace } from '../presentation/workspaceService.js';
 import {
   completeOnboardingStep,
   consumeBootstrapSecret,
@@ -55,6 +57,7 @@ import {
   listPairingChallenges,
   PairingChallengeError,
 } from '../security/pairingChallenge.js';
+import { rePairExtensionCapability } from '../security/extensionRepair.js';
 import { importPathPolicyFromEnv, listCaptureRoots, listRecentCaptureFiles, validateImportPath } from '../security/importPathPolicy.js';
 import { installLocalRequestGuard, writeSecurityAuditRecord } from '../security/localRequestGuard.js';
 import { applyViewPlan, previewView } from '../views/service.js';
@@ -65,6 +68,7 @@ import {
   listViewRevisions,
   recordMembershipFeedback,
   rejectViewRevision,
+  undoMembershipFeedback,
 } from '../views/feedbackService.js';
 import {
   createReviewSession,
@@ -91,6 +95,7 @@ const app = Fastify({ logger: true });
 installLocalRequestGuard(app, db, { host, port });
 const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
+const webUiRoot = path.resolve(process.cwd(), 'web-ui');
 const bootstrapSecret = (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0)
   ? ensureBootstrapSecret(db, {
     directory: process.env.TABATLAS_BOOTSTRAP_DIR ?? path.join(process.cwd(), 'data'),
@@ -134,6 +139,21 @@ app.get('/health', async () => ({ ok: true, app: 'tabatlas', time: new Date().to
 app.get('/', async (_request, reply) => {
   const html = await fs.readFile(indexHtml, 'utf8');
   return reply.type('text/html; charset=utf-8').send(html);
+});
+
+app.get('/web-ui/*', async (request, reply) => {
+  const params = request.params as { '*': string };
+  const requestedPath = params['*'] ?? '';
+  const resolvedPath = path.resolve(webUiRoot, requestedPath);
+  if (!resolvedPath.startsWith(`${webUiRoot}${path.sep}`)) {
+    return reply.status(404).send({ ok: false, error: 'not found' });
+  }
+  try {
+    const content = await fs.readFile(resolvedPath);
+    return reply.type(contentTypeFor(resolvedPath)).send(content);
+  } catch {
+    return reply.status(404).send({ ok: false, error: 'not found' });
+  }
 });
 
 app.post('/snapshot', async (request, reply) => {
@@ -293,10 +313,48 @@ app.post('/api/security/capabilities/:id/rotate', async (request, reply) => {
   return reply.send(rotated);
 });
 
+app.post('/api/security/capabilities/:id/re-pair', async (request, reply) => {
+  const params = request.params as { id: string };
+  const body = asRecord(request.body);
+  try {
+    const repaired = rePairExtensionCapability(db, params.id, {
+      ttlMs: typeof body.ttlMs === 'number' ? body.ttlMs : undefined,
+    });
+    writeSecurityAuditRecord(db, {
+      eventType: 'extension_repair',
+      method: request.method,
+      route: request.url,
+      outcome: 'allowed',
+      capabilityId: repaired.revokedCapability.id,
+      details: {
+        browser: repaired.browser,
+        challengeId: repaired.challenge.id,
+        expiresAt: repaired.expiresAt,
+      },
+    });
+    return reply.send(repaired);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = /Chrome or Edge|extension capabilities/.test(message) ? 400 : 404;
+    writeSecurityAuditRecord(db, {
+      eventType: 'extension_repair',
+      method: request.method,
+      route: request.url,
+      outcome: 'denied',
+      capabilityId: params.id,
+      reason: message,
+    });
+    return reply.status(status).send({ ok: false, error: message });
+  }
+});
+
 app.post('/api/security/pairing-codes', async (request, reply) => {
   const body = asRecord(request.body);
   const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
   const browser = typeof body.browser === 'string' ? body.browser : 'unknown';
+  if (browser !== 'unknown' && !ProductBrowser.safeParse(browser).success) {
+    return reply.status(400).send({ ok: false, error: 'browser must be chrome or edge' });
+  }
   const created = createPairingChallenge(db, {
     kind: 'extension',
     scopes: ['snapshot:write'],
@@ -533,11 +591,16 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = getCodexProvider({ role: 'conversation_planner', reasoningEffort, scope: `conversation:${params.threadId}` });
+  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
+    activeViewId: typeof body.activeViewId === 'string' ? body.activeViewId : undefined,
+    currentLayout: typeof body.currentLayout === 'string' ? body.currentLayout : undefined,
+    currentFilters: body.currentFilters,
   }, {
     plannerProvider: provider,
+    actionPlannerProvider: actionProvider,
   });
   return reply.send(snapshot);
 });
@@ -772,6 +835,55 @@ app.get('/api/views/:viewId/preview', async (request, reply) => {
   return reply.send(previewView(db, params.viewId));
 });
 
+app.get('/api/views/:viewId/workspace', async (request, reply) => {
+  const params = request.params as { viewId: string };
+  const query = request.query as { limit?: string };
+  return reply.send(getViewWorkspace(db, params.viewId, {
+    maxCardsPerSection: query.limit ? Number(query.limit) : undefined,
+  }));
+});
+
+app.get('/api/views/:viewId/sections/:sectionId', async (request, reply) => {
+  const params = request.params as { viewId: string; sectionId: string };
+  const query = request.query as { cursor?: string; limit?: string };
+  return reply.send(getViewSectionPage(db, params.viewId, params.sectionId, {
+    cursor: query.cursor ? Number(query.cursor) : undefined,
+    limit: query.limit ? Number(query.limit) : undefined,
+  }));
+});
+
+app.get('/api/targets/:targetKind/:targetId/inspector', async (request, reply) => {
+  const params = request.params as { targetKind: string; targetId: string };
+  const query = request.query as { viewId?: string };
+  return reply.send(getTargetInspector(db, {
+    targetKind: params.targetKind,
+    targetId: params.targetId,
+    viewId: query.viewId,
+  }));
+});
+
+app.get('/api/resources/:id/inspector', async (request, reply) => {
+  const params = request.params as { id: string };
+  const query = request.query as { viewId?: string };
+  return reply.send(getTargetInspector(db, {
+    targetKind: 'resource',
+    targetId: params.id,
+    viewId: query.viewId,
+  }));
+});
+
+app.post('/api/presentation/actions', async (request, reply) => {
+  const body = asRecord(request.body);
+  const command = typeof body.command === 'string' ? body.command : '';
+  const activeViewId = typeof body.activeViewId === 'string' ? body.activeViewId : undefined;
+  if (!command.trim()) return reply.status(400).send({ ok: false, error: 'command is required' });
+  const workspace = activeViewId ? getViewWorkspace(db, activeViewId, { maxCardsPerSection: 100 }) : undefined;
+  return reply.send(planPresentationActionsFromText(command, {
+    activeViewId,
+    workspace,
+  }));
+});
+
 app.get('/api/views/:viewId/revisions', async (request, reply) => {
   const params = request.params as { viewId: string };
   return reply.send(listViewRevisions(db, params.viewId));
@@ -805,6 +917,11 @@ app.post('/api/membership-feedback', async (request, reply) => {
   return reply.send(recordMembershipFeedback(db, asRecord(request.body) as Parameters<typeof recordMembershipFeedback>[1]));
 });
 
+app.post('/api/membership-feedback/:feedbackId/undo', async (request, reply) => {
+  const params = request.params as { feedbackId: string };
+  return reply.send(undoMembershipFeedback(db, params.feedbackId));
+});
+
 app.listen({ host, port }).catch(err => {
   app.log.error(err);
   process.exit(1);
@@ -815,6 +932,16 @@ process.once('SIGTERM', () => jobWorker.stop());
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+function contentTypeFor(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.js') return 'text/javascript; charset=utf-8';
+  if (extension === '.css') return 'text/css; charset=utf-8';
+  if (extension === '.html') return 'text/html; charset=utf-8';
+  if (extension === '.json') return 'application/json; charset=utf-8';
+  if (extension === '.svg') return 'image/svg+xml; charset=utf-8';
+  return 'application/octet-stream';
 }
 
 function parseJsonArray(value: string): string[] {

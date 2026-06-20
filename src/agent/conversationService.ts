@@ -14,12 +14,14 @@ import type { LlmProvider } from '../llm/types.js';
 import { runAgentCommand, type RunAgentCommandInput } from './commandService.js';
 import { createCodexScanJob } from './scanService.js';
 import { addUserAnnotation, getUserAnnotationById } from '../annotations/service.js';
-import { getReviewNext } from '../review/service.js';
+import { createReviewSession } from '../review/sessionService.js';
 import { explainMembership } from './tools.js';
 import { acceptViewRevision, getLatestViewRevision } from '../views/feedbackService.js';
 import { applyViewPlan, createUserCommand, persistSemanticViewPlan, previewView } from '../views/service.js';
 import { redactSensitiveText, redactUrlForPrompt } from '../security/urlPrivacy.js';
 import { withPromptManifestRecorder } from '../security/promptManifest.js';
+import { isPresentationOnlyCommand, planPresentationActionsFromText } from '../presentation/actionPlanner.js';
+import { getViewWorkspace } from '../presentation/workspaceService.js';
 import { materializeAgentTurnPlan } from './actionIdentity.js';
 import {
   claimActionEffect,
@@ -74,10 +76,14 @@ export interface ConversationSnapshot {
 export interface SendConversationMessageInput {
   threadId: string;
   content: string;
+  activeViewId?: string;
+  currentLayout?: string;
+  currentFilters?: unknown;
 }
 
 export interface SendConversationMessageOptions {
   plannerProvider: LlmProvider;
+  actionPlannerProvider?: LlmProvider;
 }
 
 export interface AgentActionExecutionOptions {
@@ -165,19 +171,56 @@ export async function sendConversationMessage(
     content: input.content,
   });
   const history = listConversationMessages(db, input.threadId);
-  const context = buildConversationContext(db, input.content);
-  const plan = await planConversationTurn(db, options.plannerProvider, history, context);
+  const context = buildConversationContext(db, input.content, input);
+  const presentationPlan = planPresentationTurn(db, input);
+  if (presentationPlan && isPresentationOnlyCommand(input.content)) {
+    appendConversationMessage(db, {
+      threadId: input.threadId,
+      role: 'assistant',
+      content: presentationPlan.reply,
+      context: { presentationPlan, retrievedContext: context },
+    });
+    return getConversationSnapshot(db, input.threadId);
+  }
+  const planned = await planConversationTurn(db, options.plannerProvider, history, context);
+  const plan = mergePresentationActions(planned, presentationPlan?.actions ?? []);
   const assistant = appendConversationMessage(db, {
     threadId: input.threadId,
     role: 'assistant',
     content: plan.reply,
-    context: { questions: plan.questions, assumptions: plan.assumptions, retrievedContext: context },
+    context: {
+      questions: plan.questions,
+      assumptions: plan.assumptions,
+      retrievedContext: context,
+      presentationPlan: (plan.presentationActions ?? []).length
+        ? { reply: presentationPlan?.reply ?? 'Updated the workspace presentation.', actions: plan.presentationActions ?? [] }
+        : undefined,
+    },
   });
   const persistedPlan = persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
   for (const action of actionsReadyWithoutConfirmation(persistedPlan)) {
-    await runPersistedAgentAction(db, action.id, { plannerProvider: options.plannerProvider });
+    await runPersistedAgentAction(db, action.id, {
+      plannerProvider: options.actionPlannerProvider ?? options.plannerProvider,
+    });
   }
   return getConversationSnapshot(db, input.threadId);
+}
+
+function planPresentationTurn(
+  db: Database.Database,
+  input: SendConversationMessageInput,
+): ReturnType<typeof planPresentationActionsFromText> | null {
+  if (!input.activeViewId) return null;
+  try {
+    const workspace = getViewWorkspace(db, input.activeViewId, { maxCardsPerSection: 100 });
+    const plan = planPresentationActionsFromText(input.content, {
+      activeViewId: input.activeViewId,
+      workspace,
+    });
+    return plan.actions.length ? plan : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function planConversationTurn(
@@ -189,8 +232,10 @@ export async function planConversationTurn(
   const prompt = [
     'You are the TabAtlas conversational agent.',
     'Use only local TabAtlas context supplied here. Do not browse pages, mutate browser tabs, inspect cookies, parse sessions, run shell commands, or invent transcript content.',
-    'Return a JSON AgentTurnPlan with reply, actions, questions, and assumptions.',
+    'Return a JSON AgentTurnPlan with reply, actions, presentationActions, questions, and assumptions.',
     'Allowed action kinds: plan_view, refine_view, start_review, scan_resources, add_annotation, explain_membership, accept_view.',
+    'When a request changes the active semantic view, use refine_view with the supplied activeViewId instead of creating a detached heuristic action.',
+    'When a request reviews weak, conflicting, or uncertain items in the active view, include sourceViewId on start_review.',
     'Preview/read actions may use approval automatic or preview. Annotations, broad scans, and view acceptance must use approval confirm.',
     '',
     'Conversation history:',
@@ -325,7 +370,21 @@ export async function executeAgentAction(
       });
     }
     case 'start_review':
-      return getReviewNext(db, { queue: action.queue, preload: 2 });
+      return createReviewSession(db, {
+        type: action.queue === 'weak' || action.queue === 'needs_review'
+          ? 'weak_matches'
+          : action.queue === 'conflict'
+            ? 'conflicts'
+            : action.queue === 'ambiguous'
+              ? 'ambiguous'
+              : action.queue === 'extraction_failure'
+                ? 'extraction_failures'
+                : 'unmarked',
+        title: `${action.queue.replace(/_/g, ' ')} review`,
+        commandText: action.queue,
+        sourceViewId: action.sourceViewId,
+        preload: 5,
+      });
     case 'scan_resources':
       return runActionEffect(db, action.id, 'scan_job_create', {
         resourceIds: action.resourceIds,
@@ -585,6 +644,22 @@ function replayedViewPlanningResult(db: Database.Database, commandId: string, vi
   };
 }
 
+function mergePresentationActions(
+  plan: AgentTurnPlanValue,
+  deterministicActions: NonNullable<ReturnType<typeof planPresentationActionsFromText>>['actions'],
+): AgentTurnPlanValue {
+  if (!deterministicActions.length) return plan;
+  const seen = new Set((plan.presentationActions ?? []).map(action => JSON.stringify(action)));
+  const presentationActions = [...(plan.presentationActions ?? [])];
+  for (const action of deterministicActions) {
+    const key = JSON.stringify(action);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    presentationActions.push(action);
+  }
+  return { ...plan, presentationActions };
+}
+
 export function listConversationMessages(
   db: Database.Database,
   threadId: string,
@@ -678,7 +753,11 @@ function actionFromRow(row: AgentActionRow): AgentActionRecord {
   };
 }
 
-function buildConversationContext(db: Database.Database, message: string): unknown {
+function buildConversationContext(
+  db: Database.Database,
+  message: string,
+  input: Pick<SendConversationMessageInput, 'activeViewId' | 'currentLayout' | 'currentFilters'> = {},
+): unknown {
   const terms = message.toLowerCase().split(/[^a-z0-9]+/).filter(term => term.length >= 3).slice(0, 8);
   const likeClauses = terms.map(() => 'LOWER(COALESCE(title_best, \'\') || \' \' || host || \' \' || redacted_url) LIKE ?');
   const params = terms.map(term => `%${term}%`);
@@ -696,6 +775,10 @@ function buildConversationContext(db: Database.Database, message: string): unkno
     LIMIT 8
   `).all() as Array<{ id: string; name: string; status: string; created_at: string }>;
   return {
+    activeView: input.activeViewId ? activeViewContext(db, input.activeViewId, {
+      currentLayout: input.currentLayout,
+      currentFilters: input.currentFilters,
+    }) : undefined,
     resources: resources.map(resource => ({
       id: resource.id,
       title: resource.title_best ? redactSensitiveText(resource.title_best) : null,
@@ -710,6 +793,34 @@ function buildConversationContext(db: Database.Database, message: string): unkno
       createdAt: view.created_at,
     })),
   };
+}
+
+function activeViewContext(
+  db: Database.Database,
+  viewId: string,
+  input: { currentLayout?: string; currentFilters?: unknown },
+): unknown {
+  try {
+    const preview = previewView(db, viewId);
+    const latestRevision = getLatestViewRevision(db, viewId);
+    return {
+      activeViewId: viewId,
+      name: preview.name,
+      goal: preview.goal,
+      status: preview.status,
+      latestRevisionId: latestRevision?.id,
+      sections: Object.entries(preview.countsBySection).map(([section, count]) => ({ section, count })),
+      membershipCounts: preview.countsByState,
+      currentLayout: input.currentLayout,
+      currentFilters: input.currentFilters,
+    };
+  } catch (error) {
+    return {
+      activeViewId: viewId,
+      unavailable: true,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function validateActionPlan(plan: AgentTurnPlanValue): string[] {
