@@ -38,6 +38,15 @@ export const BrowserExecutionEvidence = z.object({
 });
 export type BrowserExecutionEvidence = z.infer<typeof BrowserExecutionEvidence>;
 
+export const ExtensionPairingBrowser = z.enum(['chrome', 'edge']);
+export type ExtensionPairingBrowser = z.infer<typeof ExtensionPairingBrowser>;
+
+export function pairingBrowserForExecution(
+  browser: BrowserExecutionEvidence['browser'],
+): ExtensionPairingBrowser {
+  return browser === 'edge' ? 'edge' : 'chrome';
+}
+
 export function validateBrowserExecutionEvidence(
   raw: BrowserExecutionEvidence,
 ): string[] {
