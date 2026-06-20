@@ -51,6 +51,8 @@ describe('workspace dashboard shell', () => {
     expect(review).toContain("state.remoteMedia !== 'off'");
     expect(conversation).toContain('handleCompletedActionResults');
     expect(conversation).toContain('actionStateSnapshot');
+    expect(conversation).toContain('messageIdSnapshot');
+    expect(conversation).toContain('executeNewPresentationPlans');
     expect(conversation).toContain('previousStates');
     expect(conversation).toContain("kind === 'start_review'");
     expect(conversation).toContain("kind === 'explain_membership'");
@@ -168,12 +170,13 @@ describe('workspace dashboard shell', () => {
     expect(evalScript).toContain("roleplay('returning-user')");
     expect(evalScript).toContain('TABATLAS_FAKE_CODEX_PROVIDER');
     expect(evalScript).toContain('large-workspace-${size}');
-    expect(evalScript).toContain('integrity-extension-repair');
-    expect(evalScript).toContain('integrity-review-queues');
-    expect(evalScript).toContain('integrity-mixed-conversation');
-    expect(evalScript).toContain('integrity-server-owned-undo');
-    expect(evalScript).toContain('integrity-action-replay');
-    expect(evalScript).toContain('integrity-revision-comparison');
+    expect(evalScript).toContain('extension-repair-executable');
+    expect(evalScript).toContain('review-queues-executable');
+    expect(evalScript).toContain('mixed-conversation-executable');
+    expect(evalScript).toContain('server-owned-undo-executable');
+    expect(evalScript).toContain('presentation-replay-executable');
+    expect(evalScript).toContain('revision-comparison-executable');
+    expect(evalScript).not.toContain('integrityScenarioChecks');
     expect(evalScript).toContain('axeAccessibilityCheck');
     expect(evalScript).toContain("axeAccessibilityCheck(page, 'ask-conversation')");
     expect(evalScript).toContain("axeAccessibilityCheck(page, 'board-gallery-map')");

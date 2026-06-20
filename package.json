@@ -29,7 +29,8 @@
     "release:manifest": "tsx scripts/write-release-manifest.ts",
     "import": "tsx scripts/import-snapshot.ts",
     "scan:codex": "tsx scripts/scan-codex.ts",
-    "smoke:codex": "tsx scripts/smoke-codex.ts"
+    "smoke:codex": "tsx scripts/smoke-codex.ts",
+    "smoke:product-browser-repair": "tsx scripts/product-browser-repair-smoke.ts"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",

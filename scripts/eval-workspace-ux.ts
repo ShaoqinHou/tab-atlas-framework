@@ -9,6 +9,7 @@ import { importSnapshot } from '../src/import/headlessSnapshot.js';
 import { createCapability } from '../src/security/localCapability.js';
 import { validateRoleplayScenarioCoverage, workspaceRoleplayScenarios, type WorkspaceRoleplayScenario } from '../src/presentation/roleplayScenarios.js';
 import { createUserCommand, persistSemanticViewPlan } from '../src/views/service.js';
+import { createViewRevision } from '../src/views/feedbackService.js';
 import type { MembershipState, SemanticViewPlan } from '../src/shared/schemas.js';
 
 type ScenarioResult = {
@@ -24,6 +25,7 @@ type ScenarioResult = {
 
 type SeededDatabase = {
   token: string;
+  reviewQueueView: string;
   perfView1000: string;
   perfView5000: string;
 };
@@ -89,6 +91,7 @@ function seedDatabase(targetDbPath: string): SeededDatabase {
     seedExtractionArtifacts(db, resources);
     seedAtomicItems(db, resources);
 
+    const reviewQueueView = seedReviewQueueView(db, resources);
     const perfView1000 = seedPerformanceView(db, resources, 1000, 'view_workspace_ux_perf_1000');
     const perfView5000 = seedPerformanceView(db, resources, 5000, 'view_workspace_ux_perf_5000');
     const { token } = createCapability(db, {
@@ -96,7 +99,7 @@ function seedDatabase(targetDbPath: string): SeededDatabase {
       label: 'Workspace UX role-play evaluation',
       scopes: ['admin'],
     });
-    return { token, perfView1000, perfView5000 };
+    return { token, reviewQueueView, perfView1000, perfView5000 };
   } finally {
     db.close();
   }
@@ -202,6 +205,21 @@ function seedExtractionArtifacts(db: ReturnType<typeof openDatabase>, resources:
       '2026-06-19T00:00:00.000Z',
     );
   }
+
+  const insertFailure = db.prepare(`
+    INSERT INTO extraction_artifacts
+      (id, resource_id, recipe_id, artifact_kind, text_excerpt, json_payload, source_url, provenance, confidence, status, error_code, extracted_at)
+    VALUES (?, ?, ?, 'summary', '', NULL, NULL, 'workspace_ux_seed', 0, 'failed', 'workspace_ux_failed_extract', ?)
+    ON CONFLICT(resource_id, recipe_id) DO NOTHING
+  `);
+  for (const [index, resource] of resources.slice(24, 40).entries()) {
+    insertFailure.run(
+      `ev_workspace_ux_failed_${index}`,
+      resource.id,
+      `workspace_ux_failed_summary_${index}`,
+      '2026-06-19T00:00:00.000Z',
+    );
+  }
 }
 
 function seedAtomicItems(db: ReturnType<typeof openDatabase>, resources: Array<{ id: string; title: string }>): void {
@@ -230,6 +248,96 @@ function seedAtomicItems(db: ReturnType<typeof openDatabase>, resources: Array<{
       '2026-06-19T00:00:00.000Z',
     );
   }
+}
+
+function seedReviewQueueView(db: ReturnType<typeof openDatabase>, resources: Array<{ id: string; title: string }>): string {
+  const atomicItems = db.prepare(`
+    SELECT id, resource_id, name
+    FROM atomic_items
+    ORDER BY id
+    LIMIT 12
+  `).all() as Array<{ id: string; resource_id: string; name: string }>;
+  const resourceTitle = new Map(resources.map(resource => [resource.id, resource.title]));
+  const selectedResources = [...new Set(atomicItems.map(item => item.resource_id))].slice(0, 10);
+  const commandText = 'Executable review queue fixture with resource and atomic duplicates.';
+  const commandId = createUserCommand(db, commandText, { eval: 'workspace_ux_review_queues' }, 'cmd_workspace_ux_review_queues');
+  const memberships = selectedResources.flatMap((resourceId, index) => {
+    const atomic = atomicItems.find(item => item.resource_id === resourceId);
+    const state: MembershipState = index % 4 === 0 ? 'conflict' : index % 3 === 0 ? 'needs_review' : 'weak_include';
+    const shared = {
+      section: index % 2 === 0 ? 'Queue coverage' : 'Atomic duplicates',
+      confidence: state === 'conflict' ? 0.48 : state === 'needs_review' ? 0.52 : 0.58,
+      reason: `${resourceTitle.get(resourceId) ?? resourceId} is seeded for executable queue coverage.`,
+      evidenceRefs: [`title:${resourceId}`],
+      conflict: state === 'conflict' ? 'Seeded conflict for executable review coverage.' : undefined,
+    };
+    return [
+      {
+        targetKind: 'resource' as const,
+        targetId: resourceId,
+        state,
+        ...shared,
+      },
+      ...(atomic ? [{
+        targetKind: 'atomic_item' as const,
+        targetId: atomic.id,
+        state: index % 2 === 0 ? 'needs_review' as MembershipState : 'weak_include' as MembershipState,
+        section: shared.section,
+        confidence: 0.54,
+        reason: `${atomic.name} shares its parent resource with the review fixture.`,
+        evidenceRefs: [`atomic:${atomic.id}`],
+      }] : []),
+    ];
+  });
+  const plan: SemanticViewPlan = {
+    commandText,
+    views: [{
+      name: 'Executable review queue fixture',
+      description: 'Fixture proving source-view review queues execute from server state.',
+      goal: commandText,
+      inclusionRules: ['Include weak, conflicting, and atomic-backed resources for queue tests.'],
+      exclusionRules: ['Do not include unrelated performance-only resources.'],
+      sections: ['Queue coverage', 'Atomic duplicates'],
+      confidence: 0.82,
+      memberships,
+    }],
+    reviewQueues: [{
+      queueName: 'uncertain',
+      reason: 'Executable review queue fixture resources.',
+      targetIds: selectedResources,
+    }],
+    explanation: 'Seeded executable review queue fixture.',
+  };
+  const viewId = 'view_workspace_ux_review_queues';
+  persistSemanticViewPlan(db, commandId, plan, {
+    origin: 'workspace_ux_review_queues',
+    viewIds: [viewId],
+  });
+  const parent = db.prepare(`
+    SELECT id
+    FROM view_revisions
+    WHERE view_id = ?
+    ORDER BY revision_number DESC
+    LIMIT 1
+  `).get(viewId) as { id: string } | undefined;
+  createViewRevision(db, {
+    viewId,
+    parentRevisionId: parent?.id,
+    commandId,
+    status: 'proposed',
+    snapshot: {
+      commandText: `${commandText} Revised.`,
+      view: {
+        ...plan.views[0],
+        goal: `${commandText} Revised goal.`,
+        inclusionRules: [...plan.views[0].inclusionRules, 'Promote duplicated atomic evidence for human review.'],
+        memberships: memberships.map((membership, index) => index === 0
+          ? { ...membership, state: 'strong_include' as MembershipState, confidence: 0.9 }
+          : membership).slice(0, Math.max(1, memberships.length - 1)),
+      },
+    },
+  });
+  return viewId;
 }
 
 function seedPerformanceView(
@@ -363,7 +471,12 @@ async function runBrowserEvaluation(seededDb: SeededDatabase): Promise<EvalRepor
     scenarios.push(await runScenario(page, roleplay('returning-user'), () => returningUser(page)));
 
     scenarios.push(await runScenario(page, operationsScenario(), () => operationsSmoke(page)));
-    scenarios.push(...integrityScenarioChecks());
+    scenarios.push(await runScenario(page, executableExtensionRepairScenario(), () => extensionRepairExecutable(page)));
+    scenarios.push(await runScenario(page, executableReviewQueueScenario(), () => reviewQueuesExecutable(page, seededDb.reviewQueueView)));
+    scenarios.push(await runScenario(page, executableMixedConversationScenario(), () => mixedConversationExecutable(page, seededDb.perfView1000)));
+    scenarios.push(await runScenario(page, executableServerUndoScenario(), () => serverOwnedUndoExecutable(page, seededDb.reviewQueueView)));
+    scenarios.push(await runScenario(page, executablePresentationReplayScenario(), () => presentationReplayExecutable(page, seededDb.perfView1000)));
+    scenarios.push(await runScenario(page, executableRevisionComparisonScenario(), () => revisionComparisonExecutable(page, seededDb.reviewQueueView)));
     scenarios.push(await runPerformanceScenario(page, seededDb.perfView1000, 1000));
     scenarios.push(await runPerformanceScenario(page, seededDb.perfView5000, 5000));
 
@@ -432,50 +545,77 @@ function operationsScenario(): WorkspaceRoleplayScenario {
   };
 }
 
-function integrityScenarioChecks(): ScenarioResult[] {
-  const operations = fs.readFileSync(path.join(root, 'web-ui', 'operations.js'), 'utf8');
-  const review = fs.readFileSync(path.join(root, 'web-ui', 'review.js'), 'utf8');
-  const conversation = fs.readFileSync(path.join(root, 'web-ui', 'conversation.js'), 'utf8');
-  const feedback = fs.readFileSync(path.join(root, 'src', 'views', 'feedbackService.ts'), 'utf8');
-  const presentation = fs.readFileSync(path.join(root, 'web-ui', 'presentationActions.js'), 'utf8');
-  return [
-    resultFromCheck(
-      'integrity-extension-repair',
-      'Extension re-pair uses the UI route, displays one-time ID and secret, and acknowledges by removing the secret block.',
-      operations.includes('/re-pair') && operations.includes('Copy challenge ID') && operations.includes('Copy secret') && operations.includes('data-ack-pairing-secret'),
-      'extension re-pair route and one-time secret controls are wired',
-    ),
-    resultFromCheck(
-      'integrity-review-queues',
-      'Review starts from semantic server queues instead of current loaded cards.',
-      review.includes('sourceViewId') && !review.includes('resourceIdsForQueue') && review.includes('/api/review-sessions'),
-      'review UI sends sourceViewId and no longer sends loaded card IDs',
-    ),
-    resultFromCheck(
-      'integrity-mixed-conversation',
-      'Mixed semantic/presentation conversation preserves both action families.',
-      conversation.includes('currentLayout') && conversation.includes('presentationPlan') && conversation.includes('actionStateSnapshot'),
-      'conversation sends active layout, stores presentation plans, and snapshots action state',
-    ),
-    resultFromCheck(
-      'integrity-server-owned-undo',
-      'Correction undo state is captured server-side and stale undo is rejected.',
-      feedback.includes('membership_feedback_undo') && feedback.includes('assertLatestFeedbackForMembership') && feedback.includes('sanitizeCorrection'),
-      'server-owned undo table and stale undo guard are active',
-    ),
-    resultFromCheck(
-      'integrity-action-replay',
-      'Historical succeeded actions are not routed again after reload.',
-      conversation.includes('previousStates') && conversation.includes('becameSucceeded') && conversation.includes('handleCompletedActionResults(priorActionStates)'),
-      'client routing is based on newly created or transitioned action states',
-    ),
-    resultFromCheck(
-      'integrity-revision-comparison',
-      'Revision comparison opens a visual artifact with membership and rule changes.',
-      presentation.includes('showRevisionComparison') && feedback.includes('membershipChanges') && feedback.includes('ruleChanges'),
-      'comparison action renders visual diff data instead of a raw compared notice',
-    ),
-  ];
+function executableExtensionRepairScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'extension-repair-executable',
+    'Extension re-pair executes from the security UI',
+    'Revoke an extension capability, show a one-time re-pair challenge, exchange it, and prove old-token denial plus new-token snapshot write.',
+  );
+}
+
+function executableReviewQueueScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'review-queues-executable',
+    'Review queues execute from server source views',
+    'Start source-view review queues through the UI and prove weak/atomic duplicates, unmarked, and extraction-failure queues use persisted server state.',
+  );
+}
+
+function executableMixedConversationScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'mixed-conversation-executable',
+    'Mixed semantic and presentation turn executes both parts',
+    'Send one turn that switches layout and refines the active semantic view, then verify the persisted action and presentation plan.',
+  );
+}
+
+function executableServerUndoScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'server-owned-undo-executable',
+    'Correction undo is server-owned',
+    'Submit a forged correction payload through the public API and prove undo restores the server snapshot while stale undo is rejected.',
+  );
+}
+
+function executablePresentationReplayScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'presentation-replay-executable',
+    'Historical presentation plans do not replay',
+    'Persist a historical gallery plan, reload on board layout, send a semantic-only turn, and prove the old plan does not run again.',
+  );
+}
+
+function executableRevisionComparisonScenario(): WorkspaceRoleplayScenario {
+  return executableScenario(
+    'revision-comparison-executable',
+    'Revision comparison renders a visual artifact',
+    'Ask to compare the latest and previous revisions and verify the comparison artifact contains membership and rule changes.',
+  );
+}
+
+function executableScenario(id: string, title: string, expectedVisibleResult: string): WorkspaceRoleplayScenario {
+  return {
+    id,
+    title,
+    persona: {
+      id,
+      name: 'Executable gate',
+      mindset: 'The gate should prove behavior by executing the browser and receiver paths.',
+      patience: 'medium',
+      visualPreference: 'balanced',
+      trustLevel: 'skeptical',
+    },
+    startingState: 'The seeded workspace UX database and authenticated local receiver are running.',
+    steps: [{
+      userIntent: title,
+      userAction: expectedVisibleResult,
+      expectedVisibleResult,
+      successSignals: ['The behavior is executed.', 'The receiver state matches the UI result.', 'No token or secret is persisted in report output.'],
+      failureSignals: ['The check only scans source text.', 'The UI path is skipped.', 'The persisted state does not match the visible result.'],
+      maxPrimaryClicks: 8,
+    }],
+    completionQuestion: 'Did the executable path prove the behavior?',
+  };
 }
 
 async function creativeCollector(page: Page): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
@@ -756,6 +896,204 @@ async function operationsSmoke(page: Page): Promise<{ pass: boolean; actual: str
   };
 }
 
+async function extensionRepairExecutable(page: Page): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  const created = await page.evaluate(async () => {
+    const headers = {
+      'content-type': 'application/json',
+      'x-tab-atlas-token': localStorage.getItem('tabatlas.localToken') ?? '',
+    };
+    const response = await fetch('/api/security/capabilities', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ kind: 'extension', label: 'chrome extension executable repair smoke', scopes: ['snapshot:write'] }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json() as Promise<{ token: string; capability: { id: string } }>;
+  });
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await openSettingsPanel(page, 'security');
+  await page.locator(`[data-capability-action="rotate"][data-capability-id="${created.capability.id}"]`).click();
+  await expectText(page.locator('#securityRotationResult'), /requires re-pairing/i);
+  await page.locator(`[data-extension-repair="${created.capability.id}"]`).click();
+  await expectText(page.locator('#securityRotationResult'), /re-pair challenge/i);
+  const tokens = await page.locator('#securityRotationResult .one-time-token').evaluateAll(elements => elements.map(element => element.textContent?.trim() ?? ''));
+  const [challengeId, secret] = tokens;
+  if (!challengeId || !secret) throw new Error('extension repair did not display a challenge ID and secret');
+
+  const exchange = await page.evaluate(async ({ challengeId, secret }) => {
+    const response = await fetch('/api/security/pairing-codes/exchange', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ challengeId, secret, label: 'chrome extension executable repair smoke repaired', browser: 'chrome' }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json() as Promise<{ token: string; capability: { id: string } }>;
+  }, { challengeId, secret });
+
+  const deniedOld = await postSnapshotWithToken(page, created.token, 'old-extension-token-denial');
+  const acceptedNew = await postSnapshotWithToken(page, exchange.token, 'new-extension-token-accepted');
+  await page.locator('[data-ack-pairing-secret]').click();
+  const secretBlocksAfterAck = await page.locator('#securityRotationResult .one-time-token').count();
+  const dbEvidence = readExtensionRepairEvidence(created.capability.id, exchange.capability.id, challengeId, secret, created.token, exchange.token);
+
+  const pass = deniedOld.status === 401
+    && acceptedNew.status === 200
+    && Boolean(acceptedNew.snapshotId)
+    && secretBlocksAfterAck === 0
+    && dbEvidence.oldCapabilityRevoked
+    && dbEvidence.newCapabilityActive
+    && dbEvidence.repairAuditPresent
+    && dbEvidence.noSecretOrTokenMaterialStored;
+  return {
+    pass,
+    actual: `oldStatus=${deniedOld.status}; newStatus=${acceptedNew.status}; oldCapability=${created.capability.id}; newCapability=${exchange.capability.id}; challenge=${challengeId}; snapshot=${acceptedNew.snapshotId ?? '(missing)'}; secretBlocksAfterAck=${secretBlocksAfterAck}; db=${JSON.stringify(dbEvidence)}`,
+  };
+}
+
+async function reviewQueuesExecutable(page: Page, sourceViewId: string): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  const expectedWeak = sourceViewResourceIdsForStates(sourceViewId, ['weak_include', 'needs_review']);
+  const expectedConflict = sourceViewResourceIdsForStates(sourceViewId, ['conflict']);
+  const expectedExtractionFailures = extractionFailureResourceCount();
+  const weak = await startReviewQueueThroughUi(page, sourceViewId, 'weak');
+  const conflict = await startReviewQueueThroughUi(page, sourceViewId, 'conflict');
+  const extractionFailure = await startReviewQueueThroughUi(page, sourceViewId, 'extraction_failure');
+  const unmarked = await startReviewQueueThroughUi(page, sourceViewId, 'unmarked');
+
+  const pass = weak.sourceViewId === sourceViewId
+    && weak.totalItems === expectedWeak.length
+    && weak.distinctItems === weak.totalItems
+    && weak.currentVisible
+    && conflict.sourceViewId === sourceViewId
+    && conflict.totalItems === expectedConflict.length
+    && conflict.distinctItems === conflict.totalItems
+    && extractionFailure.totalItems === expectedExtractionFailures
+    && extractionFailure.distinctItems === extractionFailure.totalItems
+    && unmarked.totalItems > 0
+    && unmarked.distinctItems === unmarked.totalItems;
+  return {
+    pass,
+    actual: `weak=${weak.totalItems}/${expectedWeak.length}, distinct=${weak.distinctItems}, source=${weak.sourceViewId}; conflict=${conflict.totalItems}/${expectedConflict.length}; extractionFailures=${extractionFailure.totalItems}/${expectedExtractionFailures}; unmarked=${unmarked.totalItems}; sessions=${[weak.sessionId, conflict.sessionId, extractionFailure.sessionId, unmarked.sessionId].join(',')}`,
+    metrics: {
+      weakItems: weak.totalItems,
+      conflictItems: conflict.totalItems,
+      extractionFailureItems: extractionFailure.totalItems,
+      unmarkedItems: unmarked.totalItems,
+    },
+  };
+}
+
+async function mixedConversationExecutable(page: Page, sourceViewId: string): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  await resetConversationWorkspace(page, sourceViewId, 'board');
+  const beforeViewId = await activeViewId(page);
+  await submitConversation(page, 'Switch to gallery and exclude pure tutorials.');
+  await page.waitForFunction((previous: string) => localStorage.getItem('tabatlas.workspace.activeViewId') !== previous, beforeViewId, { timeout: 20_000 });
+  await expectVisible(page.getByTestId('workspace-gallery'));
+  const afterViewId = await activeViewId(page);
+  const snapshot = await conversationSnapshot(page);
+  const assistant = [...snapshot.messages].reverse().find((message: { role: string }) => message.role === 'assistant') as { context?: { presentationPlan?: { actions?: Array<{ kind: string; layout?: string }> } } } | undefined;
+  const hasGalleryPlan = Boolean(assistant?.context?.presentationPlan?.actions?.some(action => action.kind === 'set_layout' && action.layout === 'gallery'));
+  const refined = snapshot.actions.find((action: { kind: string; status: string; result?: unknown }) => action.kind === 'refine_view' && action.status === 'succeeded');
+  const galleryCards = await page.locator('.resource-card.gallery').count();
+  const pass = beforeViewId !== afterViewId && hasGalleryPlan && Boolean(refined) && galleryCards > 0;
+  return {
+    pass,
+    actual: `beforeView=${beforeViewId}; afterView=${afterViewId}; hasGalleryPlan=${hasGalleryPlan}; refined=${Boolean(refined)}; galleryCards=${galleryCards}`,
+  };
+}
+
+async function serverOwnedUndoExecutable(page: Page, sourceViewId: string): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  const [restorable, staleTarget] = readMembershipsForUndo(sourceViewId, 2);
+  if (!restorable || !staleTarget) throw new Error('server-owned undo scenario needs two memberships');
+  const first = await postMembershipFeedback(page, {
+    viewId: sourceViewId,
+    membershipId: restorable.membershipId,
+    targetKind: restorable.targetKind,
+    targetId: restorable.targetId,
+    decision: 'pin_exclude',
+    correction: {
+      previousMembership: { state: 'forged_state', section: 'forged_section' },
+      sectionSuggestion: 'Executable undo',
+    },
+    reason: 'Executable forged previous state should be ignored.',
+  });
+  const storedFirst = readMembershipFeedbackEvidence(first.id);
+  const undoFirst = await undoMembershipFeedback(page, first.id);
+  const restored = readMembership(restorable.membershipId);
+
+  const staleFirst = await postMembershipFeedback(page, {
+    viewId: sourceViewId,
+    membershipId: staleTarget.membershipId,
+    targetKind: staleTarget.targetKind,
+    targetId: staleTarget.targetId,
+    decision: 'correct',
+    correction: { sectionSuggestion: 'First stale correction' },
+    reason: 'First stale correction.',
+  });
+  await postMembershipFeedback(page, {
+    viewId: sourceViewId,
+    membershipId: staleTarget.membershipId,
+    targetKind: staleTarget.targetKind,
+    targetId: staleTarget.targetId,
+    decision: 'correct',
+    correction: { sectionSuggestion: 'Second stale correction' },
+    reason: 'Second stale correction.',
+  });
+  const staleUndo = await undoMembershipFeedback(page, staleFirst.id);
+
+  const pass = first.id
+    && storedFirst.hasUndo
+    && !storedFirst.correctionJson.includes('previousMembership')
+    && !storedFirst.correctionJson.includes('forged_state')
+    && undoFirst.ok
+    && restored.state === restorable.state
+    && staleUndo.status >= 400;
+  return {
+    pass: Boolean(pass),
+    actual: `feedback=${first.id}; undoStatus=${undoFirst.status}; restored=${restored.state}/${restorable.state}; sanitized=${!storedFirst.correctionJson.includes('previousMembership')}; staleFeedback=${staleFirst.id}; staleUndoStatus=${staleUndo.status}`,
+  };
+}
+
+async function presentationReplayExecutable(page: Page, sourceViewId: string): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  await resetConversationWorkspace(page, sourceViewId, 'board');
+  await submitConversation(page, 'Switch to gallery.');
+  await expectVisible(page.getByTestId('workspace-gallery'));
+  await page.evaluate((viewId: string) => {
+    localStorage.setItem('tabatlas.workspace.activeViewId', viewId);
+    localStorage.setItem('tabatlas.workspace.layout', 'board');
+    localStorage.setItem('tabatlas.workspace.page', 'views');
+  }, sourceViewId);
+  await page.reload({ waitUntil: 'networkidle' });
+  await expectVisible(page.getByTestId('workspace-board'));
+
+  const beforeViewId = await activeViewId(page);
+  await submitConversation(page, 'Refine this view to exclude pure tutorials.');
+  await page.waitForFunction((previous: string) => localStorage.getItem('tabatlas.workspace.activeViewId') !== previous, beforeViewId, { timeout: 20_000 });
+  await expectVisible(page.getByTestId('workspace-board'));
+  const layout = await page.evaluate(() => localStorage.getItem('tabatlas.workspace.layout') ?? '');
+  const galleryVisible = await page.getByTestId('workspace-gallery').isVisible().catch(() => false);
+  const boardVisible = await page.getByTestId('workspace-board').isVisible().catch(() => false);
+  const pass = layout === 'board' && boardVisible && !galleryVisible;
+  return {
+    pass,
+    actual: `beforeView=${beforeViewId}; afterView=${await activeViewId(page)}; layout=${layout}; boardVisible=${boardVisible}; galleryVisible=${galleryVisible}`,
+  };
+}
+
+async function revisionComparisonExecutable(page: Page, sourceViewId: string): Promise<{ pass: boolean; actual: string; metrics?: Record<string, number> }> {
+  await resetConversationWorkspace(page, sourceViewId, 'board');
+  await submitConversation(page, 'Compare this with the previous revision.');
+  await expectVisible(page.locator('.revision-comparison'));
+  const text = await page.locator('.revision-comparison').innerText();
+  const pass = /Revision 2 vs 1/i.test(text)
+    && /\d+ added|\d+ removed|\d+ changed/i.test(text)
+    && /Goal|Rules|Removed targets|Changed memberships/i.test(text);
+  return {
+    pass,
+    actual: compact(text),
+  };
+}
+
 async function runPerformanceScenario(page: Page, viewId: string, size: number): Promise<ScenarioResult> {
   return runScenario(page, {
     id: `large-workspace-${size}`,
@@ -938,6 +1276,298 @@ function expectedViewNameFor(commandText: string): string {
 
 async function activeViewId(page: Page): Promise<string> {
   return page.evaluate(() => localStorage.getItem('tabatlas.workspace.activeViewId') ?? '');
+}
+
+async function postSnapshotWithToken(
+  page: Page,
+  token: string,
+  label: string,
+): Promise<{ status: number; ok: boolean; snapshotId?: string; text: string }> {
+  return page.evaluate(async ({ token, label }) => {
+    const response = await fetch('/snapshot', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-tab-atlas-token': token,
+      },
+      body: JSON.stringify({
+        capturedAt: '2026-06-19T01:00:00.000Z',
+        tabs: [{
+          browser: 'chrome',
+          windowId: 1,
+          tabId: Math.floor(Math.random() * 100000),
+          index: 0,
+          active: true,
+          pinned: false,
+          title: `Workspace UX repair smoke ${label}`,
+          url: `https://example.test/tabatlas/${label}`,
+          groupTitle: 'Workspace UX repair',
+        }],
+      }),
+    });
+    const text = await response.text();
+    let snapshotId: string | undefined;
+    try {
+      const json = JSON.parse(text) as { snapshotId?: string };
+      snapshotId = json.snapshotId;
+    } catch {
+      // Denials are small JSON strings, but the status is the assertion.
+    }
+    return { status: response.status, ok: response.ok, snapshotId, text: text.slice(0, 160) };
+  }, { token, label });
+}
+
+function readExtensionRepairEvidence(
+  oldCapabilityId: string,
+  newCapabilityId: string,
+  challengeId: string,
+  secret: string,
+  oldToken: string,
+  newToken: string,
+): {
+  oldCapabilityRevoked: boolean;
+  newCapabilityActive: boolean;
+  repairAuditPresent: boolean;
+  noSecretOrTokenMaterialStored: boolean;
+} {
+  return withEvalDb(db => {
+    const oldCapability = db.prepare('SELECT status FROM local_capabilities WHERE id = ?').get(oldCapabilityId) as { status: string } | undefined;
+    const newCapability = db.prepare('SELECT status FROM local_capabilities WHERE id = ?').get(newCapabilityId) as { status: string } | undefined;
+    const repairAudit = db.prepare(`
+      SELECT id
+      FROM security_audit_events
+      WHERE event_type = 'extension_repair'
+        AND capability_id = ?
+        AND details_json LIKE ?
+      LIMIT 1
+    `).get(oldCapabilityId, `%${challengeId}%`) as { id: string } | undefined;
+    const rawRows = [
+      ...db.prepare('SELECT id, kind, label, token_hash, status FROM local_capabilities').all() as unknown[],
+      ...db.prepare('SELECT id, secret_hash, kind, browser, label, status, capability_id FROM pairing_challenges').all() as unknown[],
+      ...db.prepare('SELECT id, event_type, reason, capability_id, details_json FROM security_audit_events').all() as unknown[],
+    ];
+    const persisted = JSON.stringify(rawRows);
+    return {
+      oldCapabilityRevoked: oldCapability?.status === 'revoked',
+      newCapabilityActive: newCapability?.status === 'active',
+      repairAuditPresent: Boolean(repairAudit),
+      noSecretOrTokenMaterialStored: !persisted.includes(secret) && !persisted.includes(oldToken) && !persisted.includes(newToken),
+    };
+  });
+}
+
+function sourceViewResourceIdsForStates(sourceViewId: string, states: string[]): string[] {
+  if (!states.length) return [];
+  return withEvalDb(db => {
+    const rows = db.prepare(`
+      SELECT resource_id, MIN(position) AS first_seen
+      FROM (
+        SELECT
+          CASE
+            WHEN m.target_kind = 'resource' THEN m.target_id
+            ELSE ai.resource_id
+          END AS resource_id,
+          m.rowid AS position
+        FROM memberships m
+        LEFT JOIN atomic_items ai ON ai.id = m.target_id AND m.target_kind = 'atomic_item'
+        WHERE m.view_id = ?
+          AND m.state IN (${states.map(() => '?').join(',')})
+          AND (
+            m.target_kind = 'resource'
+            OR ai.resource_id IS NOT NULL
+          )
+      )
+      WHERE resource_id IS NOT NULL
+      GROUP BY resource_id
+      ORDER BY first_seen
+    `).all(sourceViewId, ...states) as Array<{ resource_id: string | null }>;
+    return rows.flatMap(row => row.resource_id ? [row.resource_id] : []);
+  });
+}
+
+function extractionFailureResourceCount(): number {
+  return withEvalDb(db => {
+    const row = db.prepare(`
+      SELECT COUNT(DISTINCT id) AS count
+      FROM (
+        SELECT resource_id AS id
+        FROM extraction_artifacts
+        WHERE status LIKE 'failed%' OR error_code IS NOT NULL
+        UNION
+        SELECT resource_id AS id
+        FROM resource_extraction_state
+        WHERE status LIKE 'failed%' OR last_error IS NOT NULL
+      )
+    `).get() as { count: number };
+    return row.count;
+  });
+}
+
+async function startReviewQueueThroughUi(
+  page: Page,
+  sourceViewId: string,
+  queue: 'weak' | 'conflict' | 'extraction_failure' | 'unmarked',
+): Promise<{ sessionId: string; sourceViewId?: string; totalItems: number; distinctItems: number; currentVisible: boolean }> {
+  await page.evaluate((viewId: string) => {
+    localStorage.setItem('tabatlas.workspace.activeViewId', viewId);
+    localStorage.setItem('tabatlas.workspace.page', 'review');
+    localStorage.removeItem('tabatlas.workspace.reviewSessionId');
+  }, sourceViewId);
+  await page.reload({ waitUntil: 'networkidle' });
+  await expectVisible(page.getByTestId('review-workspace'));
+  await page.locator(`[data-review-start="${queue}"]`).click();
+  await page.waitForFunction(() => Boolean(localStorage.getItem('tabatlas.workspace.reviewSessionId')), undefined, { timeout: 10_000 });
+  const sessionId = await page.evaluate(() => localStorage.getItem('tabatlas.workspace.reviewSessionId') ?? '');
+  await page.waitForTimeout(150);
+  const currentVisible = await page.locator('.review-current').isVisible().catch(() => false);
+  const evidence = readReviewSessionEvidence(sessionId);
+  return { ...evidence, currentVisible };
+}
+
+function readReviewSessionEvidence(sessionId: string): { sessionId: string; sourceViewId?: string; totalItems: number; distinctItems: number } {
+  return withEvalDb(db => {
+    const session = db.prepare(`
+      SELECT id, source_view_id, total_items
+      FROM review_sessions
+      WHERE id = ?
+    `).get(sessionId) as { id: string; source_view_id: string | null; total_items: number } | undefined;
+    if (!session) throw new Error(`Review session not found: ${sessionId}`);
+    const distinct = db.prepare(`
+      SELECT COUNT(DISTINCT resource_id) AS count
+      FROM review_session_items
+      WHERE session_id = ?
+    `).get(sessionId) as { count: number };
+    return {
+      sessionId,
+      sourceViewId: session.source_view_id ?? undefined,
+      totalItems: session.total_items,
+      distinctItems: distinct.count,
+    };
+  });
+}
+
+async function resetConversationWorkspace(page: Page, viewId: string, layout: 'board' | 'gallery' | 'map' | 'compact'): Promise<void> {
+  await page.evaluate(({ viewId, layout }) => {
+    localStorage.setItem('tabatlas.workspace.activeViewId', viewId);
+    localStorage.setItem('tabatlas.workspace.layout', layout);
+    localStorage.setItem('tabatlas.workspace.page', 'views');
+    localStorage.setItem('tabatlas.workspace.workspaceStateFilters', 'visible');
+    localStorage.setItem('tabatlas.workspace.workspaceTagFilters', '');
+    localStorage.setItem('tabatlas.workspace.workspaceQueryFilter', '');
+    localStorage.setItem('tabatlas.workspace.activeThreadId', '');
+    localStorage.setItem('tabatlas.workspace.assistantPanel', 'conversation');
+    localStorage.removeItem('tabatlas.workspace.reviewSessionId');
+  }, { viewId, layout });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => Boolean(localStorage.getItem('tabatlas.workspace.activeThreadId')), undefined, { timeout: 10_000 });
+  if (layout === 'gallery') await expectVisible(page.getByTestId('workspace-gallery'));
+  else if (layout === 'map') await expectVisible(page.getByTestId('workspace-map'));
+  else await expectVisible(page.getByTestId('workspace-board'));
+}
+
+async function conversationSnapshot(page: Page): Promise<{
+  messages: Array<{ role: string; context?: { presentationPlan?: { actions?: Array<{ kind: string; layout?: string }> } } }>;
+  actions: Array<{ kind: string; status: string; result?: unknown }>;
+}> {
+  return page.evaluate(async () => {
+    const threadId = localStorage.getItem('tabatlas.workspace.activeThreadId') ?? '';
+    const headers = { 'x-tab-atlas-token': localStorage.getItem('tabatlas.localToken') ?? '' };
+    const response = await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, { headers });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  });
+}
+
+type MembershipForEval = {
+  membershipId: string;
+  targetKind: 'resource' | 'atomic_item';
+  targetId: string;
+  state: string;
+};
+
+function readMembershipsForUndo(viewId: string, limit: number): MembershipForEval[] {
+  return withEvalDb(db => {
+    const rows = db.prepare(`
+      SELECT id, target_kind, target_id, state
+      FROM memberships
+      WHERE view_id = ?
+      ORDER BY id
+      LIMIT ?
+    `).all(viewId, limit) as Array<{ id: string; target_kind: 'resource' | 'atomic_item'; target_id: string; state: string }>;
+    return rows.map(row => ({
+      membershipId: row.id,
+      targetKind: row.target_kind,
+      targetId: row.target_id,
+      state: row.state,
+    }));
+  });
+}
+
+function readMembership(membershipId: string): { state: string } {
+  return withEvalDb(db => {
+    const row = db.prepare('SELECT state FROM memberships WHERE id = ?').get(membershipId) as { state: string } | undefined;
+    if (!row) throw new Error(`Membership not found: ${membershipId}`);
+    return row;
+  });
+}
+
+async function postMembershipFeedback(
+  page: Page,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; id: string; text: string }> {
+  const result = await page.evaluate(async body => {
+    const response = await fetch('/api/membership-feedback', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-tab-atlas-token': localStorage.getItem('tabatlas.localToken') ?? '',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let id = '';
+    try {
+      id = (JSON.parse(text) as { id?: string }).id ?? '';
+    } catch {
+      // Error text is returned below.
+    }
+    return { ok: response.ok, status: response.status, id, text: text.slice(0, 160) };
+  }, body);
+  if (!result.ok || !result.id) throw new Error(`membership feedback failed: ${result.status} ${result.text}`);
+  return result;
+}
+
+async function undoMembershipFeedback(page: Page, feedbackId: string): Promise<{ ok: boolean; status: number; text: string }> {
+  return page.evaluate(async feedbackId => {
+    const response = await fetch(`/api/membership-feedback/${encodeURIComponent(feedbackId)}/undo`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-tab-atlas-token': localStorage.getItem('tabatlas.localToken') ?? '',
+      },
+      body: '{}',
+    });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, text: text.slice(0, 160) };
+  }, feedbackId);
+}
+
+function readMembershipFeedbackEvidence(feedbackId: string): { correctionJson: string; hasUndo: boolean } {
+  return withEvalDb(db => {
+    const feedback = db.prepare('SELECT correction_json FROM membership_feedback WHERE id = ?').get(feedbackId) as { correction_json: string | null } | undefined;
+    const undo = db.prepare('SELECT feedback_id FROM membership_feedback_undo WHERE feedback_id = ?').get(feedbackId) as { feedback_id: string } | undefined;
+    if (!feedback) throw new Error(`Feedback not found: ${feedbackId}`);
+    return { correctionJson: feedback.correction_json ?? '', hasUndo: Boolean(undo) };
+  });
+}
+
+function withEvalDb<T>(read: (db: ReturnType<typeof openDatabase>) => T): T {
+  const db = openDatabase(dbPath);
+  try {
+    return read(db);
+  } finally {
+    db.close();
+  }
 }
 
 async function measureLargeWorkspace(page: Page, viewId: string): Promise<Record<string, number>> {

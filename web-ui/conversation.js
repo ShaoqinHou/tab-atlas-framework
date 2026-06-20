@@ -8,7 +8,7 @@ import { refreshViewWorkspace, showWorkspaceNotice } from './viewWorkspace.js';
 
 let snapshot = null;
 let refreshViewsCallback = null;
-let lastExecutedPresentationMessageId = '';
+const executedPresentationMessageIds = new Set();
 const handledActionIds = new Set();
 
 export async function initConversation({ onRefreshViews } = {}) {
@@ -62,6 +62,7 @@ async function ensureThread() {
 
 async function sendMessage(content) {
   const priorActionStates = actionStateSnapshot();
+  const priorMessageIds = messageIdSnapshot();
   appendMessage('user', content);
   try {
     snapshot = await postJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}/messages`, {
@@ -75,7 +76,7 @@ async function sendMessage(content) {
       },
     });
     renderConversation();
-    await executeLatestPresentationPlan();
+    await executeNewPresentationPlans(priorMessageIds);
     await handleCompletedActionResults(priorActionStates);
   } catch (error) {
     appendMessage('assistant', `I could not run that request: ${error.message}`);
@@ -153,17 +154,24 @@ async function cancelAction(actionId) {
   renderConversation();
 }
 
-async function executeLatestPresentationPlan() {
-  const assistantMessages = [...(snapshot?.messages ?? [])].reverse()
-    .filter(message => message.role === 'assistant');
-  const message = assistantMessages.find(item => item.context?.presentationPlan?.actions?.length);
-  if (!message || message.id === lastExecutedPresentationMessageId) return;
-  lastExecutedPresentationMessageId = message.id;
-  await executePresentationPlan(message.context.presentationPlan);
+async function executeNewPresentationPlans(previousMessageIds = new Set()) {
+  const assistantMessages = (snapshot?.messages ?? [])
+    .filter(message => message.role === 'assistant'
+      && !previousMessageIds.has(message.id)
+      && message.context?.presentationPlan?.actions?.length);
+  for (const message of assistantMessages) {
+    if (executedPresentationMessageIds.has(message.id)) continue;
+    executedPresentationMessageIds.add(message.id);
+    await executePresentationPlan(message.context.presentationPlan);
+  }
 }
 
 function actionStateSnapshot() {
   return new Map((snapshot?.actions ?? []).map(action => [action.id, action.status]));
+}
+
+function messageIdSnapshot() {
+  return new Set((snapshot?.messages ?? []).map(message => message.id));
 }
 
 async function handleCompletedActionResults(previousStates = new Map()) {

@@ -279,6 +279,7 @@ class WorkspaceUxFakeProvider implements LlmProvider {
   private conversationPlan(prompt: string): unknown {
     const latest = latestConversationUserText(prompt);
     const lower = latest.toLowerCase();
+    const activeViewId = activeViewIdFromConversationPrompt(prompt);
     if (lower.includes('review')) {
       return {
         reply: 'I will open a focused review queue for the uncertain items.',
@@ -288,6 +289,22 @@ class WorkspaceUxFakeProvider implements LlmProvider {
           approval: 'automatic',
           queue: lower.includes('conflict') ? 'conflict' : lower.includes('weak') || lower.includes('uncertain') ? 'weak' : 'unmarked',
           rationale: 'Focused review is the fastest way to process uncertain local resources.',
+        }],
+        questions: [],
+        assumptions: [],
+      };
+    }
+    if (activeViewId && /\b(refine|exclude|remove|stricter|looser|reclassify|adjust|change)\b/.test(lower)) {
+      return {
+        reply: 'I will refine the active view with that instruction.',
+        actions: [{
+          id: 'refine_active_view',
+          kind: 'refine_view',
+          approval: 'preview',
+          viewId: activeViewId,
+          instruction: latest,
+          candidateLimit: 40,
+          rationale: 'The request changes the current semantic view, so the refinement stays attached to its revision lineage.',
         }],
         questions: [],
         assumptions: [],
@@ -362,6 +379,11 @@ class WorkspaceUxFakeProvider implements LlmProvider {
       explanation: 'Deterministic fake Codex response for the workspace UX role-play gate.',
     };
   }
+}
+
+function activeViewIdFromConversationPrompt(prompt: string): string {
+  const match = prompt.match(/"activeViewId"\s*:\s*"((?:\\.|[^"])*)"/);
+  return match ? unescapeJsonString(match[1]) : '';
 }
 
 function latestConversationUserText(prompt: string): string {
