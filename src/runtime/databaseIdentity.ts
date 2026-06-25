@@ -33,18 +33,22 @@ export function readDatabaseIdentity(databasePath: string): DatabaseIdentity | n
 }
 
 export function getIdentityFromOpenDatabase(db: Database.Database): DatabaseIdentity | null {
-  const row = db.prepare(`
+  const rows = db.prepare(`
     SELECT database_id, environment, source_database_id, created_at, updated_at
     FROM database_identity
     ORDER BY created_at
-    LIMIT 1
-  `).get() as {
+    LIMIT 2
+  `).all() as Array<{
     database_id: string;
     environment: string;
     source_database_id: string | null;
     created_at: string;
     updated_at: string;
-  } | undefined;
+  }>;
+  if (rows.length > 1) {
+    throw new Error(`Database has ${rows.length} runtime identities. Explicit remediation is required before TabAtlas can open it.`);
+  }
+  const row = rows[0];
   if (!row) return null;
   return {
     databaseId: row.database_id,
@@ -64,28 +68,31 @@ export function ensureDatabaseIdentity(
     allowInitialize: boolean;
   },
 ): DatabaseIdentity {
-  const existing = getIdentityFromOpenDatabase(db);
-  if (existing) {
-    assertProfileDatabaseCompatibility(input.runtimeProfile, existing.environment);
-    return existing;
-  }
-  if (!input.allowInitialize) {
-    throw new Error('Database has no runtime identity. Initialize it with an explicit runtime command before starting TabAtlas.');
-  }
-  assertProfileDatabaseCompatibility(input.runtimeProfile, input.environment);
-  const now = new Date().toISOString();
-  const identity: DatabaseIdentity = {
-    databaseId: `db_${nanoid()}_${crypto.randomBytes(4).toString('hex')}`,
-    environment: input.environment,
-    sourceDatabaseId: input.sourceDatabaseId,
-    createdAt: now,
-    updatedAt: now,
-  };
-  db.prepare(`
-    INSERT INTO database_identity (database_id, environment, source_database_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(identity.databaseId, identity.environment, identity.sourceDatabaseId ?? null, identity.createdAt, identity.updatedAt);
-  return identity;
+  const tx = db.transaction((): DatabaseIdentity => {
+    const existing = getIdentityFromOpenDatabase(db);
+    if (existing) {
+      assertProfileDatabaseCompatibility(input.runtimeProfile, existing.environment);
+      return existing;
+    }
+    if (!input.allowInitialize) {
+      throw new Error('Database has no runtime identity. Initialize it with an explicit runtime command before starting TabAtlas.');
+    }
+    assertProfileDatabaseCompatibility(input.runtimeProfile, input.environment);
+    const now = new Date().toISOString();
+    const identity: DatabaseIdentity = {
+      databaseId: `db_${nanoid()}_${crypto.randomBytes(4).toString('hex')}`,
+      environment: input.environment,
+      sourceDatabaseId: input.sourceDatabaseId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.prepare(`
+      INSERT INTO database_identity (database_id, environment, source_database_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(identity.databaseId, identity.environment, identity.sourceDatabaseId ?? null, identity.createdAt, identity.updatedAt);
+    return identity;
+  });
+  return tx();
 }
 
 export function runtimeProfileDefaultEnvironment(profile: RuntimeProfile): DatabaseEnvironment {

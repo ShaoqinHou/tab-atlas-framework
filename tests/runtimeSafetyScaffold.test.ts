@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openDatabase } from '../src/db/index.js';
-import { ensureDatabaseIdentity, readDatabaseIdentity } from '../src/runtime/databaseIdentity.js';
+import { ensureDatabaseIdentity, getIdentityFromOpenDatabase, readDatabaseIdentity } from '../src/runtime/databaseIdentity.js';
 import { acquireDatabaseLease } from '../src/runtime/databaseLease.js';
 import { assertProfileDatabaseCompatibility, resolveRuntimeConfig } from '../src/runtime/contracts.js';
 
@@ -46,6 +47,88 @@ describe('runtime safety scaffold', () => {
       expect(() => assertProfileDatabaseCompatibility('production', 'clone')).toThrow(/Runtime profile production cannot open a clone database/);
     } finally {
       db.close();
+    }
+  });
+
+  it('enforces exactly one runtime identity row', () => {
+    const dir = tempRoot();
+    const dbPath = path.join(dir, 'singleton.sqlite');
+    const db = openDatabase(dbPath);
+    try {
+      ensureDatabaseIdentity(db, {
+        runtimeProfile: 'production',
+        environment: 'production',
+        allowInitialize: true,
+      });
+      expect((db.prepare('SELECT COUNT(*) AS count FROM database_identity').get() as { count: number }).count).toBe(1);
+      expect(() => db.prepare(`
+        INSERT INTO database_identity (database_id, environment, created_at, updated_at)
+        VALUES ('db_second', 'production', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+      `).run()).toThrow();
+      expect((db.prepare('SELECT COUNT(*) AS count FROM database_identity').get() as { count: number }).count).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('fails closed on ambiguous legacy runtime identities', () => {
+    const dir = tempRoot();
+    const dbPath = path.join(dir, 'ambiguous.sqlite');
+    const db = new Database(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE database_identity (
+          database_id TEXT PRIMARY KEY,
+          environment TEXT NOT NULL,
+          source_database_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO database_identity VALUES ('db_oldest', 'production', NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO database_identity VALUES ('db_newest', 'clone', 'db_oldest', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z');
+      `);
+      expect(() => getIdentityFromOpenDatabase(db)).toThrow(/runtime identities/);
+    } finally {
+      db.close();
+    }
+    expect(() => openDatabase(dbPath)).toThrow(/runtime identities/);
+  });
+
+  it('creates clones with exactly one runtime identity', async () => {
+    const dir = tempRoot();
+    const source = path.join(dir, 'source.sqlite');
+    const destination = path.join(dir, 'clone.sqlite');
+    const sourceDb = openDatabase(source);
+    try {
+      const sourceIdentity = ensureDatabaseIdentity(sourceDb, {
+        runtimeProfile: 'production',
+        environment: 'production',
+        allowInitialize: true,
+      });
+      sourceDb.close();
+      const result = await runNodeScript('scripts/environment-clone.ts', [
+        '--source', source,
+        '--destination', destination,
+        '--environment', 'clone',
+      ]);
+      expect(result.code).toBe(0);
+      const cloneDb = openDatabase(destination);
+      try {
+        const rows = cloneDb.prepare('SELECT database_id, environment, source_database_id FROM database_identity').all() as Array<{
+          database_id: string;
+          environment: string;
+          source_database_id: string | null;
+        }>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          environment: 'clone',
+          source_database_id: sourceIdentity.databaseId,
+        });
+      } finally {
+        cloneDb.close();
+      }
+    } finally {
+      if (sourceDb.open) sourceDb.close();
     }
   });
 
@@ -127,6 +210,21 @@ function spawnServer(env: Record<string, string>): ChildProcess {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+}
+
+function runNodeScript(scriptPath: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const tsx = path.join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const child = spawn(process.execPath, [tsx, scriptPath, ...args], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH ?? '',
+      SystemRoot: process.env.SystemRoot ?? '',
+      TEMP: process.env.TEMP ?? os.tmpdir(),
+      TMP: process.env.TMP ?? os.tmpdir(),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return waitForExit(child, 20_000);
 }
 
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
