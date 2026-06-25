@@ -22,14 +22,21 @@ function Require-Command($Name) {
 
 function Redact-Path($PathValue) {
   $resolved = [System.IO.Path]::GetFullPath($PathValue)
-  $hash = [System.BitConverter]::ToString(
-    [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($resolved.ToLowerInvariant()))
-  ).Replace("-", "").Substring(0, 12).ToLowerInvariant()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = [System.BitConverter]::ToString(
+      $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($resolved.ToLowerInvariant()))
+    ).Replace("-", "").Substring(0, 12).ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
   return "$([System.IO.Path]::GetFileName($resolved)) sha256:$hash"
 }
 
 Require-Command "node"
 Require-Command "npm"
+
+$InstanceNameExplicit = -not [string]::IsNullOrWhiteSpace($InstanceName)
 
 if (-not $Database) {
   if ($Profile -ne "production") {
@@ -62,7 +69,65 @@ function Test-ReceiverHealth($Uri) {
   }
 }
 
-if (Test-ReceiverHealth $Health) {
+function Get-ReceiverHealth($Uri) {
+  try {
+    return Invoke-RestMethod -Uri $Uri -Method Get -TimeoutSec 2
+  } catch {
+    return $null
+  }
+}
+
+function Get-DatabaseIdentity($DatabasePath) {
+  if (-not (Test-Path $DatabasePath)) {
+    return $null
+  }
+  $Script = @'
+const Database = require("better-sqlite3");
+const databasePath = process.argv[2];
+const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+try {
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'database_identity'").get();
+  if (!table) { console.log("null"); process.exit(0); }
+  const rows = db.prepare("SELECT database_id, environment, source_database_id FROM database_identity ORDER BY created_at LIMIT 2").all();
+  if (rows.length > 1) throw new Error(`Database has ${rows.length} runtime identities.`);
+  console.log(JSON.stringify(rows[0] ? { databaseId: rows[0].database_id, environment: rows[0].environment, sourceDatabaseId: rows[0].source_database_id } : null));
+} finally {
+  db.close();
+}
+'@
+  $EncodedScript = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Script))
+  $Output = & node -e "eval(Buffer.from(process.argv[1], 'base64').toString('utf8'))" $EncodedScript $DatabasePath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read runtime identity from $(Redact-Path $DatabasePath)."
+  }
+  if (-not $Output -or $Output -eq "null") {
+    return $null
+  }
+  return $Output | ConvertFrom-Json
+}
+
+$ExistingHealth = Get-ReceiverHealth $Health
+if ($ExistingHealth -and $ExistingHealth.ok) {
+  $TargetIdentity = Get-DatabaseIdentity $Database
+  if (-not $TargetIdentity) {
+    throw "Refusing to reuse receiver at $AppUrl because target database has no runtime identity. Initialize or clone it explicitly."
+  }
+  $Mismatches = @()
+  if ($ExistingHealth.profile -ne $Profile) {
+    $Mismatches += "profile expected $Profile got $($ExistingHealth.profile)"
+  }
+  if ([int]$ExistingHealth.port -ne [int]$Port) {
+    $Mismatches += "port expected $Port got $($ExistingHealth.port)"
+  }
+  if ($ExistingHealth.databaseId -ne $TargetIdentity.databaseId) {
+    $Mismatches += "database ID expected $($TargetIdentity.databaseId) got $($ExistingHealth.databaseId)"
+  }
+  if ($InstanceNameExplicit -and $ExistingHealth.instanceName -ne $InstanceName) {
+    $Mismatches += "instance expected $InstanceName got $($ExistingHealth.instanceName)"
+  }
+  if ($Mismatches.Count -gt 0) {
+    throw "Refusing to reuse TabAtlas receiver at $AppUrl; instance mismatch: $($Mismatches -join '; ')."
+  }
   Write-Host "TabAtlas receiver is already running at $AppUrl"
   if (-not $NoOpen) {
     Start-Process $AppUrl

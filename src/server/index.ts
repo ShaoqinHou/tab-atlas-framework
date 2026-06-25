@@ -158,6 +158,7 @@ app.get('/health', async () => ({
   app: 'tabatlas',
   profile: runtime.profile,
   instanceName: runtime.instanceName,
+  port: runtime.port,
   databaseId: dbIdentity.databaseId,
   time: new Date().toISOString(),
 }));
