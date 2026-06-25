@@ -1,6 +1,12 @@
 param(
+  [ValidateSet("production", "roleplay", "acceptance", "development", "test")]
+  [string]$Profile = "production",
   [int]$Port = 9787,
   [string]$Database = "",
+  [string]$BootstrapDirectory = "",
+  [string]$InstanceName = "",
+  [switch]$InitializeIdentity,
+  [switch]$RecoverStaleLease,
   [switch]$NoOpen
 )
 
@@ -14,21 +20,38 @@ function Require-Command($Name) {
   }
 }
 
+function Redact-Path($PathValue) {
+  $resolved = [System.IO.Path]::GetFullPath($PathValue)
+  $hash = [System.BitConverter]::ToString(
+    [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($resolved.ToLowerInvariant()))
+  ).Replace("-", "").Substring(0, 12).ToLowerInvariant()
+  return "$([System.IO.Path]::GetFileName($resolved)) sha256:$hash"
+}
+
 Require-Command "node"
 Require-Command "npm"
 
 if (-not $Database) {
+  if ($Profile -ne "production") {
+    throw "-Database is required for $Profile profile."
+  }
   $Database = Join-Path $Root "data\tabatlas.sqlite"
+}
+if (-not $BootstrapDirectory) {
+  $BootstrapDirectory = Join-Path (Split-Path $Database -Parent) "bootstrap"
+}
+if (-not $InstanceName) {
+  $InstanceName = "tabatlas-$Profile-$Port"
 }
 
 $Health = "http://127.0.0.1:$Port/health"
 $AppUrl = "http://127.0.0.1:$Port/"
 $LocalDir = Join-Path $Root ".local"
 $LogDir = Join-Path $LocalDir "logs"
-$PidPath = Join-Path $LocalDir "tabatlas-server-$Port.pid"
-$InfoPath = Join-Path $LocalDir "tabatlas-server-$Port.json"
-$StdoutPath = Join-Path $LogDir "tabatlas-server-$Port.out.log"
-$StderrPath = Join-Path $LogDir "tabatlas-server-$Port.err.log"
+$PidPath = Join-Path $LocalDir "tabatlas-server-$Profile-$Port.pid"
+$InfoPath = Join-Path $LocalDir "tabatlas-server-$Profile-$Port.json"
+$StdoutPath = Join-Path $LogDir "tabatlas-server-$Profile-$Port.out.log"
+$StderrPath = Join-Path $LogDir "tabatlas-server-$Profile-$Port.err.log"
 
 function Test-ReceiverHealth($Uri) {
   try {
@@ -53,10 +76,22 @@ if ($Listening) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path $Database -Parent) | Out-Null
+New-Item -ItemType Directory -Force -Path $BootstrapDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+Write-Host "Starting TabAtlas"
+Write-Host "Profile: $Profile"
+Write-Host "Port: $Port"
+Write-Host "Database: $(Redact-Path $Database)"
+Write-Host "Instance: $InstanceName"
+
+$env:TABATLAS_RUNTIME_PROFILE = $Profile
 $env:TABATLAS_PORT = [string]$Port
 $env:TABATLAS_DB = $Database
+$env:TABATLAS_BOOTSTRAP_DIR = $BootstrapDirectory
+$env:TABATLAS_INSTANCE_NAME = $InstanceName
+$env:TABATLAS_ALLOW_IDENTITY_INIT = if ($InitializeIdentity) { "1" } else { "" }
+$env:TABATLAS_RECOVER_STALE_LEASE = if ($RecoverStaleLease) { "1" } else { "" }
 
 $npm = (Get-Command "npm.cmd" -ErrorAction SilentlyContinue)
 if (-not $npm) { $npm = Get-Command "npm" }
@@ -73,8 +108,9 @@ $Process = Start-Process `
 [string]$Process.Id | Set-Content -Path $PidPath
 @{
   pid = $Process.Id
+  profile = $Profile
   port = $Port
-  database = $Database
+  database = Redact-Path $Database
   url = $AppUrl
   stdout = $StdoutPath
   stderr = $StderrPath

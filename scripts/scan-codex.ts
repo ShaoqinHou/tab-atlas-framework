@@ -4,7 +4,7 @@ import { openDatabase } from '../src/db/index.js';
 import { CodexSdkProvider, type CodexSdkProviderConfig } from '../src/llm/CodexSdkProvider.js';
 
 const program = new Command();
-program.option('-d, --db <path>', 'SQLite database path');
+program.requiredOption('-d, --db <path>', 'SQLite database path');
 program.option('--limit <number>', 'Maximum resources to scan', parseInteger, 100);
 program.option('--batch-size <number>', 'Resources per Codex batch', parseInteger, 20);
 program.option('--resource-id <id...>', 'Specific resource id(s) to scan');
@@ -13,7 +13,7 @@ program.option('--force', 'Rescan even when codex_resource_analysis.v1 already e
 program.parse(process.argv);
 
 const opts = program.opts<{
-  db?: string;
+  db: string;
   limit: number;
   batchSize: number;
   resourceId?: string[];

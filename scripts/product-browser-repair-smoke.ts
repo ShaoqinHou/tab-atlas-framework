@@ -396,11 +396,15 @@ function startReceiver(dbPath: string, port: number): ChildProcess {
     cwd: root,
     env: {
       ...process.env,
+      TABATLAS_RUNTIME_PROFILE: 'acceptance',
       TABATLAS_DB: dbPath,
       TABATLAS_PORT: String(port),
+      TABATLAS_BOOTSTRAP_DIR: path.join(path.dirname(dbPath), 'bootstrap'),
+      TABATLAS_INSTANCE_NAME: `product-browser-${path.basename(path.dirname(dbPath))}`,
+      TABATLAS_ALLOW_IDENTITY_INIT: '1',
       TABATLAS_WORKER_POLL_MS: '60000',
     },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   });
 }
 
@@ -416,7 +420,8 @@ async function waitForReceiver(serverUrl: string, child: ChildProcess, timeoutMs
 
 async function stopReceiver(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
-  child.kill();
+  if (child.connected) child.send('tabatlas:shutdown');
+  else child.kill();
   await Promise.race([
     new Promise(resolve => child.once('exit', resolve)),
     delay(3000),

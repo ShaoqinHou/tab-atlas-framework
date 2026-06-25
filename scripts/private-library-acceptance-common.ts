@@ -55,6 +55,7 @@ export type CommandSmoke = {
 export async function runPrivateLibraryCommand(commandId: string, mode: PrivateLibraryMode): Promise<CommandSmoke> {
   const command = privateLibraryCommands.find(item => item.commandId === commandId);
   if (!command) throw new Error(`Unknown command id: ${commandId}`);
+  if (!process.env.TABATLAS_DB) throw new Error('TABATLAS_DB is required for private library acceptance.');
   const db = openDatabase(process.env.TABATLAS_DB);
   const registry = createCodexProviderRegistry(db, { workingDirectory: process.cwd() });
   const started = Date.now();

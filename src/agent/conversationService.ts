@@ -27,6 +27,7 @@ import {
   claimActionEffect,
   completeActionEffect,
   failActionEffect,
+  recoverStaleRunningEffects,
   type ActionEffectKind,
 } from './actionEffectLedger.js';
 
@@ -236,6 +237,9 @@ export async function planConversationTurn(
     'Allowed action kinds: plan_view, refine_view, start_review, scan_resources, add_annotation, explain_membership, accept_view.',
     'When a request changes the active semantic view, use refine_view with the supplied activeViewId instead of creating a detached heuristic action.',
     'When a request reviews weak, conflicting, or uncertain items in the active view, include sourceViewId on start_review.',
+    'For requests about information inside videos, state evidence readiness in plain language: known atomic items, transcript/description evidence, metadata-only videos, videos needing targeted extraction or scan, and unavailable transcripts.',
+    'When evidence is insufficient for inside-video details, offer exactly one bounded scan_resources action for the relevant resource IDs. Do not scan the whole library.',
+    'When users explicitly list desired project sections, preserve supported section dimensions or explain any merge; do not collapse unrelated categories into a generic bucket.',
     'Preview/read actions may use approval automatic or preview. Annotations, broad scans, and view acceptance must use approval confirm.',
     '',
     'Conversation history:',
@@ -311,11 +315,77 @@ export async function confirmAgentAction(
   return runPersistedAgentAction(db, actionId, options);
 }
 
+export async function retryAgentAction(
+  db: Database.Database,
+  actionId: string,
+  options: AgentActionExecutionOptions = {},
+): Promise<AgentActionRecord> {
+  const record = getAgentAction(db, actionId);
+  if (record.status !== 'failed') return record;
+  const nextStatus = record.action.approval === 'confirm' ? 'approved' : 'proposed';
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE agent_actions
+    SET status = ?, error = NULL, updated_at = ?, finished_at = NULL
+    WHERE id = ? AND status = 'failed'
+  `).run(nextStatus, now, actionId);
+  return runPersistedAgentAction(db, actionId, options);
+}
+
 export function cancelAgentAction(db: Database.Database, actionId: string): AgentActionRecord {
   const record = getAgentAction(db, actionId);
   if (record.status === 'succeeded' || record.status === 'failed' || record.status === 'cancelled') return record;
   updateAgentAction(db, { actionId, status: 'cancelled', result: { cancelled: true } });
   return getAgentAction(db, actionId);
+}
+
+export function recoverInterruptedAgentActions(
+  db: Database.Database,
+  input: { staleAfterMs?: number; now?: Date } = {},
+): { recovered: number; staleRunning: number; buggedProposed: number; expectedProposed: number } {
+  const now = input.now ?? new Date();
+  const nowIso = now.toISOString();
+  const cutoff = new Date(now.getTime() - (input.staleAfterMs ?? Number(process.env.TABATLAS_ACTION_STALE_MS ?? 5 * 60 * 1000))).toISOString();
+  recoverStaleRunningEffects(db, nowIso);
+  let recovered = 0;
+  let staleRunning = 0;
+  let buggedProposed = 0;
+  const expectedProposed = (db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM agent_actions
+    WHERE status = 'proposed' AND approval = 'confirm'
+  `).get() as { count: number }).count;
+  const running = db.prepare(`
+    SELECT id, status, approval
+    FROM agent_actions
+    WHERE status = 'running' AND updated_at < ?
+  `).all(cutoff) as Array<{ id: string; status: AgentActionRecord['status']; approval: AgentActionRecord['approval'] }>;
+  for (const action of running) {
+    const effect = latestEffectForAction(db, action.id);
+    if (effect?.status === 'succeeded') {
+      updateRecoveredAction(db, action.id, 'succeeded', effect.result_json ? parseJson(effect.result_json) : undefined, undefined, nowIso);
+      recordRecovery(db, action, 'succeeded', 'effect_succeeded', { effectId: effect.id });
+    } else {
+      updateRecoveredAction(db, action.id, 'failed', undefined, effect?.error ?? 'Interrupted while running; retry is available.', nowIso);
+      recordRecovery(db, action, 'failed', effect?.status === 'failed' ? 'effect_failed' : 'stale_running_interrupted', { effectId: effect?.id });
+    }
+    staleRunning += 1;
+    recovered += 1;
+  }
+
+  const proposed = db.prepare(`
+    SELECT id, status, approval
+    FROM agent_actions
+    WHERE status = 'proposed' AND approval IN ('automatic', 'preview')
+  `).all() as Array<{ id: string; status: AgentActionRecord['status']; approval: AgentActionRecord['approval'] }>;
+  for (const action of proposed) {
+    updateRecoveredAction(db, action.id, 'failed', undefined, 'Automatic action did not begin execution; retry is available.', nowIso);
+    recordRecovery(db, action, 'failed', 'automatic_proposed_recovered', {});
+    buggedProposed += 1;
+    recovered += 1;
+  }
+
+  return { recovered, staleRunning, buggedProposed, expectedProposed };
 }
 
 export async function runPersistedAgentAction(
@@ -751,6 +821,65 @@ function actionFromRow(row: AgentActionRow): AgentActionRecord {
     updatedAt: row.updated_at,
     finishedAt: row.finished_at ?? undefined,
   };
+}
+
+function latestEffectForAction(db: Database.Database, actionId: string): {
+  id: string;
+  status: string;
+  result_json: string | null;
+  error: string | null;
+} | undefined {
+  return db.prepare(`
+    SELECT id, status, result_json, error
+    FROM action_effects
+    WHERE action_id = ?
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(actionId) as { id: string; status: string; result_json: string | null; error: string | null } | undefined;
+}
+
+function updateRecoveredAction(
+  db: Database.Database,
+  actionId: string,
+  status: 'succeeded' | 'failed',
+  result: unknown,
+  error: string | undefined,
+  nowIso: string,
+): void {
+  db.prepare(`
+    UPDATE agent_actions
+    SET status = ?, result_json = ?, error = ?, updated_at = ?, finished_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    result === undefined ? null : JSON.stringify(result),
+    error ?? null,
+    nowIso,
+    nowIso,
+    actionId,
+  );
+}
+
+function recordRecovery(
+  db: Database.Database,
+  action: { id: string; status: AgentActionRecord['status']; approval: AgentActionRecord['approval'] },
+  recoveredStatus: AgentActionRecord['status'],
+  reason: string,
+  evidence: Record<string, unknown>,
+): void {
+  db.prepare(`
+    INSERT INTO agent_action_recovery_events
+      (id, action_id, prior_status, recovered_status, reason, evidence_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    `recovery_${nanoid()}`,
+    action.id,
+    action.status,
+    recoveredStatus,
+    reason,
+    JSON.stringify({ approval: action.approval, ...evidence }),
+    new Date().toISOString(),
+  );
 }
 
 function buildConversationContext(
