@@ -6,29 +6,45 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from 'playwright';
 import { openDatabase } from '../src/db/index.js';
 import { readDatabaseIdentity } from '../src/runtime/databaseIdentity.js';
 import { fingerprintDatabase, sameDatabaseFingerprint, type DatabaseFingerprint } from '../src/runtime/databaseFingerprint.js';
+import {
+  evaluateProductionReceiverGuard,
+  type ProductionReceiverGuardState,
+} from '../src/runtime/roleplayProductionGuard.js';
 
 type ProductBrowser = 'chrome' | 'edge';
+
+type VerificationCheck = {
+  name: string;
+  passed: boolean;
+  critical?: boolean;
+  detail?: string;
+};
+
+type StoryScores = {
+  taskCompletion: number;
+  visualComprehension: number;
+  discoverability: number;
+  trustControl: number;
+};
 
 type StoryResult = {
   story: string;
   result: 'passed' | 'failed';
-  scores: {
-    taskCompletion: number;
-    visualComprehension: number;
-    discoverability: number;
-    trustControl: number;
-  };
+  scores: StoryScores;
   elapsedMs: number;
   primaryClicks: number;
   help: string;
+  helpRequired: 'none' | 'minor' | 'workaround' | 'failed';
   issues: string[];
   screenshots: string[];
   trace?: string;
   persistedResultIds: Record<string, string[]>;
+  verificationChecks: VerificationCheck[];
+  interactionApiBypasses: string[];
 };
 
 type BrowserCapture = {
@@ -40,13 +56,6 @@ type BrowserCapture = {
   capabilityId: string;
   snapshotId: string;
   tabsOpened: number;
-};
-
-type ProductionReceiverState = {
-  wasRunning: boolean;
-  stopped: boolean;
-  restarted: boolean;
-  health?: Record<string, unknown>;
 };
 
 const program = new Command();
@@ -92,7 +101,11 @@ if (!productionIdentity || productionIdentity.environment !== 'production') {
   throw new Error('Production/source database must have a production identity before role-play.');
 }
 
-const productionReceiver = await stopProductionReceiverIfRunning(source, productionIdentity.databaseId);
+const productionReceiver = await productionReceiverGuard(source, productionIdentity.databaseId);
+if (productionReceiver.blocked) {
+  writeBlockedRoleplayReport(productionReceiver);
+  process.exit(1);
+}
 const productionBefore = fingerprintDatabase(source);
 const fixtureServer = await startFixtureServer();
 let receiver: ChildProcess | undefined;
@@ -116,39 +129,26 @@ try {
   captures.push(await captureThroughProductBrowser(appPage, 'chrome', fixtureServer.url));
   captures.push(await captureThroughProductBrowser(appPage, 'edge', fixtureServer.url));
   storyResults.push(await runReviewSeeding(appPage));
-  storyResults.push(await runConversationStory(appContext, appPage, {
-    story: 'Creative Collector',
-    prompt: 'Make a visual inspiration board from the captured tabs. Keep personal inspiration, visual references, game inspiration, and cross-domain references visible.',
-    expectedPattern: /inspiration|visual|board|preview/i,
-  }));
-  storyResults.push(await runConversationStory(appContext, appPage, {
-    story: 'Project Builder',
-    prompt: 'Build a TabAtlas project board with sections extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, testing.',
-    expectedPattern: /extension|receiver|codex|storage|security|testing/i,
-  }));
-  storyResults.push(await runConversationStory(appContext, appPage, {
-    story: 'Knowledge Miner',
-    prompt: 'What do we know inside these videos? Separate known atomic items, transcripts, metadata-only videos, unavailable transcripts, and one bounded evidence-improvement action.',
-    expectedPattern: /Known atomic items|metadata|transcript|bounded|evidence/i,
-  }));
-  storyResults.push(await runConversationStory(appContext, appPage, {
-    story: 'Skeptical Curator',
-    prompt: 'Review weak or conflicting items in the current workspace and keep the correction scope narrow.',
-    expectedPattern: /review|weak|conflict|uncertain|correction/i,
-  }));
-  storyResults.push(await runConversationStory(appContext, appPage, {
-    story: 'Opened for Later',
-    prompt: 'Find the tabs I marked watch later and make them easy to return to without mixing them into unrelated project material.',
-    expectedPattern: /watch later|return|marked|tabs/i,
-  }));
-  storyResults.push(await runReturningUserStory(appContext!, appPage!, receiver!));
+  storyResults.push(await runCreativeCollectorStory(appContext, appPage));
+  storyResults.push(await runProjectBuilderStory(appContext, appPage));
+  storyResults.push(await runKnowledgeMinerStory(appContext, appPage));
+  storyResults.push(await runSkepticalCuratorStory(appContext, appPage));
+  storyResults.push(await runOpenedForLaterStory(appContext, appPage));
+  storyResults.push(await runReturningUserStory(appContext!, appPage!, receiver!).catch(error => storyResult({
+    story: 'Returning User',
+    elapsedMs: 0,
+    primaryClicks: 0,
+    screenshots: [],
+    helpRequired: 'failed',
+    issues: [`P1 Returning User interaction failed: ${error instanceof Error ? error.message : String(error)}`],
+    persistedResultIds: {},
+    verificationChecks: [check('story interaction completed', false, true)],
+    interactionApiBypasses: [],
+  })));
 } finally {
   await appContext?.close().catch(() => undefined);
   if (receiver) await stopProcess(receiver);
   await fixtureServer.close();
-  if (productionReceiver.wasRunning) {
-    productionReceiver.restarted = await restartProductionReceiver(source).catch(() => false);
-  }
 }
 
 const productionAfter = fingerprintDatabase(source);
@@ -156,13 +156,16 @@ const cloneAfter = fingerprintDatabase(cloneDb);
 const verification = readVerificationSummary(cloneDb);
 const productionUnchanged = sameDatabaseFingerprint(productionBefore, productionAfter);
 const automaticOrphans = verification.orphanAutomaticActions;
+const interactionApiBypasses = storyResults.flatMap(story => story.interactionApiBypasses.map(item => `${story.story}: ${item}`));
 const p0p1Issues = [
   ...storyResults.flatMap(story => story.issues.filter(issue => /^P[01]/.test(issue))),
   ...(productionUnchanged ? [] : ['P0 production fingerprint changed during role-play']),
   ...(automaticOrphans.length ? ['P1 orphan automatic actions remained after role-play'] : []),
+  ...(interactionApiBypasses.length ? ['P1 interaction-phase API bypasses were used'] : []),
 ];
 const ok = !p0p1Issues.length
   && productionUnchanged
+  && interactionApiBypasses.length === 0
   && storyResults.every(story => story.result === 'passed'
     && story.scores.taskCompletion >= 4
     && story.scores.visualComprehension >= 3
@@ -183,6 +186,7 @@ const metrics = {
 const issues = {
   p0p1Issues,
   storyIssues: storyResults.flatMap(story => story.issues.map(issue => ({ story: story.story, issue }))),
+  interactionApiBypasses,
   orphanAutomaticActions: automaticOrphans,
 };
 const reportPath = path.join(workdir, 'report-redacted.md');
@@ -202,6 +206,53 @@ fs.writeFileSync(reportPath, renderMarkdownReport({
 }));
 console.log(JSON.stringify({ ok, reportPath, metricsPath, issuesPath, stories: storyResults.map(story => ({ story: story.story, result: story.result, scores: story.scores })) }, null, 2));
 if (!ok) process.exit(1);
+
+function writeBlockedRoleplayReport(productionReceiver: ProductionReceiverGuardState): void {
+  const generatedAt = new Date().toISOString();
+  const reason = productionReceiver.blockReason ?? 'Role-play blocked by production receiver safety guard.';
+  const reportPath = path.join(workdir, 'report-redacted.md');
+  const metricsPath = path.join(workdir, 'metrics-redacted.json');
+  const issuesPath = path.join(workdir, 'issues-redacted.json');
+  const metrics = {
+    generatedAt,
+    blocked: true,
+    ok: false,
+    sourceDatabaseId: productionIdentity?.databaseId ?? '(missing)',
+    productionReceiver,
+    captures: [],
+    stories: [],
+    verification: {
+      conversations: 0,
+      views: 0,
+      reviewDecisions: 0,
+      orphanAutomaticActions: [],
+      expectedConfirmActions: 0,
+    },
+  };
+  const issues = {
+    p0p1Issues: [`P0 ${reason}`],
+    storyIssues: [],
+    orphanAutomaticActions: [],
+  };
+  fs.writeFileSync(metricsPath, JSON.stringify(metrics, null, 2));
+  fs.writeFileSync(issuesPath, JSON.stringify(issues, null, 2));
+  fs.writeFileSync(reportPath, [
+    '# TabAtlas rc3 pre-human role-play',
+    '',
+    'Result: blocked',
+    `Generated: ${generatedAt}`,
+    `Reason: ${reason}`,
+    `Production receiver running: ${productionReceiver.wasRunning}`,
+    `Production receiver stopped: ${productionReceiver.stopped}`,
+    `Production receiver restarted: ${productionReceiver.restarted}`,
+    '',
+    '## Real UI story results',
+    '',
+    'Not run. The production receiver safety guard blocked role-play before clone setup.',
+    '',
+  ].join('\n'));
+  console.log(JSON.stringify({ ok: false, blocked: true, reason, reportPath, metricsPath, issuesPath }, null, 2));
+}
 
 async function bootstrapDashboard(page: Page): Promise<void> {
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
@@ -293,69 +344,340 @@ async function runReviewSeeding(page: Page): Promise<StoryResult> {
   if (!pass) issues.push(`P1 review seeding counts incomplete: ${JSON.stringify(counts)}`);
   return storyResult({
     story: 'Review seeding',
-    pass,
     elapsedMs: Date.now() - started,
     primaryClicks: clicks,
     screenshots,
-    help: pass ? 'Seeded review decisions through the Review UI.' : 'Review seeding did not satisfy required decision mix.',
+    helpRequired: pass ? 'none' : 'failed',
     issues,
     persistedResultIds: { annotations: counts.annotationIds, reviewSessions: counts.sessionIds },
+    verificationChecks: [
+      check('review UI loaded', Boolean(typingBefore), true),
+      check('typing S/I in note did not trigger shortcuts', typingBefore === typingAfter, true),
+      check('three inspiration decisions saved', counts.inspiration >= 3, true, `inspiration=${counts.inspiration}`),
+      check('two project-reference decisions saved', counts.projectReference >= 2, true, `projectReference=${counts.projectReference}`),
+      check('two watch-later decisions saved', counts.watchLater >= 2, true, `watchLater=${counts.watchLater}`),
+      check('ignore and needs-deeper-read saved', counts.ignore >= 1 && counts.needsDeeperRead >= 1, true, `ignore=${counts.ignore}; needsDeeperRead=${counts.needsDeeperRead}`),
+      check('skipped item path exercised', counts.skipped >= 1, true, `skipped=${counts.skipped}`),
+    ],
+    interactionApiBypasses: [],
   });
 }
 
-async function runConversationStory(
-  context: BrowserContext,
-  page: Page,
-  input: { story: string; prompt: string; expectedPattern: RegExp },
-): Promise<StoryResult> {
-  const started = Date.now();
-  const before = conversationCounts(cloneDb);
-  const tracePath = path.join(tracesDir, `${slug(input.story)}.zip`);
-  await context.tracing.start({ screenshots: true, snapshots: true });
-  let clicks = 0;
-  const issues: string[] = [];
+async function runCreativeCollectorStory(context: BrowserContext, page: Page): Promise<StoryResult> {
+  return runUiStory(context, page, 'Creative Collector', async () => {
+    const before = conversationCounts(cloneDb);
+    let clicks = 0;
     const screenshots: string[] = [];
-    try {
-      await page.getByTestId('nav-ask').click(); clicks += 1;
-      await page.locator('#conversationTab').click().catch(() => undefined);
-      await page.waitForSelector('#conversationSurface.active #conversationInput', { state: 'visible', timeout: 10_000 });
-      await page.locator('#conversationInput').fill(input.prompt);
-    await page.getByTestId('conversation-form').locator('button[type="submit"]').click(); clicks += 1;
+    clicks += await submitConversationPrompt(page, 'Make a visual inspiration board from the captured tabs. Keep personal inspiration, visual references, game inspiration, and cross-domain references visible.');
     await waitForConversationAdvance(before.messages, storyTimeoutMs);
-    await page.waitForTimeout(500);
-    await confirmVisibleConfirmActions(page);
-    const text = await page.locator('#conversationThread').innerText();
-    const actionIds = actionIdsSince(before.actions);
-    if (!input.expectedPattern.test(text)) issues.push(`P2 expected visible story signal not found for ${input.story}`);
-    screenshots.push(await screenshot(page, slug(input.story)));
-    return storyResult({
-      story: input.story,
-      pass: !issues.some(issue => /^P[01]/.test(issue)),
-      elapsedMs: Date.now() - started,
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    await openViewsPage(page); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-board'));
+    const sectionCount = await page.locator('.board-column').count();
+    const cards = await cardMetrics(page);
+    await clickLayout(page, 'Gallery'); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-gallery'));
+    const galleryCards = await page.locator('.resource-card.gallery').count();
+    const firstCard = page.locator('.resource-card').first();
+    await firstCard.click(); clicks += 1;
+    await expectVisible(page.getByTestId('inspector-surface'));
+    await page.locator('[data-inspector-tab="evidence"]').click(); clicks += 1;
+    const evidenceRows = await page.locator('.evidence-row').count();
+    const inspectorText = await page.getByTestId('inspector-surface').innerText();
+    const evidenceLabelVisible = evidenceRows > 0 || /Evidence|User note|AI analysis|Verified content|Title only|Prior correction|why/i.test(inspectorText);
+    await page.locator('[data-close-inspector]').click(); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-gallery'));
+    screenshots.push(await screenshot(page, 'creative-collector'));
+    return {
       primaryClicks: clicks,
       screenshots,
-      trace: path.relative(workdir, tracePath),
-      help: issues.length ? 'Story completed with review notes.' : 'Story completed through the conversation and workspace UI.',
-      issues,
+      helpRequired: 'none' as const,
+      issues: [],
+      interactionApiBypasses: [],
       persistedResultIds: {
-        actions: actionIds,
+        actions: actionIdsSince(before.actions),
         views: viewIdsSince(before.views),
         conversations: threadIdsSince(before.threads),
       },
+      verificationChecks: [
+        check('conversation produced result', conversationCounts(cloneDb).messages >= before.messages + 2, true),
+        check('visible workspace opened', await page.getByTestId('workspace-gallery').isVisible().catch(() => false), true),
+        check('visible sections present', sectionCount > 0, true, `sections=${sectionCount}`),
+        check('five identifiable cards visible', cards.identifiable >= 5, true, `identifiable=${cards.identifiable}; total=${cards.total}`),
+        check('gallery layout switch worked', galleryCards >= 5, true, `galleryCards=${galleryCards}`),
+        check('inspector opened with evidence or why label', evidenceLabelVisible, true, `evidenceRows=${evidenceRows}`),
+        check('inspector close preserved workspace context', await page.getByTestId('workspace-gallery').isVisible().catch(() => false), true),
+      ],
+    };
+  });
+}
+
+async function runProjectBuilderStory(context: BrowserContext, page: Page): Promise<StoryResult> {
+  return runUiStory(context, page, 'Project Builder', async () => {
+    const before = conversationCounts(cloneDb);
+    let clicks = 0;
+    const screenshots: string[] = [];
+    clicks += await submitConversationPrompt(page, 'Build a TabAtlas project board with sections extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, testing.');
+    await waitForConversationAdvance(before.messages, storyTimeoutMs);
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    await openViewsPage(page); clicks += 1;
+    await clickLayout(page, 'Board'); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-board'));
+    const sectionText = await page.locator('.board-column header h4').evaluateAll(elements => elements.map(element => element.textContent ?? '').join(' | '));
+    const projectSections = ['extension', 'receiver', 'codex', 'storage', 'extraction', 'transcripts', 'security', 'ux', 'installation', 'packaging', 'testing']
+      .filter(section => sectionText.toLowerCase().includes(section));
+    const atomicCards = await page.locator('.resource-card[data-target-kind="atomic_item"]').count();
+    const card = atomicCards > 0
+      ? page.locator('.resource-card[data-target-kind="atomic_item"]').first()
+      : page.locator('.resource-card').first();
+    await card.click(); clicks += 1;
+    await expectVisible(page.getByTestId('inspector-surface'));
+    const overviewText = await page.getByTestId('inspector-surface').innerText();
+    await page.locator('[data-inspector-tab="evidence"]').click(); clicks += 1;
+    const evidenceRows = await page.locator('.evidence-row').count();
+    await page.locator('[data-inspector-tab="notes"]').click(); clicks += 1;
+    const notesText = await page.getByTestId('inspector-surface').innerText();
+    await page.locator('[data-inspector-tab="related"]').click(); clicks += 1;
+    const relatedRows = await page.locator('.related-row').count();
+    const parentButton = page.locator('[data-parent-resource]');
+    const parentAvailable = await parentButton.count() > 0;
+    if (parentAvailable) {
+      await parentButton.first().click(); clicks += 1;
+      await expectVisible(page.getByTestId('inspector-surface'));
+    }
+    await page.locator('[data-close-inspector]').click(); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-board'));
+    await clickLayout(page, 'Map'); clicks += 1;
+    await expectVisible(page.getByTestId('workspace-map'));
+    const mapSections = await page.locator('.map-cluster').count();
+    screenshots.push(await screenshot(page, 'project-builder'));
+    return {
+      primaryClicks: clicks,
+      screenshots,
+      helpRequired: 'none' as const,
+      issues: [],
+      interactionApiBypasses: [],
+      persistedResultIds: {
+        actions: actionIdsSince(before.actions),
+        views: viewIdsSince(before.views),
+        conversations: threadIdsSince(before.threads),
+      },
+      verificationChecks: [
+        check('project workspace visible', await page.getByTestId('workspace-map').isVisible().catch(() => false), true),
+        check('project-purpose sections visible', projectSections.length >= 6, true, `matched=${projectSections.join(',')}`),
+        check('atomic item card found when present', atomicCards > 0, false, `atomicCards=${atomicCards}`),
+        check('overview tab inspected', /State|Section|Extraction|summary/i.test(overviewText), true),
+        check('evidence tab inspected', evidenceRows > 0, true, `evidenceRows=${evidenceRows}`),
+        check('notes tab inspected', /Notes|No user notes|inspiration|project/i.test(notesText), true),
+        check('related tab inspected', relatedRows > 0, true, `relatedRows=${relatedRows}`),
+        check('atomic parent navigation considered', parentAvailable || atomicCards === 0, false, `parentAvailable=${parentAvailable}`),
+        check('map layout verified', mapSections > 0, true, `mapSections=${mapSections}`),
+      ],
+    };
+  });
+}
+
+async function runKnowledgeMinerStory(context: BrowserContext, page: Page): Promise<StoryResult> {
+  return runUiStory(context, page, 'Knowledge Miner', async () => {
+    const before = conversationCounts(cloneDb);
+    let clicks = 0;
+    const screenshots: string[] = [];
+    clicks += await submitConversationPrompt(page, 'What do we know inside these videos? Separate known atomic items, transcripts, metadata-only videos, unavailable transcripts, and one bounded evidence-improvement action.');
+    await waitForConversationAdvance(before.messages, storyTimeoutMs);
+    await page.waitForTimeout(500);
+    const threadText = await page.locator('#conversationThread').innerText();
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    await page.waitForTimeout(1000);
+    if (!await page.locator('#jobsList').isVisible().catch(() => false)) {
+      await openSettingsPanel(page, 'jobs'); clicks += 1;
+    }
+    const scanActionEvidence = latestActionEvidence(cloneDb, before.actions, 'scan_resources');
+    const jobsVisible = await page.locator('#page-settings.active #settings-jobs, #jobsList').first().isVisible().catch(() => false);
+    const jobRows = await page.locator('#jobsList .ops-row').count().catch(() => 0);
+    screenshots.push(await screenshot(page, 'knowledge-miner'));
+    return {
+      primaryClicks: clicks,
+      screenshots,
+      helpRequired: 'minor' as const,
+      issues: [],
+      interactionApiBypasses: [],
+      persistedResultIds: {
+        actions: actionIdsSince(before.actions),
+        views: viewIdsSince(before.views),
+        conversations: threadIdsSince(before.threads),
+      },
+      verificationChecks: [
+        check('known atomic or honest insufficient-evidence state shown', /known atomic|atomic item|not enough evidence|insufficient/i.test(threadText), true),
+        check('metadata-only videos are labeled', /metadata[- ]only|title[- ]only/i.test(threadText), true),
+        check('unavailable transcripts are explicit', /unavailable transcript|transcript.*unavailable|no transcript|missing transcript/i.test(threadText), true),
+        check('bounded evidence-improvement action triggered', scanActionEvidence.bounded, true, scanActionEvidence.detail),
+        check('scan action produced visible job state', jobsVisible && jobRows > 0, true, `jobsVisible=${jobsVisible}; jobRows=${jobRows}`),
+      ],
+    };
+  });
+}
+
+async function runSkepticalCuratorStory(context: BrowserContext, page: Page): Promise<StoryResult> {
+  return runUiStory(context, page, 'Skeptical Curator', async () => {
+    const before = conversationCounts(cloneDb);
+    let clicks = 0;
+    const screenshots: string[] = [];
+    await openViewsPage(page); clicks += 1;
+    await page.locator('[data-state-filter="weak_include"]').click(); clicks += 1;
+    if (await page.locator('.resource-card').count() === 0) {
+      await page.locator('[data-state-filter="needs_review"]').click(); clicks += 1;
+    }
+    if (await page.locator('.resource-card').count() === 0) {
+      await page.locator('[data-state-filter="visible"]').click(); clicks += 1;
+    }
+    const targetCard = page.locator('.resource-card').first();
+    const targetId = await targetCard.getAttribute('data-target-id') ?? '';
+    await targetCard.click(); clicks += 1;
+    await expectVisible(page.getByTestId('inspector-surface'));
+    await page.locator('[data-inspector-tab="evidence"]').click(); clicks += 1;
+    const evidenceRows = await page.locator('.evidence-row').count();
+    await page.locator('[data-inspector-tab="overview"]').click(); clicks += 1;
+    await page.locator('[data-explain-membership]').click(); clicks += 1;
+    const explanationVisible = await page.locator('#correctionResult').innerText({ timeout: 10_000 }).then(text => text.length > 0).catch(() => false);
+    await page.locator('#correctionReason').fill('Not actually relevant to this role-play workspace.');
+    await page.getByRole('button', { name: 'Pin exclude' }).click(); clicks += 1;
+    await expectText(page.locator('#correctionResult'), /Saved pin exclude/i);
+    const excludedStateText = await page.locator('#inspectorContent .metadata-grid').innerText();
+    const undoButton = page.locator('[data-correction-undo]');
+    await undoButton.click(); clicks += 1;
+    await expectText(page.locator('#correctionResult'), /undone/i);
+    const restoredStateText = await page.locator('#inspectorContent .metadata-grid').innerText();
+    await page.locator('#correctionReason').fill('Keep this excluded only for this intent.');
+    await page.getByRole('button', { name: 'Pin exclude' }).click(); clicks += 1;
+    await expectText(page.locator('#correctionResult'), /Saved pin exclude/i);
+    clicks += await submitConversationPrompt(page, 'Refine this workspace using that correction, but keep the correction scoped to this intent.');
+    await waitForConversationAdvance(before.messages, storyTimeoutMs);
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    const scopedViewId = await activeViewId(page);
+    clicks += await submitConversationPrompt(page, 'Create a separate practical painting tutorials view for a different purpose.');
+    await waitForConversationAdvance(before.messages + 2, storyTimeoutMs);
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    const unrelatedViewId = await activeViewId(page);
+    const scopeEvidence = readTargetStateInView(cloneDb, unrelatedViewId, targetId);
+    screenshots.push(await screenshot(page, 'skeptical-curator'));
+    return {
+      primaryClicks: clicks,
+      screenshots,
+      helpRequired: 'minor' as const,
+      issues: [],
+      interactionApiBypasses: [],
+      persistedResultIds: {
+        actions: actionIdsSince(before.actions),
+        views: viewIdsSince(before.views),
+        conversations: threadIdsSince(before.threads),
+      },
+      verificationChecks: [
+        check('weak or surprising card selected', Boolean(targetId), true, targetId),
+        check('evidence tab inspected', evidenceRows > 0, true, `evidenceRows=${evidenceRows}`),
+        check('membership explanation requested', explanationVisible, true),
+        check('pin exclude correction applied visibly', /Conflict|Excluded|exclude/i.test(excludedStateText), true, compact(excludedStateText)),
+        check('undo restored previous visible state', restoredStateText !== excludedStateText, true, compact(restoredStateText)),
+        check('correction reapplied', await page.locator('#correctionResult').innerText().then(text => /Saved pin exclude/i.test(text)).catch(() => false), true),
+        check('refinement kept a scoped view active', Boolean(scopedViewId), true, scopedViewId),
+        check('unrelated-purpose view created or opened', Boolean(unrelatedViewId), true, unrelatedViewId),
+        check('correction did not apply globally', scopeEvidence !== 'conflict' && scopeEvidence !== 'exclude', true, `unrelatedState=${scopeEvidence}`),
+      ],
+    };
+  });
+}
+
+async function runOpenedForLaterStory(context: BrowserContext, page: Page): Promise<StoryResult> {
+  return runUiStory(context, page, 'Opened for Later', async () => {
+    const before = conversationCounts(cloneDb);
+    const snapshotBefore = latestSnapshotIdOrNull(cloneDb);
+    const resourceCountBefore = resourceCount(cloneDb);
+    let clicks = 0;
+    const screenshots: string[] = [];
+    clicks += await submitConversationPrompt(page, 'Find the tabs I marked watch later or opened for later. Separate high-value, quick-review, and safe-to-ignore sections or the closest equivalent, then open a review lane for them.');
+    await waitForConversationAdvance(before.messages, storyTimeoutMs);
+    clicks += await resolveVisibleActionsSince(page, before.actions);
+    await openViewsPage(page); clicks += 1;
+    const sectionText = await page.locator('#viewWorkspace').innerText().catch(() => '');
+    let reviewVisible = await page.getByTestId('page-review').isVisible().catch(() => false);
+    if (!reviewVisible) {
+      clicks += await submitConversationPrompt(page, 'Open a review lane for the opened-for-later candidates.');
+      await waitForConversationAdvance(before.messages + 2, storyTimeoutMs);
+      clicks += await resolveVisibleActionsSince(page, before.actions);
+    }
+    await ensureReviewLane(page); clicks += 1;
+    reviewVisible = await page.getByTestId('page-review').isVisible().catch(() => false);
+    await processReviewItems(page, 5); clicks += 5;
+    const resourceCountAfter = resourceCount(cloneDb);
+    const snapshotAfter = latestSnapshotIdOrNull(cloneDb);
+    screenshots.push(await screenshot(page, 'opened-for-later'));
+    return {
+      primaryClicks: clicks,
+      screenshots,
+      helpRequired: 'minor' as const,
+      issues: [],
+      interactionApiBypasses: [],
+      persistedResultIds: {
+        actions: actionIdsSince(before.actions),
+        views: viewIdsSince(before.views),
+        conversations: threadIdsSince(before.threads),
+        reviewSessions: latestReviewSessionIds(cloneDb, 2),
+      },
+      verificationChecks: [
+        check('opened-for-later workspace visible', /watch later|opened|later|return|high-value|quick-review|safe-to-ignore|safe to ignore/i.test(sectionText), true, compact(sectionText).slice(0, 220)),
+        check('review lane/session opened visibly', reviewVisible, true),
+        check('five review items processed', reviewDecisionCounts(cloneDb).total >= 16, true),
+        check('resources were not deleted', resourceCountAfter >= resourceCountBefore, true, `${resourceCountBefore}->${resourceCountAfter}`),
+        check('browser snapshot was not mutated by review', snapshotAfter === snapshotBefore, true, `${snapshotBefore}->${snapshotAfter}`),
+      ],
+    };
+  });
+}
+
+async function runUiStory(
+  context: BrowserContext,
+  page: Page,
+  story: string,
+  run: () => Promise<{
+    primaryClicks: number;
+    screenshots: string[];
+    helpRequired: StoryResult['helpRequired'];
+    issues: string[];
+    interactionApiBypasses: string[];
+    persistedResultIds: Record<string, string[]>;
+    verificationChecks: VerificationCheck[];
+  }>,
+): Promise<StoryResult> {
+  const started = Date.now();
+  const tracePath = path.join(tracesDir, `${slug(story)}.zip`);
+  await context.tracing.start({ screenshots: true, snapshots: true });
+  try {
+    const result = await run();
+    return storyResult({
+      story,
+      elapsedMs: Date.now() - started,
+      primaryClicks: result.primaryClicks,
+      screenshots: result.screenshots,
+      trace: path.relative(workdir, tracePath),
+      helpRequired: result.helpRequired,
+      issues: result.issues,
+      persistedResultIds: result.persistedResultIds,
+      verificationChecks: result.verificationChecks,
+      interactionApiBypasses: result.interactionApiBypasses,
     });
   } catch (error) {
-    issues.push(`P1 ${input.story} interaction failed: ${error instanceof Error ? error.message : String(error)}`);
-    screenshots.push(await screenshot(page, `${slug(input.story)}-failed`).catch(() => ''));
+    const issues = [`P1 ${story} interaction failed: ${error instanceof Error ? error.message : String(error)}`];
+    const screenshots = [await screenshot(page, `${slug(story)}-failed`).catch(() => '')].filter(Boolean);
     return storyResult({
-      story: input.story,
-      pass: false,
+      story,
       elapsedMs: Date.now() - started,
-      primaryClicks: clicks,
-      screenshots: screenshots.filter(Boolean),
+      primaryClicks: 0,
+      screenshots,
       trace: path.relative(workdir, tracePath),
-      help: 'Story failed during UI interaction.',
+      helpRequired: 'failed',
       issues,
       persistedResultIds: {},
+      verificationChecks: [check('story interaction completed', false, true)],
+      interactionApiBypasses: [],
     });
   } finally {
     await context.tracing.stop({ path: tracePath }).catch(() => undefined);
@@ -370,12 +692,35 @@ async function runReturningUserStory(
   const started = Date.now();
   const screenshots: string[] = [];
   const issues: string[] = [];
-  await page.getByTestId('nav-views').click();
-  await page.evaluate(() => {
-    localStorage.setItem('tabatlas.workspace.layout', 'gallery');
-    localStorage.setItem('tabatlas.workspace.page', 'views');
-    localStorage.setItem('tabatlas.workspace.workspaceQuery', 'security');
-  });
+  let clicks = 0;
+  await page.locator('#conversationTab').click().catch(() => undefined);
+  await openViewsPage(page); clicks += 1;
+  await clickLayout(page, 'Gallery'); clicks += 1;
+  await expectVisible(page.getByTestId('workspace-gallery'));
+  const firstCard = page.locator('.resource-card').first();
+  await expectVisible(firstCard);
+  const firstCardText = await firstCard.innerText();
+  const searchTerm = firstCardText.split(/\s+/).find(term => /^[a-z0-9-]{4,}$/i.test(term))?.toLowerCase() ?? 'tab';
+  await page.locator('#workspaceSearch').fill(searchTerm);
+  await page.waitForTimeout(250);
+  if (!await firstCard.isVisible().catch(() => false)) {
+    await page.locator('#workspaceSearch').fill('');
+    await page.waitForTimeout(250);
+  }
+  await expectVisible(firstCard);
+  await firstCard.click(); clicks += 1;
+  await expectVisible(page.getByTestId('inspector-surface'));
+  await page.locator('[data-inspector-tab="evidence"]').click(); clicks += 1;
+  await page.getByTestId('nav-review').click(); clicks += 1;
+  if (!await page.locator('.review-current').isVisible().catch(() => false)) {
+    await page.locator('[data-review-start="unmarked"]').click({ timeout: 10_000 }); clicks += 1;
+  }
+  if (await page.locator('[data-review-decision="important"]').isVisible().catch(() => false)) {
+    await page.locator('#reviewNote').fill('Returning-user partial review progress.');
+    await page.locator('[data-review-decision="important"]').click(); clicks += 1;
+    await page.waitForTimeout(150);
+  }
+  const reviewBefore = await page.locator('.progress-block').innerText().catch(() => '');
   screenshots.push(await screenshot(page, 'returning-user-before'));
   await context.close();
   await stopProcess(runningReceiver);
@@ -391,35 +736,230 @@ async function runReturningUserStory(
     query: localStorage.getItem('tabatlas.workspace.workspaceQuery'),
     thread: localStorage.getItem('tabatlas.workspace.activeThreadId'),
     reviewSession: localStorage.getItem('tabatlas.workspace.reviewSessionId'),
+    selectedTargetId: localStorage.getItem('tabatlas.workspace.selectedTargetId'),
+    inspectorTab: localStorage.getItem('tabatlas.workspace.inspectorTab'),
   }));
+  await appPage.getByTestId('nav-views').click(); clicks += 1;
+  await expectVisible(appPage.getByTestId('workspace-gallery'));
+  const inspectorVisible = await appPage.getByTestId('inspector-surface').evaluate(element => element.classList.contains('active')).catch(() => false);
+  const evidenceSelected = await appPage.locator('[data-inspector-tab="evidence"]').getAttribute('aria-selected').catch(() => 'false');
+  await appPage.getByTestId('nav-review').click(); clicks += 1;
+  const reviewAfter = await appPage.locator('.progress-block').innerText().catch(() => '');
+  const actionCountBeforeReplayCheck = conversationCounts(cloneDb).actions;
+  await appPage.waitForTimeout(1000);
+  const actionCountAfterReplayCheck = conversationCounts(cloneDb).actions;
   screenshots.push(await screenshot(appPage, 'returning-user-after'));
-  const pass = restored.page === 'views'
-    && restored.layout === 'gallery'
-    && restored.query === 'security'
-    && Boolean(restored.thread)
-    && Boolean(restored.reviewSession);
-  if (!pass) issues.push(`P1 returning user state did not restore: ${JSON.stringify(restored)}`);
   return storyResult({
     story: 'Returning User',
-    pass,
     elapsedMs: Date.now() - started,
-    primaryClicks: 1,
+    primaryClicks: clicks,
     screenshots,
-    help: pass ? 'Restarted clone receiver and app browser, then restored prior workspace state.' : 'Restart restoration was incomplete.',
+    helpRequired: 'none',
     issues,
     persistedResultIds: { localStorage: Object.values(restored).filter((value): value is string => typeof value === 'string' && Boolean(value)) },
+    verificationChecks: [
+      check('conversation remained active', Boolean(restored.thread), true, restored.thread ?? ''),
+      check('generated view remained active', Boolean(await activeViewId(appPage)), true, await activeViewId(appPage)),
+      check('non-default layout restored', restored.layout === 'gallery', true, restored.layout ?? ''),
+      check('search/filter restored', restored.query === searchTerm || restored.query === '', true, `expected=${searchTerm}; actual=${restored.query ?? ''}`),
+      check('inspector target restored', Boolean(restored.selectedTargetId), true, restored.selectedTargetId ?? ''),
+      check('inspector evidence tab restored', inspectorVisible && evidenceSelected === 'true' && restored.inspectorTab === 'evidence', true, `visible=${inspectorVisible}; selected=${evidenceSelected}; stored=${restored.inspectorTab}`),
+      check('review session progress restored', Boolean(restored.reviewSession) && /done|pending/i.test(reviewAfter), true, `before=${compact(reviewBefore)}; after=${compact(reviewAfter)}`),
+      check('historical action plan did not replay', actionCountAfterReplayCheck === actionCountBeforeReplayCheck, true, `${actionCountBeforeReplayCheck}->${actionCountAfterReplayCheck}`),
+    ],
+    interactionApiBypasses: [],
   });
 }
 
-async function confirmVisibleConfirmActions(page: Page): Promise<void> {
-  const buttons = page.locator('[data-agent-confirm]');
-  const count = await buttons.count().catch(() => 0);
-  for (let index = 0; index < count; index += 1) {
-    const button = buttons.nth(index);
-    if (await button.isVisible().catch(() => false)) {
-      await button.click();
-      await page.waitForTimeout(500);
+async function confirmVisibleConfirmActions(page: Page): Promise<number> {
+  let clicked = 0;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const buttons = page.locator('[data-agent-confirm], [data-agent-retry]');
+    const count = await buttons.count().catch(() => 0);
+    let clickedThisPass = 0;
+    for (let index = 0; index < count; index += 1) {
+      const button = buttons.nth(index);
+      if (await button.isVisible().catch(() => false)) {
+        await button.click();
+        clicked += 1;
+        clickedThisPass += 1;
+        await page.waitForTimeout(1000);
+      }
     }
+    if (!clickedThisPass) break;
+  }
+  return clicked;
+}
+
+async function resolveVisibleActionsSince(page: Page, previousActions: number): Promise<number> {
+  let clicked = 0;
+  await waitForActionsQuiescentSince(previousActions, storyTimeoutMs);
+  for (let pass = 0; pass < 4; pass += 1) {
+    const passClicks = await confirmVisibleConfirmActions(page);
+    clicked += passClicks;
+    await waitForActionsQuiescentSince(previousActions, storyTimeoutMs);
+    if (!passClicks) break;
+  }
+  return clicked;
+}
+
+async function submitConversationPrompt(page: Page, prompt: string): Promise<number> {
+  await page.getByTestId('nav-ask').click();
+  await page.locator('#conversationTab').click().catch(() => undefined);
+  await page.waitForSelector('#conversationSurface.active #conversationInput', { state: 'visible', timeout: 10_000 });
+  await page.locator('#conversationInput').fill(prompt);
+  await page.getByTestId('conversation-form').locator('button[type="submit"]').click();
+  return 2;
+}
+
+async function openViewsPage(page: Page): Promise<void> {
+  await page.getByTestId('nav-views').click();
+  await page.waitForFunction(() => document.querySelector('#page-views')?.classList.contains('active'), undefined, { timeout: 10_000 });
+}
+
+async function clickLayout(page: Page, label: 'Board' | 'Gallery' | 'Map' | 'Compact'): Promise<void> {
+  await page.getByTestId('view-toolbar').getByRole('button', { name: label }).click();
+}
+
+async function expectVisible(locator: Locator): Promise<void> {
+  await locator.waitFor({ state: 'visible', timeout: 15_000 });
+}
+
+async function expectText(locator: Locator, pattern: RegExp): Promise<void> {
+  await locator.waitFor({ state: 'visible', timeout: 15_000 });
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    const text = await locator.innerText().catch(() => '');
+    if (pattern.test(text)) return;
+    await delay(250);
+  }
+  throw new Error(`Timed out waiting for text ${pattern}`);
+}
+
+async function cardMetrics(page: Page): Promise<{ total: number; identifiable: number; userSignals: number }> {
+  return page.locator('.resource-card').evaluateAll(cards => {
+    const total = cards.length;
+    const userSignals = cards.filter(card => card.querySelector('.user-signal')).length;
+    const identifiable = cards.filter(card => {
+      const text = card.textContent ?? '';
+      return Boolean(card.querySelector('.card-media'))
+        && /User note|AI analysis|Verified content|Title only|Prior correction|Strong match|Weak match|Needs review/i.test(text)
+        && /matches|evidence|User annotation|local title|derived|reference|capture/i.test(text);
+    }).length;
+    return { total, identifiable, userSignals };
+  });
+}
+
+async function activeViewId(page: Page): Promise<string> {
+  return page.evaluate(() => localStorage.getItem('tabatlas.workspace.activeViewId') ?? '');
+}
+
+async function processReviewItems(page: Page, countToProcess: number): Promise<void> {
+  await page.getByTestId('nav-review').click();
+  await expectVisible(page.getByTestId('review-workspace'));
+  for (let index = 0; index < countToProcess; index += 1) {
+    if (!await page.locator('[data-review-decision="important"]').isVisible().catch(() => false)) break;
+    const decision = index === countToProcess - 1 ? 'ignore' : index % 2 === 0 ? 'watch_later' : 'important';
+    await page.locator('#reviewNote').fill(`Opened-for-later role-play decision ${index + 1}.`);
+    await page.locator(`[data-review-decision="${decision}"]`).click({ timeout: 10_000 });
+    await page.waitForTimeout(150);
+  }
+}
+
+async function ensureReviewLane(page: Page): Promise<void> {
+  await page.getByTestId('nav-review').click();
+  await expectVisible(page.getByTestId('review-workspace'));
+  if (await page.locator('[data-review-decision="important"]').isVisible().catch(() => false)) return;
+  const start = page.locator('[data-review-start="unmarked"]');
+  if (await start.isVisible().catch(() => false)) {
+    await start.click();
+    await expectVisible(page.locator('[data-review-decision="important"]'));
+    return;
+  }
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('nav-review').click();
+  if (await page.locator('[data-review-decision="important"]').isVisible().catch(() => false)) return;
+  if (await start.isVisible().catch(() => false)) {
+    await start.click();
+    await expectVisible(page.locator('[data-review-decision="important"]'));
+    return;
+  }
+  throw new Error('Review lane could not be opened through visible UI controls.');
+}
+
+function check(name: string, passed: boolean, critical = false, detail?: string): VerificationCheck {
+  return { name, passed, critical, detail };
+}
+
+function compact(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function resourceCount(dbPath: string): number {
+  const db = openDatabase(dbPath);
+  try {
+    return count(db, 'resources');
+  } finally {
+    db.close();
+  }
+}
+
+function latestReviewSessionIds(dbPath: string, limit: number): string[] {
+  const db = openDatabase(dbPath);
+  try {
+    return (db.prepare('SELECT id FROM review_sessions ORDER BY created_at DESC LIMIT ?').all(limit) as Array<{ id: string }>).map(row => row.id);
+  } finally {
+    db.close();
+  }
+}
+
+function readTargetStateInView(dbPath: string, viewId: string, targetId: string): string {
+  if (!viewId || !targetId) return 'absent';
+  const db = openDatabase(dbPath);
+  try {
+    const row = db.prepare(`
+      SELECT state
+      FROM memberships
+      WHERE view_id = ? AND target_id = ?
+      ORDER BY rowid DESC
+      LIMIT 1
+    `).get(viewId, targetId) as { state: string } | undefined;
+    return row?.state ?? 'absent';
+  } finally {
+    db.close();
+  }
+}
+
+function latestActionEvidence(dbPath: string, previousActions: number, kind: string): { bounded: boolean; detail: string } {
+  const db = openDatabase(dbPath);
+  try {
+    const rows = db.prepare(`
+      SELECT id, action_kind, status, action_json, result_json
+      FROM agent_actions
+      ORDER BY rowid
+      LIMIT -1 OFFSET ?
+    `).all(previousActions) as Array<{
+      id: string;
+      action_kind: string;
+      status: string;
+      action_json: string;
+      result_json: string | null;
+    }>;
+    const match = rows.find(row => row.action_kind === kind);
+    if (!match) return { bounded: false, detail: 'no action found' };
+    const action = JSON.parse(match.action_json) as { resourceIds?: unknown[]; limit?: unknown };
+    const result = match.result_json ? JSON.parse(match.result_json) as { job?: { id?: string } } : {};
+    const resourceCount = Array.isArray(action.resourceIds) ? action.resourceIds.length : 0;
+    const bounded = match.status === 'succeeded'
+      && resourceCount > 0
+      && resourceCount <= 20
+      && typeof result.job?.id === 'string';
+    return {
+      bounded,
+      detail: `id=${match.id}; status=${match.status}; resourceIds=${resourceCount}; job=${result.job?.id ?? '(none)'}`,
+    };
+  } finally {
+    db.close();
   }
 }
 
@@ -522,42 +1062,15 @@ async function cloneSourceDatabase(): Promise<void> {
   if (code !== 0) throw new Error(`environment-clone failed; see ${logPath}`);
 }
 
-async function stopProductionReceiverIfRunning(databasePath: string, databaseId: string): Promise<ProductionReceiverState> {
+async function productionReceiverGuard(_databasePath: string, databaseId: string): Promise<ProductionReceiverGuardState> {
   const health = await readHealth(9787);
-  if (!health) return { wasRunning: false, stopped: false, restarted: false };
-  if (health.profile !== 'production' || health.databaseId !== databaseId) {
-    throw new Error(`Port 9787 has a TabAtlas receiver but it does not match the source production database.`);
-  }
-  const pid = await listeningPid(9787);
-  if (!pid) throw new Error('Production receiver is running but its process could not be safely identified.');
-  const stopped = stopPidTree(pid);
-  await waitForPortFree(9787, 15_000);
-  const afterStop = fingerprintDatabase(databasePath);
-  if (afterStop.databaseId !== databaseId) throw new Error('Production database identity changed while stopping receiver.');
-  return { wasRunning: true, stopped, restarted: false, health };
-}
-
-async function restartProductionReceiver(databasePath: string): Promise<boolean> {
-  const child = spawn('powershell.exe', [
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    path.join(root, 'scripts', 'start-tabatlas.ps1'),
-    '-Profile',
-    'production',
-    '-Port',
-    '9787',
-    '-Database',
-    databasePath,
-    '-NoOpen',
-  ], {
-    cwd: root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+  const productionPortOccupied = health ? true : !(await canBind(9787));
+  return evaluateProductionReceiverGuard({
+    health,
+    expectedDatabaseId: databaseId,
+    productionPortOccupied,
+    productionPort: 9787,
   });
-  const code = await new Promise<number | null>(resolve => child.once('exit', resolve));
-  return code === 0 && Boolean(await readHealth(9787));
 }
 
 async function readHealth(targetPort: number): Promise<Record<string, unknown> | null> {
@@ -568,24 +1081,6 @@ async function readHealth(targetPort: number): Promise<Record<string, unknown> |
   } catch {
     return null;
   }
-}
-
-async function listeningPid(targetPort: number): Promise<number | null> {
-  if (process.platform !== 'win32') return null;
-  const result = spawnSync('powershell.exe', [
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-Command',
-    `(Get-NetTCPConnection -LocalPort ${targetPort} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess`,
-  ], { encoding: 'utf8', windowsHide: true });
-  const pid = Number(result.stdout.trim());
-  return Number.isInteger(pid) && pid > 0 ? pid : null;
-}
-
-function stopPidTree(pid: number): boolean {
-  const result = spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-  return result.status === 0;
 }
 
 async function waitForHealth(child: ChildProcess, timeoutMs: number): Promise<void> {
@@ -771,6 +1266,33 @@ function threadIdsSince(previousThreads: number): string[] {
   }
 }
 
+async function waitForActionsQuiescentSince(previousActions: number, timeoutMs: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const states = actionStatesSince(previousActions);
+    const inFlight = states.filter(action => action.status === 'running'
+      || (action.status === 'proposed' && action.approval !== 'confirm'));
+    if (!inFlight.length) return;
+    await delay(750);
+  }
+  const states = actionStatesSince(previousActions);
+  throw new Error(`Timed out waiting for agent actions to settle: ${JSON.stringify(states)}`);
+}
+
+function actionStatesSince(previousActions: number): Array<{ id: string; status: string; approval: string; kind: string }> {
+  const db = openDatabase(cloneDb);
+  try {
+    return db.prepare(`
+      SELECT id, status, approval, action_kind AS kind
+      FROM agent_actions
+      ORDER BY rowid
+      LIMIT -1 OFFSET ?
+    `).all(previousActions) as Array<{ id: string; status: string; approval: string; kind: string }>;
+  } finally {
+    db.close();
+  }
+}
+
 function readVerificationSummary(dbPath: string): {
   conversations: number;
   views: number;
@@ -813,32 +1335,86 @@ function countWhere(db: ReturnType<typeof openDatabase>, table: string, where: s
 
 function storyResult(input: {
   story: string;
-  pass: boolean;
   elapsedMs: number;
   primaryClicks: number;
   screenshots: string[];
-  help: string;
+  helpRequired: StoryResult['helpRequired'];
   issues: string[];
   persistedResultIds: Record<string, string[]>;
+  verificationChecks: VerificationCheck[];
+  interactionApiBypasses: string[];
   trace?: string;
 }): StoryResult {
+  const scores = scoreStory(input.verificationChecks, input.issues, input.helpRequired, input.interactionApiBypasses);
+  const pass = scores.taskCompletion >= 4
+    && scores.visualComprehension >= 3
+    && scores.discoverability >= 3
+    && scores.trustControl >= 3
+    && !input.issues.some(issue => /^P[01]/.test(issue))
+    && input.interactionApiBypasses.length === 0;
   return {
     story: input.story,
-    result: input.pass ? 'passed' : 'failed',
-    scores: {
-      taskCompletion: input.pass ? 4 : 2,
-      visualComprehension: input.pass ? 4 : 2,
-      discoverability: input.pass ? 4 : 2,
-      trustControl: input.issues.some(issue => /^P[01]/.test(issue)) ? 2 : 4,
-    },
+    result: pass ? 'passed' : 'failed',
+    scores,
     elapsedMs: input.elapsedMs,
     primaryClicks: input.primaryClicks,
-    help: input.help,
+    help: helpLabel(input.helpRequired),
+    helpRequired: input.helpRequired,
     issues: input.issues,
     screenshots: input.screenshots.map(item => path.relative(workdir, item)),
     trace: input.trace,
     persistedResultIds: input.persistedResultIds,
+    verificationChecks: input.verificationChecks,
+    interactionApiBypasses: input.interactionApiBypasses,
   };
+}
+
+function scoreStory(
+  checks: VerificationCheck[],
+  issues: string[],
+  helpRequired: StoryResult['helpRequired'],
+  bypasses: string[],
+): StoryScores {
+  const critical = checks.filter(item => item.critical);
+  const criticalPassed = critical.filter(item => item.passed).length;
+  const optional = checks.filter(item => !item.critical);
+  const optionalPassed = optional.filter(item => item.passed).length;
+  const criticalMissing = critical.length > criticalPassed;
+  const p0p1 = issues.some(issue => /^P[01]/.test(issue));
+  const completionBase = criticalMissing ? 2 : helpRequired === 'none' ? 5 : helpRequired === 'minor' ? 4 : helpRequired === 'workaround' ? 3 : 1;
+  const taskCompletion = p0p1 ? Math.min(completionBase, 2) : completionBase;
+  const visualComprehension = criticalMissing
+    ? 2
+    : Math.max(3, Math.min(5, 3 + Math.floor(optionalPassed / Math.max(1, Math.ceil(optional.length / 2)))));
+  const discoverability = bypasses.length
+    ? 2
+    : helpRequired === 'none'
+      ? 5
+      : helpRequired === 'minor'
+        ? 4
+        : helpRequired === 'workaround'
+          ? 3
+          : 1;
+  const trustControl = p0p1
+    ? 2
+    : criticalMissing
+      ? 2
+      : checks.some(item => /undo|scope|evidence|unchanged|not mutated|typing/i.test(item.name) && item.passed)
+        ? 5
+        : 4;
+  return {
+    taskCompletion,
+    visualComprehension,
+    discoverability,
+    trustControl,
+  };
+}
+
+function helpLabel(helpRequired: StoryResult['helpRequired']): string {
+  if (helpRequired === 'none') return 'none';
+  if (helpRequired === 'minor') return 'minor hesitation; completed through visible UI controls';
+  if (helpRequired === 'workaround') return 'completed with workaround';
+  return 'failed during visible interaction';
 }
 
 async function screenshot(page: Page, name: string): Promise<string> {
@@ -855,7 +1431,7 @@ function renderMarkdownReport(input: {
   captures: BrowserCapture[];
   storyResults: StoryResult[];
   verification: ReturnType<typeof readVerificationSummary>;
-  issues: { p0p1Issues: string[] };
+  issues: { p0p1Issues: string[]; interactionApiBypasses?: string[] };
 }): string {
   return [
     '# TabAtlas rc3 pre-human role-play',
@@ -866,11 +1442,19 @@ function renderMarkdownReport(input: {
     `Production database ID: ${input.productionBefore.databaseId ?? '(missing)'}`,
     `Production after database ID: ${input.productionAfter.databaseId ?? '(missing)'}`,
     '',
+    '## Runtime safety checks',
+    '',
+    `Production fingerprint unchanged: ${input.productionUnchanged}`,
+    `Production before main SHA-256: ${input.productionBefore.files.main.sha256 ?? '(missing)'}`,
+    `Production after main SHA-256: ${input.productionAfter.files.main.sha256 ?? '(missing)'}`,
+    `Orphan automatic actions: ${input.verification.orphanAutomaticActions.length}`,
+    `Interaction-phase API bypasses: ${input.issues.interactionApiBypasses?.length ?? 0}`,
+    '',
     '## Browser capture',
     '',
     ...input.captures.map(capture => `- ${capture.browser}: strategy=${capture.browser === 'chrome' ? 'chrome_product_cdp' : 'edge_product_cdp'}, version=${capture.executableVersion}, challenge=${capture.challengeId}, capability=${capture.capabilityId}, snapshot=${capture.snapshotId}, tabs=${capture.tabsOpened}`),
     '',
-    '## Stories',
+    '## Real UI story results',
     '',
     ...input.storyResults.map(story => [
       `### ${story.story}`,
@@ -878,12 +1462,28 @@ function renderMarkdownReport(input: {
       `Scores: task=${story.scores.taskCompletion}, visual=${story.scores.visualComprehension}, discoverability=${story.scores.discoverability}, trust=${story.scores.trustControl}`,
       `Elapsed ms: ${story.elapsedMs}`,
       `Primary clicks: ${story.primaryClicks}`,
+      `Help required: ${story.helpRequired}`,
       `Help: ${story.help}`,
       `Issues: ${story.issues.length ? story.issues.join('; ') : 'none'}`,
       `Screenshots: ${story.screenshots.join(', ')}`,
       `Trace: ${story.trace ?? '(none)'}`,
+      'Verification checks:',
+      ...story.verificationChecks.map(item => `- ${item.passed ? 'pass' : 'fail'}${item.critical ? ' critical' : ''}: ${item.name}${item.detail ? ` (${item.detail})` : ''}`),
+      `Interaction API bypasses: ${story.interactionApiBypasses.length ? story.interactionApiBypasses.join('; ') : 'none'}`,
       '',
     ].join('\n')),
+    '## Fixture evaluation results',
+    '',
+    '`eval:pilot-readiness` and `eval:workspace-ux` are separate regression gates. They are not counted as pre-human role-play stories in this report.',
+    '',
+    '## Accessibility checks',
+    '',
+    'Not run inside `roleplay:prehuman`; covered by the separate workspace UX regression gate.',
+    '',
+    '## Performance metrics',
+    '',
+    'Not run inside `roleplay:prehuman`; covered by the separate workspace UX large-workspace scenarios.',
+    '',
     '## Verification',
     '',
     `Conversations: ${input.verification.conversations}`,
@@ -1075,15 +1675,6 @@ async function stopProductBrowser(child: ChildProcess | undefined, userDataDir: 
     '-Command',
     `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${escaped}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
   ], { stdio: 'ignore', windowsHide: true });
-}
-
-async function waitForPortFree(targetPort: number, timeoutMs: number): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (await canBind(targetPort)) return;
-    await delay(500);
-  }
-  throw new Error(`Port ${targetPort} did not become free after stopping production receiver.`);
 }
 
 async function canBind(targetPort: number): Promise<boolean> {
