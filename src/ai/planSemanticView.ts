@@ -3,6 +3,7 @@ import type { LlmProvider } from '../llm/types.js';
 import { runStructured } from '../llm/runStructured.js';
 import { projectResourceBriefsForPrompt, redactSensitiveText } from '../security/urlPrivacy.js';
 import fs from 'node:fs/promises';
+import { repairSemanticViewPlanCandidate, semanticViewPlanJsonContract } from './semanticViewPlanRepair.js';
 
 export interface PlanSemanticViewOptions {
   maxViews?: number;
@@ -29,6 +30,8 @@ export async function planSemanticView(
       askReviewForAmbiguous: options.askReviewForAmbiguous ?? true,
     }, null, 2),
     '',
+    semanticViewPlanJsonContract(),
+    '',
     'Resource briefs. User annotations are primary evidence:',
     JSON.stringify({ resources: projectResourceBriefsForPrompt(briefs) }, null, 2),
   ].join('\n');
@@ -48,6 +51,7 @@ export async function planSemanticView(
   return runStructured(provider, prompt, SemanticViewPlan, {
     system,
     maxRetries: 2,
+    repair: value => repairSemanticViewPlanCandidate(commandText, value),
     semanticValidate: (value) => {
       const errors: string[] = [];
       if (value.commandText.trim().length === 0) errors.push('commandText is empty');
