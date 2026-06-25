@@ -24,7 +24,7 @@ type TabSeed = {
 };
 
 const root = process.cwd();
-const outputRoot = path.join(root, '.local', 'pilot-readiness-eval');
+const outputRoot = path.join(root, '.local', 'pilot-readiness-fixture-eval');
 const sourceDb = path.join(outputRoot, 'source-production.sqlite');
 const cloneDb = path.join(outputRoot, 'clone-roleplay.sqlite');
 const bootstrapDir = path.join(outputRoot, 'bootstrap');
@@ -33,7 +33,7 @@ const baseUrl = `http://127.0.0.1:${port}`;
 const tsx = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 if (!await canBind(port)) {
-  throw new Error(`Pilot readiness port ${port} is not available.`);
+  throw new Error(`Pilot readiness fixture evaluation port ${port} is not available.`);
 }
 
 fs.rmSync(outputRoot, { recursive: true, force: true });
@@ -44,7 +44,7 @@ const sourceBefore = fingerprintDatabase(sourceDb);
 await cloneSourceDatabase(sourceDb, cloneDb);
 const cloneIdentity = readDatabaseIdentity(cloneDb);
 if (!cloneIdentity || cloneIdentity.environment !== 'clone' || cloneIdentity.sourceDatabaseId !== sourceBefore.databaseId) {
-  throw new Error('Pilot readiness clone identity verification failed.');
+  throw new Error('Pilot readiness fixture clone identity verification failed.');
 }
 
 const server = startServer();
@@ -71,6 +71,7 @@ try {
 
   const report = {
     ok: results.every(item => item.pass),
+    scope: 'Pilot readiness fixture evaluation. This is a regression gate, not pre-human role-play evidence.',
     generatedAt: new Date().toISOString(),
     sourceDatabaseId: sourceBefore.databaseId,
     cloneDatabaseId: cloneIdentity.databaseId,
@@ -86,7 +87,7 @@ try {
     console.log(`Pass/fail: ${item.pass ? 'pass' : 'fail'}`);
     console.log('');
   }
-  console.log(`Pilot readiness report written to ${reportPath}`);
+  console.log(`Pilot readiness fixture report written to ${reportPath}`);
   if (!report.ok) process.exitCode = 1;
 } finally {
   await browser?.close().catch(() => undefined);
@@ -424,7 +425,7 @@ function startServer(): ChildProcess {
 async function waitForServer(child: ChildProcess, timeoutMs: number): Promise<void> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (child.exitCode !== null) throw new Error(`Pilot readiness receiver exited early with ${child.exitCode}`);
+    if (child.exitCode !== null) throw new Error(`Pilot readiness fixture receiver exited early with ${child.exitCode}`);
     try {
       const response = await fetch(`${baseUrl}/health`);
       if (response.ok) return;
@@ -433,7 +434,7 @@ async function waitForServer(child: ChildProcess, timeoutMs: number): Promise<vo
     }
     await delay(250);
   }
-  throw new Error(`Pilot readiness receiver did not become healthy at ${baseUrl}`);
+  throw new Error(`Pilot readiness fixture receiver did not become healthy at ${baseUrl}`);
 }
 
 async function stopServer(child: ChildProcess): Promise<void> {
