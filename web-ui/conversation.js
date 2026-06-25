@@ -103,6 +103,9 @@ function renderConversation() {
   target.querySelectorAll('[data-agent-cancel]').forEach(button => {
     button.addEventListener('click', () => cancelAction(button.dataset.agentCancel));
   });
+  target.querySelectorAll('[data-agent-retry]').forEach(button => {
+    button.addEventListener('click', () => retryAction(button.dataset.agentRetry));
+  });
   target.scrollTop = target.scrollHeight;
 }
 
@@ -119,6 +122,7 @@ function renderActionCard(action) {
   const status = humanStatus(action.status);
   const canConfirm = action.approval === 'confirm' && action.status === 'proposed';
   const canCancel = action.status === 'proposed' || action.status === 'approved';
+  const canRetry = action.status === 'failed';
   return `
     <article class="message assistant action-card" data-action-id="${escapeHtml(action.id)}">
       <div class="role">action</div>
@@ -128,10 +132,11 @@ function renderActionCard(action) {
         <span>${escapeHtml(status)}</span>
         <span>${escapeHtml(approvalLabel(action.approval))}</span>
       </div>
-      ${canConfirm || canCancel ? `
+      ${canConfirm || canCancel || canRetry ? `
         <div class="action-row">
           ${canConfirm ? `<button type="button" data-agent-confirm="${escapeHtml(action.id)}">Confirm</button>` : ''}
           ${canCancel ? `<button type="button" data-agent-cancel="${escapeHtml(action.id)}">Cancel</button>` : ''}
+          ${canRetry ? `<button type="button" data-agent-retry="${escapeHtml(action.id)}">Retry</button>` : ''}
         </div>
       ` : ''}
     </article>
@@ -152,6 +157,15 @@ async function cancelAction(actionId) {
   await postJson(`/api/agent-actions/${encodeURIComponent(actionId)}/cancel`, {});
   snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
   renderConversation();
+}
+
+async function retryAction(actionId) {
+  if (!actionId) return;
+  const priorActionStates = actionStateSnapshot();
+  await postJson(`/api/agent-actions/${encodeURIComponent(actionId)}/retry`, {});
+  snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
+  renderConversation();
+  await handleCompletedActionResults(priorActionStates);
 }
 
 async function executeNewPresentationPlans(previousMessageIds = new Set()) {
@@ -248,11 +262,11 @@ function actionLabel(action) {
 
 function humanStatus(status) {
   const labels = {
-    proposed: 'Needs confirmation',
+    proposed: 'Waiting for your confirmation',
     approved: 'Approved',
     running: 'Running',
     succeeded: 'Done',
-    failed: 'Failed',
+    failed: 'Interrupted or failed — retry available',
     cancelled: 'Cancelled',
   };
   return labels[status] ?? status;
