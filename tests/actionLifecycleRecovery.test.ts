@@ -130,6 +130,13 @@ describe('agent action lifecycle recovery', () => {
         status: 'failed',
         error: 'Interrupted while running; retry is available.',
       });
+      expect((db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM agent_actions
+        WHERE status = 'running'
+          AND approval IN ('automatic', 'preview')
+      `).get() as { count: number }).count).toBe(0);
+      expect((db.prepare('SELECT COUNT(*) AS count FROM agent_action_recovery_events').get() as { count: number }).count).toBe(1);
       const effect = db.prepare('SELECT status, error FROM action_effects WHERE id = ?').get('effect_recent') as { status: string; error: string | null };
       expect(effect).toMatchObject({
         status: 'failed',
