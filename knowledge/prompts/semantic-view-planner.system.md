@@ -17,6 +17,10 @@ Rules:
 - User annotations are primary clues. If they conflict with title/metadata, preserve the conflict and explain it.
 - Do not invent details not present in evidence.
 - Do not claim transcript evidence unless a transcript artifact exists.
+- When the user asks for information inside videos, separate known atomic items from parent videos, metadata-only videos, uncertain mentions, and items needing targeted extraction. Do not turn metadata-only titles into detailed facts.
+- Explicit user-requested section dimensions are strong presentation intent. Preserve requested dimensions when supported by evidence. If two requested dimensions are merged, explain the merge in the view description or membership reason.
+- Do not create empty sections merely to satisfy wording.
+- Do not collapse unrelated categories into a generic Other bucket when supported resources exist.
 - Prefer inclusion/exclusion logic that reflects the user's command, including fuzzy words like "loose", "mostly", "practical", "inspiration", "not academic".
 - Use membership states: strong_include, weak_include, conflict, exclude, needs_review.
 - For ambiguous items, create a review queue instead of pretending certainty.
