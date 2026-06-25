@@ -341,7 +341,7 @@ export function cancelAgentAction(db: Database.Database, actionId: string): Agen
 
 export function recoverInterruptedAgentActions(
   db: Database.Database,
-  input: { staleAfterMs?: number; now?: Date } = {},
+  input: { staleAfterMs?: number; now?: Date; recoverAllRunning?: boolean } = {},
 ): { recovered: number; staleRunning: number; buggedProposed: number; expectedProposed: number } {
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
@@ -358,14 +358,16 @@ export function recoverInterruptedAgentActions(
   const running = db.prepare(`
     SELECT id, status, approval
     FROM agent_actions
-    WHERE status = 'running' AND updated_at < ?
-  `).all(cutoff) as Array<{ id: string; status: AgentActionRecord['status']; approval: AgentActionRecord['approval'] }>;
+    WHERE status = 'running'
+      ${input.recoverAllRunning ? '' : 'AND updated_at < ?'}
+  `).all(...(input.recoverAllRunning ? [] : [cutoff])) as Array<{ id: string; status: AgentActionRecord['status']; approval: AgentActionRecord['approval'] }>;
   for (const action of running) {
     const effect = latestEffectForAction(db, action.id);
     if (effect?.status === 'succeeded') {
       updateRecoveredAction(db, action.id, 'succeeded', effect.result_json ? parseJson(effect.result_json) : undefined, undefined, nowIso);
       recordRecovery(db, action, 'succeeded', 'effect_succeeded', { effectId: effect.id });
     } else {
+      interruptIncompleteEffectsForAction(db, action.id, nowIso);
       updateRecoveredAction(db, action.id, 'failed', undefined, effect?.error ?? 'Interrupted while running; retry is available.', nowIso);
       recordRecovery(db, action, 'failed', effect?.status === 'failed' ? 'effect_failed' : 'stale_running_interrupted', { effectId: effect?.id });
     }
@@ -836,6 +838,18 @@ function latestEffectForAction(db: Database.Database, actionId: string): {
     ORDER BY updated_at DESC
     LIMIT 1
   `).get(actionId) as { id: string; status: string; result_json: string | null; error: string | null } | undefined;
+}
+
+function interruptIncompleteEffectsForAction(db: Database.Database, actionId: string, nowIso: string): number {
+  return db.prepare(`
+    UPDATE action_effects
+    SET status = 'failed',
+        error = COALESCE(error, 'Interrupted while running; retry is available.'),
+        updated_at = ?,
+        completed_at = COALESCE(completed_at, ?)
+    WHERE action_id = ?
+      AND status IN ('pending', 'running')
+  `).run(nowIso, nowIso, actionId).changes;
 }
 
 function updateRecoveredAction(

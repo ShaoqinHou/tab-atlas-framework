@@ -134,7 +134,6 @@ try {
     sourceDatabaseId: existingIdentity?.sourceDatabaseId,
     allowInitialize: runtime.allowIdentityInitialization,
   });
-  recoverInterruptedAgentActions(db);
 } catch (error) {
   lease.release();
   throw error;
@@ -960,6 +959,7 @@ app.post('/api/membership-feedback/:feedbackId/undo', async (request, reply) => 
 
 try {
   await app.listen({ host, port: runtime.port });
+  recoverInterruptedAgentActions(db, { recoverAllRunning: true });
   if (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0) {
     bootstrapSecret = ensureBootstrapSecret(db, {
       directory: runtime.bootstrapDirectory,

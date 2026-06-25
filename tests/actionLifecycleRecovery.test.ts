@@ -86,6 +86,59 @@ describe('agent action lifecycle recovery', () => {
       db.close();
     }
   });
+
+  it('recovers recently running actions immediately during startup recovery', () => {
+    const db = openDatabase(':memory:');
+    try {
+      const thread = createConversationThread(db, 'immediate recovery test');
+      persistAgentTurnPlan(db, {
+        threadId: thread.id,
+        plan: {
+          reply: 'planned action',
+          questions: [],
+          assumptions: [],
+          actions: [{
+            id: 'act_recent_running',
+            kind: 'start_review',
+            approval: 'automatic',
+            rationale: 'recent interrupted action',
+            queue: 'unmarked',
+          }],
+        },
+      });
+      const ids = actionIdsByModelKey(db);
+      const recent = '2026-06-01T00:09:59.000Z';
+      db.prepare(`
+        UPDATE agent_actions
+        SET status = 'running', updated_at = ?, execution_started_at = ?
+        WHERE id = ?
+      `).run(recent, recent, ids.act_recent_running);
+      db.prepare(`
+        INSERT INTO action_effects
+          (id, action_id, effect_kind, status, idempotency_key, input_json, created_at, updated_at, started_at)
+        VALUES ('effect_recent', ?, 'review_decision', 'running', 'act_recent_running:review_decision', '{}', ?, ?, ?)
+      `).run(ids.act_recent_running, recent, recent, recent);
+
+      const result = recoverInterruptedAgentActions(db, {
+        staleAfterMs: 60_000,
+        now: new Date('2026-06-01T00:10:00.000Z'),
+        recoverAllRunning: true,
+      });
+
+      expect(result).toMatchObject({ recovered: 1, staleRunning: 1 });
+      expect(getAgentAction(db, ids.act_recent_running)).toMatchObject({
+        status: 'failed',
+        error: 'Interrupted while running; retry is available.',
+      });
+      const effect = db.prepare('SELECT status, error FROM action_effects WHERE id = ?').get('effect_recent') as { status: string; error: string | null };
+      expect(effect).toMatchObject({
+        status: 'failed',
+        error: 'Interrupted while running; retry is available.',
+      });
+    } finally {
+      db.close();
+    }
+  });
 });
 
 function actionIdsByModelKey(db: ReturnType<typeof openDatabase>): Record<string, string> {
