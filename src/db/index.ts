@@ -2,8 +2,9 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export function openDatabase(filePath = path.join(process.cwd(), 'data', 'tabatlas.sqlite')) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+export function openDatabase(filePath: string) {
+  if (!filePath) throw new Error('openDatabase requires an explicit database path.');
+  if (filePath !== ':memory:') fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const db = new Database(filePath);
   const schemas = [
     new URL('./schema.sql', import.meta.url),
@@ -12,6 +13,7 @@ export function openDatabase(filePath = path.join(process.cwd(), 'data', 'tabatl
     new URL('./schema-v4-local-trust.sql', import.meta.url),
     new URL('./schema-v5-user-workspace.sql', import.meta.url),
     new URL('./schema-v6-release-acceptance.sql', import.meta.url),
+    new URL('./schema-v7-runtime-safety.sql', import.meta.url),
   ];
   for (const schemaPath of schemas) {
     db.exec(fs.readFileSync(schemaPath, 'utf8'));
