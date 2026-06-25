@@ -61,6 +61,7 @@ function renderAskStage() {
         <h3>Ask for a view or open an existing one.</h3>
       </div>
     `;
+    document.getElementById('continueSetupButton')?.addEventListener('click', openSetupPanel);
     return;
   }
   stage.className = 'stage';
@@ -97,7 +98,7 @@ function openSetupPanel() {
 }
 
 function setupPanelFor(stepId) {
-  if (stepId === 'dashboard_session_ready') return 'security';
+  if (stepId === 'dashboard_session_ready') return 'onboarding';
   if (stepId === 'browsers_paired' || stepId === 'snapshot_captured') return 'capture';
   if (stepId === 'extraction_ready' || stepId === 'codex_ready') return 'jobs';
   return 'capture';

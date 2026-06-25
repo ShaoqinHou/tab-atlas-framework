@@ -280,6 +280,36 @@ class WorkspaceUxFakeProvider implements LlmProvider {
     const latest = latestConversationUserText(prompt);
     const lower = latest.toLowerCase();
     const activeViewId = activeViewIdFromConversationPrompt(prompt);
+    if (/\bvideos?\b/.test(lower) || lower.includes('inside') || /what do we.*transcripts?/i.test(latest)) {
+      const relevant = resourcesFromPrompt(prompt)
+        .filter(resource => /youtube|video|transcript/i.test(`${resource.urlKind ?? ''} ${resource.title ?? ''} ${resource.host ?? ''}`))
+        .slice(0, 8);
+      const knownAtomic = relevant.filter(resource => (resource.atomicItems ?? []).length > 0).length;
+      const evidenceReady = relevant.filter(resource => (resource.evidence ?? []).some(item => /transcript|description|summary/i.test(`${item.kind ?? ''} ${item.provenance ?? ''} ${item.text ?? ''}`))).length;
+      const metadataOnly = Math.max(0, relevant.length - evidenceReady);
+      return {
+        reply: [
+          'Evidence readiness for video requests:',
+          `Known atomic items: ${knownAtomic}.`,
+          `Videos with transcript/description evidence: ${evidenceReady}.`,
+          `Videos with metadata only: ${metadataOnly}.`,
+          `Videos needing targeted extraction or scan: ${metadataOnly}.`,
+          'Unavailable transcripts remain explicit; I will not invent inside-video details from titles alone.',
+          metadataOnly ? 'I can improve evidence for these relevant videos with one bounded scan.' : 'No bounded scan is needed for the current evidence set.',
+        ].join(' '),
+        actions: metadataOnly ? [{
+          id: 'improve_video_evidence',
+          kind: 'scan_resources',
+          approval: 'confirm',
+          resourceIds: relevant.map(resource => resource.resourceId),
+          limit: relevant.length,
+          force: false,
+          rationale: 'Improve evidence for these relevant videos without scanning the whole library.',
+        }] : [],
+        questions: [],
+        assumptions: ['Metadata-only videos are not treated as detailed transcript evidence.'],
+      };
+    }
     if (lower.includes('review')) {
       return {
         reply: 'I will open a focused review queue for the uncertain items.',
@@ -346,8 +376,9 @@ class WorkspaceUxFakeProvider implements LlmProvider {
     const resources = resourcesFromPrompt(prompt);
     const decisions = decisionsFor(commandText, resources);
     const lower = commandText.toLowerCase();
-    const sections = lower.includes('project') || lower.includes('tab-manager')
-      ? ['Architecture', 'Extraction', 'UX', 'Safety', 'Packaging']
+    const requestedSections = requestedProjectSections(commandText);
+    const sections = lower.includes('project') || lower.includes('tab-manager') || requestedSections.length
+      ? requestedSections.length ? requestedSections : ['Architecture', 'Extraction', 'UX', 'Safety', 'Packaging']
       : ['Game inspiration', 'Visual references', 'Personal inspiration', 'Cross-domain references'];
     return {
       commandText,
@@ -410,7 +441,7 @@ function commandTextFromPrompt(prompt: string): string {
 function resourcesFromPrompt(prompt: string): PromptResource[] {
   for (const value of jsonObjectsFromText(prompt)) {
     if (isRecord(value) && Array.isArray(value.resources)) {
-      return value.resources.filter(isPromptResource);
+      return value.resources.map(normalizePromptResource).filter((resource): resource is PromptResource => Boolean(resource));
     }
     if (isRecord(value) && Array.isArray(value.chunkResults)) {
       return resourcesFromChunkResults(value.chunkResults);
@@ -491,13 +522,45 @@ function decisionsFor(commandText: string, resources: PromptResource[]): ChunkDe
 }
 
 function projectSectionFor(text: string, index: number): string {
-  const fallback = ['Architecture', 'Extraction', 'UX', 'Safety', 'Packaging'][index % 5] ?? 'Architecture';
+  const fallback = ['Extension', 'Receiver', 'Codex', 'Storage', 'Extraction', 'Transcripts', 'Security', 'UX', 'Installation', 'Packaging', 'Testing'][index % 11] ?? 'Extension';
   if (index % 3 === 0) return fallback;
-  if (text.includes('extract') || text.includes('transcript') || text.includes('capture')) return 'Extraction';
-  if (text.includes('privacy') || text.includes('safe') || text.includes('token') || text.includes('extension')) return 'Safety';
-  if (text.includes('package') || text.includes('install') || text.includes('release')) return 'Packaging';
+  if (text.includes('extension') || text.includes('popup') || text.includes('browser')) return 'Extension';
+  if (text.includes('receiver') || text.includes('server') || text.includes('runtime')) return 'Receiver';
+  if (text.includes('codex') || text.includes('agent') || text.includes('planner')) return 'Codex';
+  if (text.includes('storage') || text.includes('database') || text.includes('sqlite') || text.includes('wal')) return 'Storage';
+  if (text.includes('extract') || text.includes('capture')) return 'Extraction';
+  if (text.includes('transcript')) return 'Transcripts';
+  if (text.includes('privacy') || text.includes('safe') || text.includes('token') || text.includes('security')) return 'Security';
+  if (text.includes('install') || text.includes('setup')) return 'Installation';
+  if (text.includes('package') || text.includes('release') || text.includes('zip')) return 'Packaging';
+  if (text.includes('test') || text.includes('acceptance') || text.includes('eval')) return 'Testing';
   if (text.includes('ux') || text.includes('interface') || text.includes('visual') || text.includes('review')) return 'UX';
   return fallback;
+}
+
+function requestedProjectSections(commandText: string): string[] {
+  const requested = [
+    ['extension', 'Extension'],
+    ['receiver', 'Receiver'],
+    ['codex', 'Codex'],
+    ['storage', 'Storage'],
+    ['extraction', 'Extraction'],
+    ['transcript', 'Transcripts'],
+    ['security', 'Security'],
+    ['ux', 'UX'],
+    ['installation', 'Installation'],
+    ['install', 'Installation'],
+    ['packaging', 'Packaging'],
+    ['package', 'Packaging'],
+    ['testing', 'Testing'],
+    ['test', 'Testing'],
+  ] as const;
+  const lower = commandText.toLowerCase();
+  const sections: string[] = [];
+  for (const [needle, label] of requested) {
+    if (lower.includes(needle) && !sections.includes(label)) sections.push(label);
+  }
+  return sections;
 }
 
 function inspirationSectionFor(text: string, hasUserSignal: boolean): string {
@@ -573,8 +636,25 @@ function textAfterLabel(prompt: string, label: string): string {
   return rest.split(/\r?\n/, 1)[0]?.trim() ?? '';
 }
 
-function isPromptResource(value: unknown): value is PromptResource {
-  return isRecord(value) && typeof value.resourceId === 'string';
+function normalizePromptResource(value: unknown): PromptResource | null {
+  if (!isRecord(value)) return null;
+  const resourceId = typeof value.resourceId === 'string'
+    ? value.resourceId
+    : typeof value.id === 'string'
+      ? value.id
+      : '';
+  if (!resourceId) return null;
+  return {
+    ...value,
+    resourceId,
+    title: typeof value.title === 'string' ? value.title : undefined,
+    host: typeof value.host === 'string' ? value.host : undefined,
+    urlKind: typeof value.urlKind === 'string' ? value.urlKind : undefined,
+    browserGroupTitles: Array.isArray(value.browserGroupTitles) ? value.browserGroupTitles.filter((item): item is string => typeof item === 'string') : undefined,
+    userAnnotations: Array.isArray(value.userAnnotations) ? value.userAnnotations as PromptResource['userAnnotations'] : undefined,
+    atomicItems: Array.isArray(value.atomicItems) ? value.atomicItems as PromptResource['atomicItems'] : undefined,
+    evidence: Array.isArray(value.evidence) ? value.evidence as PromptResource['evidence'] : undefined,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
