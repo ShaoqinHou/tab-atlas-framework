@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { Command } from 'commander';
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 import { openDatabase } from '../src/db/index.js';
 import { ensureDatabaseIdentity, getIdentityFromOpenDatabase } from '../src/runtime/databaseIdentity.js';
+import { fingerprintOpenDatabase } from '../src/runtime/databaseFingerprint.js';
+import { verifyRemediationBackup } from '../src/runtime/remediationBackup.js';
 
 const program = new Command();
 program.requiredOption('--database <path>', 'SQLite database path');
@@ -26,6 +27,7 @@ const opts = program.opts<{
 }>();
 if (Boolean(opts.dryRun) === Boolean(opts.apply)) throw new Error('Specify exactly one of --dry-run or --apply.');
 
+const remediationStartedAt = new Date();
 const db = opts.apply ? openDatabase(opts.database) : new Database(opts.database, { readonly: true, fileMustExist: true });
 try {
   const row = db.prepare(`
@@ -47,7 +49,16 @@ try {
       (SELECT COUNT(*) FROM local_capabilities WHERE status = 'active' AND created_at >= ?) AS capabilities,
       (SELECT COUNT(*) FROM local_sessions WHERE revoked_at IS NULL AND created_at >= ?) AS sessions
   `).get(row.created_at, row.created_at) as { capabilities: number; sessions: number });
-  const backup = opts.backup ? verifyBackup(opts.backup) : null;
+  const existingIdentity = getIdentityFromOpenDatabase(db);
+  const currentFingerprint = fingerprintOpenDatabase(db, opts.database, existingIdentity);
+  const backup = opts.backup
+    ? verifyRemediationBackup({
+        backupPath: opts.backup,
+        databasePath: opts.database,
+        currentFingerprint,
+        remediationStartedAt,
+      })
+    : null;
   const remediation = {
     bootstrapId: row.id,
     currentStatus: row.status,
@@ -64,7 +75,6 @@ try {
     if (activeAuthority.capabilities || activeAuthority.sessions) {
       throw new Error('Refusing to apply because active authority was created after the bootstrap row.');
     }
-    const existingIdentity = getIdentityFromOpenDatabase(db);
     const identity = existingIdentity ?? ensureDatabaseIdentity(db, {
       runtimeProfile: 'production',
       environment: 'production',
@@ -106,16 +116,4 @@ try {
   }
 } finally {
   db.close();
-}
-
-function verifyBackup(backupPath: string): { pathHash: string; sha256: string; ageMinutes: number } {
-  const stat = fs.statSync(backupPath);
-  const ageMinutes = Math.round((Date.now() - stat.mtimeMs) / 60000);
-  if (ageMinutes > 24 * 60) throw new Error(`Backup is older than 24 hours: ${backupPath}`);
-  const data = fs.readFileSync(backupPath);
-  return {
-    pathHash: crypto.createHash('sha256').update(path.resolve(backupPath).toLowerCase()).digest('hex').slice(0, 16),
-    sha256: crypto.createHash('sha256').update(data).digest('hex'),
-    ageMinutes,
-  };
 }
