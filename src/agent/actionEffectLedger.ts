@@ -94,9 +94,9 @@ export function failActionEffect(
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE action_effects
-    SET status = 'failed', error = ?, updated_at = ?
+    SET status = 'failed', error = ?, updated_at = ?, completed_at = ?
     WHERE idempotency_key = ?
-  `).run(error instanceof Error ? error.message : String(error), now, idempotencyKey);
+  `).run(error instanceof Error ? error.message : String(error), now, now, idempotencyKey);
   return getActionEffectByKey(db, idempotencyKey);
 }
 
@@ -124,9 +124,12 @@ export function getActionEffectByKey(db: Database.Database, idempotencyKey: stri
 export function recoverStaleRunningEffects(db: Database.Database, nowIso = new Date().toISOString()): number {
   return db.prepare(`
     UPDATE action_effects
-    SET status = 'failed', error = COALESCE(error, 'stale running effect recovered'), updated_at = ?
+    SET status = 'failed',
+        error = COALESCE(error, 'stale running effect recovered'),
+        updated_at = ?,
+        completed_at = COALESCE(completed_at, ?)
     WHERE status = 'running' AND stale_after IS NOT NULL AND stale_after <= ?
-  `).run(nowIso, nowIso).changes;
+  `).run(nowIso, nowIso, nowIso).changes;
 }
 
 type ActionEffectRow = {

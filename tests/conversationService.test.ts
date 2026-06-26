@@ -11,6 +11,7 @@ import {
   confirmAgentAction,
   createConversationThread,
   getConversationSnapshot,
+  normalizeConversationActionPlan,
   persistAgentTurnPlan,
   runPersistedAgentAction,
   sendConversationMessage,
@@ -285,6 +286,68 @@ describe('persistent conversational agent actions', () => {
     expect(view.origin).toBe('codex');
   });
 
+  it('binds same-turn review actions to the view created immediately before them', async () => {
+    const { db, resourceId } = seed();
+    const thread = createConversationThread(db);
+    const evidenceRef = buildResourceBrief(db, resourceId).evidence[0].id;
+    const semanticPlan: SemanticViewPlan = {
+      commandText: 'Create watch later review workspace',
+      views: [{
+        name: 'Watch Later Review',
+        goal: 'Review likely later items.',
+        inclusionRules: ['Include likely later items.'],
+        exclusionRules: [],
+        sections: ['needs review'],
+        confidence: 0.8,
+        memberships: [{
+          targetKind: 'resource',
+          targetId: resourceId,
+          state: 'needs_review',
+          section: 'needs review',
+          confidence: 0.5,
+          reason: 'Needs focused review.',
+          evidenceRefs: [evidenceRef],
+        }],
+      }],
+      reviewQueues: [],
+      explanation: 'Fixture plan.',
+    };
+    const conversationProvider = queuedJsonProvider([{
+      reply: 'I will create the view and open review.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'action_plan_later',
+        kind: 'plan_view',
+        approval: 'preview',
+        rationale: 'Create a later-review view.',
+        commandText: 'Create watch later review workspace',
+        candidateLimit: 50,
+      }, {
+        id: 'action_start_later_review',
+        kind: 'start_review',
+        approval: 'automatic',
+        rationale: 'Open the needs-review lane for the created view.',
+        queue: 'needs_review',
+      }],
+    } satisfies AgentTurnPlan]);
+    const semanticProvider = queuedJsonProvider([semanticPlan]);
+
+    const snapshot = await sendConversationMessage(db, {
+      threadId: thread.id,
+      content: 'Create watch later review workspace and open review.',
+    }, { plannerProvider: conversationProvider, actionPlannerProvider: semanticProvider });
+    const planAction = snapshot.actions.find(action => action.kind === 'plan_view');
+    const reviewAction = snapshot.actions.find(action => action.kind === 'start_review');
+    const viewId = (planAction?.result as { viewIds: string[] }).viewIds[0];
+    const review = reviewAction?.result as { session: { sourceViewId?: string; totalItems: number }; current?: unknown };
+
+    expect(reviewAction?.status).toBe('succeeded');
+    expect(review.session.sourceViewId).toBe(viewId);
+    expect(review.session.totalItems).toBe(1);
+    expect(review.current).toBeTruthy();
+  });
+
   it('persists obvious presentation-only commands without calling semantic planning', async () => {
     const { db, resourceId } = seed();
     const viewId = createAcceptedCandidateView(db, resourceId);
@@ -357,6 +420,123 @@ describe('persistent conversational agent actions', () => {
 
     expect(context?.presentationPlan?.actions).toContainEqual({ kind: 'set_layout', layout: 'gallery' });
     expect(snapshot.actions[0]).toMatchObject({ kind: 'refine_view', status: 'succeeded' });
+  });
+
+  it('normalizes new workspace requests to plan_view even with an active view', () => {
+    const plan = normalizeConversationActionPlan({
+      reply: 'I will build that workspace.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'model_refine_wrongly',
+        kind: 'refine_view',
+        approval: 'preview',
+        rationale: 'The model tried to reuse the active view.',
+        viewId: 'view_active',
+        instruction: 'Build a TabAtlas project board with sections.',
+      }],
+    }, 'Build a TabAtlas project board with sections.', 'view_active');
+
+    expect(plan.actions[0]).toMatchObject({
+      kind: 'plan_view',
+      approval: 'preview',
+      commandText: 'Build a TabAtlas project board with sections.',
+    });
+  });
+
+  it('keeps explicit active-view refinement as refine_view', () => {
+    const plan = normalizeConversationActionPlan({
+      reply: 'I will refine this view.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'model_refine_active',
+        kind: 'refine_view',
+        approval: 'preview',
+        rationale: 'The user asked for a refinement.',
+        viewId: 'view_active',
+        instruction: 'Make this view stricter.',
+      }],
+    }, 'Make this view stricter.', 'view_active');
+
+    expect(plan.actions[0]).toMatchObject({
+      kind: 'refine_view',
+      viewId: 'view_active',
+    });
+  });
+
+  it('fills empty scan actions from relevant video context and keeps them bounded', () => {
+    const plan = normalizeConversationActionPlan({
+      reply: 'I can improve evidence for those videos.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'model_scan_empty',
+        kind: 'scan_resources',
+        approval: 'confirm',
+        rationale: 'Scan the relevant videos only.',
+        resourceIds: [],
+        limit: 100,
+        force: false,
+      }],
+    }, 'What do we know inside these videos?', undefined, {
+      resources: [
+        { id: 'res_video_one', title: 'Useful walkthrough - YouTube', urlKind: 'youtube_video', host: 'www.youtube.com' },
+        { id: 'res_article', title: 'Related article', urlKind: 'web_page', host: 'example.com' },
+        { id: 'res_video_two', title: 'Transcript candidate', urlKind: 'web_page', host: 'video.example.com' },
+      ],
+    });
+
+    expect(plan.actions[0]).toMatchObject({
+      kind: 'scan_resources',
+      resourceIds: ['res_video_one', 'res_video_two'],
+      limit: 2,
+    });
+  });
+
+  it('removes stale review source when a turn creates a new view first', () => {
+    const plan = normalizeConversationActionPlan({
+      reply: 'I will create a later-review view and open review.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'model_plan_later',
+        kind: 'plan_view',
+        approval: 'preview',
+        rationale: 'Create a new later-review workspace.',
+        commandText: 'Create watch later review workspace.',
+        candidateLimit: 50,
+      }, {
+        id: 'model_review_later',
+        kind: 'start_review',
+        approval: 'automatic',
+        rationale: 'Open review after creating the new workspace.',
+        queue: 'unmarked',
+        sourceViewId: 'view_active',
+      }],
+    }, 'Find opened-later tabs and open a review lane for them.', 'view_active');
+
+    expect(plan.actions[1]).toMatchObject({ kind: 'start_review', queue: 'unmarked' });
+    expect(plan.actions[1]).not.toHaveProperty('sourceViewId');
+  });
+
+  it('removes placeholder review source IDs before execution', () => {
+    const plan = normalizeConversationActionPlan({
+      reply: 'I will plan and review.',
+      questions: [],
+      assumptions: [],
+      actions: [{
+        id: 'model_review_placeholder',
+        kind: 'start_review',
+        approval: 'automatic',
+        rationale: 'Review the future planned view.',
+        queue: 'unmarked',
+        sourceViewId: 'pending:planned_view',
+      }],
+    }, 'Open a review lane for the planned view.');
+
+    expect(plan.actions[0]).toMatchObject({ kind: 'start_review', queue: 'unmarked' });
+    expect(plan.actions[0]).not.toHaveProperty('sourceViewId');
   });
 
   it('supplies active-view context to semantic conversation planning', async () => {
@@ -745,6 +925,62 @@ describe('persistent conversational agent actions', () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0].id).toBe(idempotentActionObjectIdForTest('job_agent', actionId));
     expect(action.status).toBe('succeeded');
+  });
+
+  it('ignores nonexistent review source views at execution time', async () => {
+    const { db } = seed();
+    const thread = createConversationThread(db);
+    const persisted = persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'Open review.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_review_invalid_source',
+          kind: 'start_review',
+          approval: 'automatic',
+          rationale: 'Open review without trusting an invalid source.',
+          queue: 'unmarked',
+          sourceViewId: 'view_missing',
+        }],
+      },
+    });
+
+    const action = await runPersistedAgentAction(db, persisted.actions[0].id);
+    const session = action.result as { session: { sourceViewId?: string } };
+
+    expect(action.status).toBe('succeeded');
+    expect(session.session.sourceViewId).toBeUndefined();
+  });
+
+  it('rejects empty scan actions instead of creating a whole-library scan', async () => {
+    const { db } = seed();
+    const thread = createConversationThread(db);
+    const persisted = persistAgentTurnPlan(db, {
+      threadId: thread.id,
+      plan: {
+        reply: 'Proposed unsafe scan.',
+        questions: [],
+        assumptions: [],
+        actions: [{
+          id: 'action_empty_scan',
+          kind: 'scan_resources',
+          approval: 'confirm',
+          rationale: 'Missing explicit resource IDs.',
+          resourceIds: [],
+          limit: 100,
+          force: false,
+        }],
+      },
+    });
+
+    const action = await confirmAgentAction(db, persisted.actions[0].id);
+    const jobs = db.prepare('SELECT id FROM jobs WHERE kind = ?').all('codex_scan') as Array<{ id: string }>;
+
+    expect(action.status).toBe('failed');
+    expect(action.error).toContain('requires explicit resourceIds');
+    expect(jobs).toHaveLength(0);
   });
 
   it('rejects unsupported arbitrary action operations', async () => {

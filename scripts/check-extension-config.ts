@@ -3,7 +3,9 @@ import { checkPortCompatibility } from '../src/acceptance/portCompatibility.js';
 const details = checkPortCompatibility(process.cwd(), process.env.TABATLAS_SERVER_URL);
 
 console.log(`Server URL: ${details.serverUrl}`);
-console.log(`Server default port: ${details.serverDefaultPort}`);
+console.log(details.serverRequiresExplicitPort
+  ? 'Server port: explicit runtime configuration required'
+  : `Server default port: ${details.serverDefaultPort}`);
 console.log(`Extension receivers: ${details.receivers.join(', ') || '(none)'}`);
 console.log(`Manifest host permissions: ${details.hostPermissions.join(', ') || '(none)'}`);
 console.log(`Popup default receiver: ${details.popupDefaultReceiver || '(none)'}`);

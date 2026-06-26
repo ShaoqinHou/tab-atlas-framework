@@ -5,10 +5,10 @@ import { importSnapshot } from '../src/import/headlessSnapshot.js';
 
 const program = new Command();
 program.requiredOption('-f, --file <path>', 'Path to latest-all.json');
-program.option('-d, --db <path>', 'SQLite database path');
+program.requiredOption('-d, --db <path>', 'SQLite database path');
 program.parse(process.argv);
 
-const opts = program.opts<{ file: string; db?: string }>();
+const opts = program.opts<{ file: string; db: string }>();
 const json = JSON.parse(fs.readFileSync(opts.file, 'utf8'));
 const db = openDatabase(opts.db);
 const result = importSnapshot(db, json, 'manual_import');

@@ -119,4 +119,44 @@ describe('semantic view persistence', () => {
     expect(acceptedCount.count).toBeGreaterThan(0);
     expect(acceptedView.status).toBe('accepted');
   });
+
+  it('maps review queue atomic targets to parent resources and skips unknown targets', () => {
+    const { db, byTitle } = seedViewFixture();
+    const resourceId = byTitle['Beautiful watercolor environments'];
+    const evidenceRef = buildResourceBriefs(db, [resourceId])[0].evidence[0].id;
+    db.prepare(`
+      INSERT INTO atomic_items (id, resource_id, item_kind, name, summary, evidence_refs, confidence, created_by, created_at)
+      VALUES ('item_watercolor_step', ?, 'tutorial_step', 'Watercolor wash', 'A local extracted step.', ?, 0.8, 'test', ?)
+    `).run(resourceId, JSON.stringify([evidenceRef]), new Date().toISOString());
+    const commandId = createUserCommand(db, 'Review atomic and missing targets');
+
+    persistSemanticViewPlan(db, commandId, {
+      commandText: 'Review atomic and missing targets',
+      views: [{
+        name: 'Atomic review test',
+        goal: 'Keep valid review targets executable.',
+        inclusionRules: ['Include the watercolor item.'],
+        exclusionRules: [],
+        sections: [],
+        confidence: 0.8,
+        memberships: [{
+          targetKind: 'resource',
+          targetId: resourceId,
+          state: 'strong_include',
+          confidence: 0.8,
+          reason: 'Fixture evidence.',
+          evidenceRefs: [evidenceRef],
+        }],
+      }],
+      reviewQueues: [{
+        queueName: 'atomic_queue',
+        reason: 'Review atomics through parent resources.',
+        targetIds: ['item_watercolor_step', 'res_missing'],
+      }],
+      explanation: 'Fixture.',
+    }, 'heuristic');
+
+    const rows = db.prepare('SELECT resource_id FROM review_queue_items WHERE queue_name = ?').all('atomic_queue') as Array<{ resource_id: string }>;
+    expect(rows).toEqual([{ resource_id: resourceId }]);
+  });
 });

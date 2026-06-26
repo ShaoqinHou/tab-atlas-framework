@@ -24,6 +24,10 @@ const STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from', 'group',
   'in', 'include', 'into', 'is', 'it', 'make', 'of', 'on', 'or', 'the', 'this',
   'to', 'view', 'with', 'without', 'my', 'all', 'only',
+  'board', 'current', 'evidence', 'future', 'goal', 'local', 'matching', 'metadata',
+  'named', 'organize', 'plan', 'preserve',
+  'previous', 'resource', 'resources', 'rule', 'rules', 'section', 'sections',
+  'semantic', 'supplied', 'title', 'titles', 'treat', 'workspace',
 ]);
 
 export function buildFeedbackIntentScope(input: {
@@ -75,7 +79,7 @@ export function matchFeedbackScope(
   const jaccard = union ? overlap.length / union : 0;
   const score = Math.max(containment, jaccard);
   return {
-    applies: score >= 0.34 || overlap.length >= 2,
+    applies: score >= 0.34 && overlap.length >= 2,
     score,
     reason: overlap.length ? `shared intent terms: ${overlap.join(', ')}` : 'no shared intent terms',
   };

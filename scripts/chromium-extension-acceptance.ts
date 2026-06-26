@@ -247,14 +247,17 @@ async function ensureServer(url: string): Promise<ServerHandle> {
     cwd: root,
     env: {
       ...process.env,
+      TABATLAS_RUNTIME_PROFILE: 'acceptance',
       TABATLAS_PORT: port,
       TABATLAS_DB: dbPath,
       TABATLAS_BOOTSTRAP_DIR: serverDir,
+      TABATLAS_INSTANCE_NAME: 'chromium-extension-acceptance',
+      TABATLAS_ALLOW_IDENTITY_INIT: '1',
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  child.stdout.pipe(log);
-  child.stderr.pipe(log);
+  child.stdout?.pipe(log);
+  child.stderr?.pipe(log);
   await waitForHealth(url, 30_000, child);
   return {
     started: true,
@@ -450,7 +453,8 @@ function stopProcess(child: ChildProcess): Promise<void> {
       return;
     }
     child.once('exit', () => resolve());
-    child.kill();
+    if (child.connected) child.send('tabatlas:shutdown');
+    else child.kill();
     setTimeout(() => {
       if (child.exitCode === null) child.kill('SIGKILL');
       resolve();

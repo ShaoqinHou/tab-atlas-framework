@@ -27,6 +27,24 @@ describe('intent-scoped feedback', () => {
     expect(match.applies).toBe(false);
   });
 
+  it('keeps project-board corrections out of separate painting-tutorial views', () => {
+    const scope = buildFeedbackIntentScope({
+      sourceCommandText: 'Plan a new board-style view named TabAtlas Project Board with sections extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, and testing.',
+      sourceGoal: 'Organize supplied TabAtlas project resources into a board-style view by implementation area while preserving user annotations, review cautions, and conflicts.',
+      sourceRules: [
+        'Include localhost edge resources whose titles match requested TabAtlas implementation sections.',
+        'Do not claim video transcript content when the brief only says transcript not attempted.',
+        'Do not create unsupported empty sections merely because they were requested.',
+      ],
+    });
+
+    const match = matchFeedbackScope(scope, {
+      commandText: 'Plan a separate view named Practical Painting Tutorials for painting-learning resources, keeping it separate from the TabAtlas Project Board.',
+    });
+
+    expect(match.applies).toBe(false);
+  });
+
   it('supports explicit global and same-view scopes', () => {
     const globalScope = buildFeedbackIntentScope({ mode: 'global' });
     expect(matchFeedbackScope(globalScope, { commandText: 'anything' }).applies).toBe(true);
