@@ -150,7 +150,7 @@ export function persistSemanticViewPlan(
     }
 
     for (const queue of plan.reviewQueues) {
-      for (const targetId of queue.targetIds) {
+      for (const targetId of reviewQueueResourceIds(db, queue.targetIds)) {
         db.prepare(`
           INSERT INTO review_queue_items (id, resource_id, queue_name, status, reason, priority, created_at)
           VALUES (?, ?, ?, 'pending', ?, 0.4, ?)
@@ -275,6 +275,23 @@ function validateMembershipEvidence(state: MembershipState, targetId: string, ev
   if ((state === 'strong_include' || state === 'weak_include' || state === 'conflict') && evidenceRefs.length === 0) {
     throw new Error(`Membership for ${targetId} in state ${state} requires evidenceRefs`);
   }
+}
+
+function reviewQueueResourceIds(db: Database.Database, targetIds: string[]): string[] {
+  const resourceExists = db.prepare('SELECT id FROM resources WHERE id = ?');
+  const atomicParent = db.prepare('SELECT resource_id FROM atomic_items WHERE id = ?');
+  const resolved: string[] = [];
+  for (const targetId of targetIds) {
+    if (typeof targetId !== 'string' || !targetId) continue;
+    const resource = resourceExists.get(targetId) as { id: string } | undefined;
+    if (resource) {
+      resolved.push(resource.id);
+      continue;
+    }
+    const parent = atomicParent.get(targetId) as { resource_id: string } | undefined;
+    if (parent) resolved.push(parent.resource_id);
+  }
+  return [...new Set(resolved)];
 }
 
 function countsByState(rows: { state: MembershipState; count: number }[]): Record<MembershipState, number> {

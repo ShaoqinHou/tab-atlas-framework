@@ -423,9 +423,17 @@ async function runProjectBuilderStory(context: BrowserContext, page: Page): Prom
     await openViewsPage(page); clicks += 1;
     await clickLayout(page, 'Board'); clicks += 1;
     await expectVisible(page.getByTestId('workspace-board'));
-    const sectionText = await page.locator('.board-column header h4').evaluateAll(elements => elements.map(element => element.textContent ?? '').join(' | '));
-    const projectSections = ['extension', 'receiver', 'codex', 'storage', 'extraction', 'transcripts', 'security', 'ux', 'installation', 'packaging', 'testing']
-      .filter(section => sectionText.toLowerCase().includes(section));
+    const requestedProjectSections = ['extension', 'receiver', 'codex', 'storage', 'extraction', 'transcripts', 'security', 'ux', 'installation', 'packaging', 'testing'];
+    await page.waitForFunction((sections) => {
+      const text = Array.from(document.querySelectorAll('[data-testid="workspace-board"] .board-column h4'))
+        .map(element => element.textContent ?? '')
+        .join(' | ')
+        .toLowerCase();
+      return sections.filter(section => text.includes(section)).length >= 6;
+    }, requestedProjectSections, { timeout: 10_000 }).catch(() => undefined);
+    const sectionText = await page.locator('[data-testid="workspace-board"] .board-column h4')
+      .evaluateAll(elements => elements.map(element => element.textContent ?? '').join(' | '));
+    const projectSections = requestedProjectSections.filter(section => sectionText.toLowerCase().includes(section));
     const atomicCards = await page.locator('.resource-card[data-target-kind="atomic_item"]').count();
     const card = atomicCards > 0
       ? page.locator('.resource-card[data-target-kind="atomic_item"]').first()
@@ -558,7 +566,7 @@ async function runSkepticalCuratorStory(context: BrowserContext, page: Page): Pr
     await waitForConversationAdvance(before.messages + 2, storyTimeoutMs);
     clicks += await resolveVisibleActionsSince(page, before.actions);
     const unrelatedViewId = await activeViewId(page);
-    const scopeEvidence = readTargetStateInView(cloneDb, unrelatedViewId, targetId);
+    const scopeEvidence = readTargetFeedbackScopeInView(cloneDb, unrelatedViewId, targetId);
     screenshots.push(await screenshot(page, 'skeptical-curator'));
     return {
       primaryClicks: clicks,
@@ -580,7 +588,7 @@ async function runSkepticalCuratorStory(context: BrowserContext, page: Page): Pr
         check('correction reapplied', await page.locator('#correctionResult').innerText().then(text => /Saved pin exclude/i.test(text)).catch(() => false), true),
         check('refinement kept a scoped view active', Boolean(scopedViewId), true, scopedViewId),
         check('unrelated-purpose view created or opened', Boolean(unrelatedViewId), true, unrelatedViewId),
-        check('correction did not apply globally', scopeEvidence !== 'conflict' && scopeEvidence !== 'exclude', true, `unrelatedState=${scopeEvidence}`),
+        check('correction did not apply globally', !scopeEvidence.feedbackApplied, true, scopeEvidence.detail),
       ],
     };
   });
@@ -699,8 +707,8 @@ async function runReturningUserStory(
   await expectVisible(page.getByTestId('workspace-gallery'));
   const firstCard = page.locator('.resource-card').first();
   await expectVisible(firstCard);
-  const firstCardText = await firstCard.innerText();
-  const searchTerm = firstCardText.split(/\s+/).find(term => /^[a-z0-9-]{4,}$/i.test(term))?.toLowerCase() ?? 'tab';
+  const firstCardTitle = await firstCard.locator('.card-title-row strong').innerText().catch(() => firstCard.innerText());
+  const searchTerm = firstCardTitle.split(/\s+/).find(term => /^[a-z0-9-]{4,}$/i.test(term))?.toLowerCase() ?? 'tab';
   await page.locator('#workspaceSearch').fill(searchTerm);
   await page.waitForTimeout(250);
   if (!await firstCard.isVisible().catch(() => false)) {
@@ -733,7 +741,7 @@ async function runReturningUserStory(
   const restored = await appPage.evaluate(() => ({
     page: localStorage.getItem('tabatlas.workspace.page'),
     layout: localStorage.getItem('tabatlas.workspace.layout'),
-    query: localStorage.getItem('tabatlas.workspace.workspaceQuery'),
+    query: localStorage.getItem('tabatlas.workspace.workspaceQueryFilter'),
     thread: localStorage.getItem('tabatlas.workspace.activeThreadId'),
     reviewSession: localStorage.getItem('tabatlas.workspace.reviewSessionId'),
     selectedTargetId: localStorage.getItem('tabatlas.workspace.selectedTargetId'),
@@ -741,6 +749,7 @@ async function runReturningUserStory(
   }));
   await appPage.getByTestId('nav-views').click(); clicks += 1;
   await expectVisible(appPage.getByTestId('workspace-gallery'));
+  const restoredSearchValue = await appPage.locator('#workspaceSearch').inputValue().catch(() => '');
   const inspectorVisible = await appPage.getByTestId('inspector-surface').evaluate(element => element.classList.contains('active')).catch(() => false);
   const evidenceSelected = await appPage.locator('[data-inspector-tab="evidence"]').getAttribute('aria-selected').catch(() => 'false');
   await appPage.getByTestId('nav-review').click(); clicks += 1;
@@ -761,7 +770,7 @@ async function runReturningUserStory(
       check('conversation remained active', Boolean(restored.thread), true, restored.thread ?? ''),
       check('generated view remained active', Boolean(await activeViewId(appPage)), true, await activeViewId(appPage)),
       check('non-default layout restored', restored.layout === 'gallery', true, restored.layout ?? ''),
-      check('search/filter restored', restored.query === searchTerm || restored.query === '', true, `expected=${searchTerm}; actual=${restored.query ?? ''}`),
+      check('search/filter restored', restored.query === searchTerm && restoredSearchValue === searchTerm, true, `expected=${searchTerm}; stored=${restored.query ?? ''}; visible=${restoredSearchValue}`),
       check('inspector target restored', Boolean(restored.selectedTargetId), true, restored.selectedTargetId ?? ''),
       check('inspector evidence tab restored', inspectorVisible && evidenceSelected === 'true' && restored.inspectorTab === 'evidence', true, `visible=${inspectorVisible}; selected=${evidenceSelected}; stored=${restored.inspectorTab}`),
       check('review session progress restored', Boolean(restored.reviewSession) && /done|pending/i.test(reviewAfter), true, `before=${compact(reviewBefore)}; after=${compact(reviewAfter)}`),
@@ -793,14 +802,24 @@ async function confirmVisibleConfirmActions(page: Page): Promise<number> {
 
 async function resolveVisibleActionsSince(page: Page, previousActions: number): Promise<number> {
   let clicked = 0;
-  await waitForActionsQuiescentSince(previousActions, storyTimeoutMs);
   for (let pass = 0; pass < 4; pass += 1) {
+    await waitForVisibleActionCards(page, previousActions, 15_000).catch(() => undefined);
     const passClicks = await confirmVisibleConfirmActions(page);
     clicked += passClicks;
     await waitForActionsQuiescentSince(previousActions, storyTimeoutMs);
     if (!passClicks) break;
   }
   return clicked;
+}
+
+async function waitForVisibleActionCards(page: Page, previousActions: number, timeoutMs: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (actionStatesSince(previousActions).length === 0) return;
+    if (await page.locator('[data-action-id]').first().isVisible().catch(() => false)) return;
+    await delay(500);
+  }
+  throw new Error('Conversation action cards did not become visible before confirmation.');
 }
 
 async function submitConversationPrompt(page: Page, prompt: string): Promise<number> {
@@ -895,6 +914,16 @@ function compact(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function parseStringArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function resourceCount(dbPath: string): number {
   const db = openDatabase(dbPath);
   try {
@@ -913,18 +942,30 @@ function latestReviewSessionIds(dbPath: string, limit: number): string[] {
   }
 }
 
-function readTargetStateInView(dbPath: string, viewId: string, targetId: string): string {
-  if (!viewId || !targetId) return 'absent';
+function readTargetFeedbackScopeInView(dbPath: string, viewId: string, targetId: string): { feedbackApplied: boolean; detail: string } {
+  if (!viewId || !targetId) return { feedbackApplied: false, detail: 'target absent' };
   const db = openDatabase(dbPath);
   try {
     const row = db.prepare(`
-      SELECT state
+      SELECT state, evidence_refs, reason, conflict_note
       FROM memberships
       WHERE view_id = ? AND target_id = ?
       ORDER BY rowid DESC
       LIMIT 1
-    `).get(viewId, targetId) as { state: string } | undefined;
-    return row?.state ?? 'absent';
+    `).get(viewId, targetId) as {
+      state: string;
+      evidence_refs: string;
+      reason: string | null;
+      conflict_note: string | null;
+    } | undefined;
+    if (!row) return { feedbackApplied: false, detail: 'target absent' };
+    const refs = parseStringArray(row.evidence_refs);
+    const feedbackApplied = refs.some(ref => ref.startsWith('feedback:'))
+      || /user (?:previous )?feedback|previously pinned|prior correction|current intent/i.test(`${row.reason ?? ''} ${row.conflict_note ?? ''}`);
+    return {
+      feedbackApplied,
+      detail: `unrelatedState=${row.state}; feedbackApplied=${feedbackApplied}; evidenceRefs=${refs.filter(ref => ref.startsWith('feedback:')).join(',') || '(none)'}`,
+    };
   } finally {
     db.close();
   }

@@ -54,11 +54,14 @@ describe('workspace dashboard shell', () => {
     expect(conversation).toContain('messageIdSnapshot');
     expect(conversation).toContain('executeNewPresentationPlans');
     expect(conversation).toContain('previousStates');
+    expect(conversation).toContain('scheduleActionPolling');
+    expect(conversation).toContain('hasInFlightActions');
     expect(conversation).toContain("kind === 'start_review'");
     expect(conversation).toContain("kind === 'explain_membership'");
     expect(conversation).toContain("kind === 'add_annotation'");
     expect(conversation).toContain("kind === 'scan_resources'");
     expect(conversation).toContain("kind === 'accept_view'");
+    expect(conversation).toContain("setWorkspaceFilter('visible')");
     expect(actions).toContain('startReviewSession');
     expect(actions).toContain('show_explanation');
     expect(actions).toContain('compare_revisions');
@@ -80,6 +83,7 @@ describe('workspace dashboard shell', () => {
 
   it('restores secondary operations and correction controls', () => {
     const html = read('web-ui/index.html');
+    const main = read('web-ui/main.js');
     const operations = read('web-ui/operations.js');
     const inspector = read('web-ui/inspector.js');
 
@@ -103,13 +107,17 @@ describe('workspace dashboard shell', () => {
     expect(operations).toContain('Extension rotation requires re-pairing');
     expect(inspector).toContain('/api/membership-feedback');
     expect(inspector).toContain('/api/membership-feedback/${encodeURIComponent(undo.dataset.correctionUndo)}/undo');
+    expect(inspector).toContain('Undo latest correction');
     expect(inspector).toContain('pin_include');
     expect(inspector).toContain('pin_exclude');
     expect(inspector).toContain('data-correction-decision="correct"');
     expect(inspector).toContain('correctionMeaning');
     expect(inspector).toContain('correctionSection');
     expect(inspector).toContain('refreshAfterCorrection');
+    expect(inspector).toContain('Explaining membership...');
+    expect(inspector).toContain('lastCorrectionTargetKey');
     expect(inspector).toContain('Scope:');
+    expect(main).toContain("state.assistantPanel !== 'inspector'");
   });
 
   it('renders view layouts and filters through workspace modules', () => {
@@ -127,7 +135,10 @@ describe('workspace dashboard shell', () => {
     expect(workspace).toContain('semantic-region');
     expect(workspace).toContain('hostSummary(section.visibleCards)');
     expect(workspace).toContain('persistSectionPageCounts');
+    expect(workspace).toContain('restoreFiltersFromState');
     expect(workspace).toContain('restoreWorkspaceScroll');
+    expect(workspace).toContain("focusedSectionId: ''");
+    expect(workspace).toContain("tab: 'overview'");
     expect(workspace).toContain('showRevisionComparison');
     expect(workspace).toContain('revision-comparison');
     expect(state).toContain('workspaceStateFilters');

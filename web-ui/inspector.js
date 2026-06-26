@@ -6,6 +6,8 @@ let currentInspector = null;
 let activeTab = 'overview';
 let returnFocusElement = null;
 let lastCorrectionFeedbackId = '';
+let lastCorrectionMessage = '';
+let lastCorrectionTargetKey = '';
 
 export function initInspector() {
   document.getElementById('conversationTab')?.addEventListener('click', () => showPanel('conversation'));
@@ -130,6 +132,7 @@ function renderInspectorTab(item, tab) {
         <div><span>Extraction</span><strong>${escapeHtml(item.extractionStatus)}</strong></div>
       </div>
       <p>${escapeHtml(item.summary || membership?.reason || 'No summary available.')}</p>
+      ${!membership && correctionResultHtml(item) ? `<div id="correctionResult" class="muted">${correctionResultHtml(item)}</div>` : ''}
       ${membership ? `
         <div class="correction-panel">
           <h4>Correct this view</h4>
@@ -144,7 +147,7 @@ function renderInspectorTab(item, tab) {
           <input id="correctionMeaning" type="text" placeholder="Corrected meaning">
           <input id="correctionTags" type="text" placeholder="Preferred tags, comma separated">
           <input id="correctionSection" type="text" placeholder="Section suggestion">
-          <div id="correctionResult" class="muted"></div>
+          <div id="correctionResult" class="muted">${correctionResultHtml(item)}</div>
         </div>
       ` : ''}
       ${item.atomicItems.length ? `
@@ -188,6 +191,7 @@ async function handleInspectorAction(event) {
   }
   const explain = event.target.closest('[data-explain-membership]');
   if (explain && currentInspector) {
+    writeCorrectionResult('Explaining membership...');
     const viewId = state.activeViewId;
     const result = await getJson(`/api/resources/${encodeURIComponent(currentInspector.parentResourceId || currentInspector.targetId)}/explain?viewId=${encodeURIComponent(viewId)}`);
     writeCorrectionResult(result.explanation ?? JSON.stringify(result, null, 2));
@@ -218,12 +222,23 @@ async function handleInspectorAction(event) {
 }
 
 function writeCorrectionResult(value) {
+  lastCorrectionMessage = value;
+  lastCorrectionTargetKey = currentTargetKey();
   const target = document.getElementById('correctionResult');
   if (!target) return;
-  target.innerHTML = `
-    <p>${escapeHtml(value)}</p>
-    ${lastCorrectionFeedbackId ? `<button type="button" data-correction-undo="${escapeHtml(lastCorrectionFeedbackId)}">Undo</button>` : ''}
+  target.innerHTML = correctionResultHtml(currentInspector);
+}
+
+function correctionResultHtml(item) {
+  if (!lastCorrectionMessage || currentTargetKey(item) !== lastCorrectionTargetKey) return '';
+  return `
+    <p>${escapeHtml(lastCorrectionMessage)}</p>
+    ${lastCorrectionFeedbackId ? `<button type="button" data-correction-undo="${escapeHtml(lastCorrectionFeedbackId)}">Undo latest correction</button>` : ''}
   `;
+}
+
+function currentTargetKey(item = currentInspector) {
+  return item ? `${item.targetKind}:${item.targetId}` : '';
 }
 
 async function refreshAfterCorrection(message) {

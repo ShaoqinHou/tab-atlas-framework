@@ -617,7 +617,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = getCodexProvider({ role: 'conversation_planner', reasoningEffort, scope: `conversation:${params.threadId}` });
-  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${params.threadId}` });
+  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort), scope: `conversation-action:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
@@ -627,6 +627,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   }, {
     plannerProvider: provider,
     actionPlannerProvider: actionProvider,
+    deferActionExecution: true,
   });
   return reply.send(snapshot);
 });
@@ -636,7 +637,7 @@ app.post('/api/agent-actions/:actionId/confirm', async (request, reply) => {
   const body = asRecord(request.body);
   const action = getAgentAction(db, params.actionId);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${action.threadId}` });
+  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort ?? reasoningEffort), scope: `conversation-action:${action.threadId}` });
   return reply.send(await confirmAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
@@ -650,7 +651,7 @@ app.post('/api/agent-actions/:actionId/retry', async (request, reply) => {
   const body = asRecord(request.body);
   const action = getAgentAction(db, params.actionId);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${action.threadId}` });
+  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort ?? reasoningEffort), scope: `conversation-action:${action.threadId}` });
   return reply.send(await retryAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
@@ -1085,6 +1086,14 @@ function getCodexProvider(
 
 function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
   return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : 'medium';
+}
+
+function readConversationActionReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
+  if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
+  const configured = process.env.TABATLAS_CONVERSATION_ACTION_REASONING_EFFORT;
+  return configured === 'minimal' || configured === 'low' || configured === 'medium' || configured === 'high' || configured === 'xhigh'
+    ? configured
+    : 'low';
 }
 
 function readCapabilityKind(value: unknown): CapabilityKind {

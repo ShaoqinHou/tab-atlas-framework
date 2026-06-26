@@ -218,6 +218,7 @@ export function createCodexProviderRegistry(
         reasoningEffort: config.reasoningEffort,
         reuseThread: config.reuseThread,
         workingDirectory: options.workingDirectory,
+        timeoutMs: Number(process.env.TABATLAS_CODEX_TURN_TIMEOUT_MS ?? 180_000),
       }),
   });
 }

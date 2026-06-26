@@ -4,12 +4,13 @@ import { openInspector } from './inspector.js';
 import { openReviewSessionSnapshot } from './review.js';
 import { setState, state } from './state.js';
 import { escapeHtml } from './shell.js';
-import { refreshViewWorkspace, showWorkspaceNotice } from './viewWorkspace.js';
+import { refreshViewWorkspace, setWorkspaceFilter, showWorkspaceNotice } from './viewWorkspace.js';
 
 let snapshot = null;
 let refreshViewsCallback = null;
 const executedPresentationMessageIds = new Set();
 const handledActionIds = new Set();
+let actionPollTimer = null;
 
 export async function initConversation({ onRefreshViews } = {}) {
   refreshViewsCallback = onRefreshViews;
@@ -78,6 +79,7 @@ async function sendMessage(content) {
     renderConversation();
     await executeNewPresentationPlans(priorMessageIds);
     await handleCompletedActionResults(priorActionStates);
+    scheduleActionPolling(priorActionStates);
   } catch (error) {
     appendMessage('assistant', `I could not run that request: ${error.message}`);
   }
@@ -150,6 +152,7 @@ async function confirmAction(actionId) {
   snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
   renderConversation();
   await handleCompletedActionResults(priorActionStates);
+  scheduleActionPolling(priorActionStates);
 }
 
 async function cancelAction(actionId) {
@@ -166,6 +169,7 @@ async function retryAction(actionId) {
   snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
   renderConversation();
   await handleCompletedActionResults(priorActionStates);
+  scheduleActionPolling(priorActionStates);
 }
 
 async function executeNewPresentationPlans(previousMessageIds = new Set()) {
@@ -200,12 +204,38 @@ async function handleCompletedActionResults(previousStates = new Map()) {
   }
 }
 
+function scheduleActionPolling(previousStates = actionStateSnapshot()) {
+  if (actionPollTimer) clearTimeout(actionPollTimer);
+  if (!hasInFlightActions()) return;
+  actionPollTimer = setTimeout(() => {
+    actionPollTimer = null;
+    refreshActionsUntilSettled(previousStates).catch(error => {
+      showWorkspaceNotice(`Action refresh failed: ${error.message}`);
+    });
+  }, 500);
+}
+
+async function refreshActionsUntilSettled(previousStates) {
+  if (!state.activeThreadId) return;
+  snapshot = await getJson(`/api/conversations/${encodeURIComponent(state.activeThreadId)}`);
+  renderConversation();
+  await handleCompletedActionResults(previousStates);
+  scheduleActionPolling(previousStates);
+}
+
+function hasInFlightActions() {
+  return (snapshot?.actions ?? []).some(action => action.status === 'running'
+    || action.status === 'approved'
+    || (action.status === 'proposed' && action.approval !== 'confirm'));
+}
+
 async function routeActionResult(action) {
   const kind = action.kind || action.action?.kind;
   if (kind === 'plan_view' || kind === 'refine_view') {
     const viewId = firstViewId(action.result);
     if (!viewId) return;
     setState({ activeViewId: viewId, page: 'views' });
+    setWorkspaceFilter('visible');
     await refreshViewsCallback?.(viewId);
     return;
   }
@@ -229,6 +259,8 @@ async function routeActionResult(action) {
   }
   if (kind === 'scan_resources') {
     setState({ page: 'settings', settingsPanel: 'jobs' });
+    const operations = await import('./operations.js');
+    await operations.refreshOperations();
     showWorkspaceNotice('Scan job was queued. Open Operations > Jobs for progress.');
     return;
   }
@@ -264,9 +296,9 @@ function humanStatus(status) {
   const labels = {
     proposed: 'Waiting for your confirmation',
     approved: 'Approved',
-    running: 'Running',
-    succeeded: 'Done',
-    failed: 'Interrupted or failed — retry available',
+    running: 'Running...',
+    succeeded: 'Succeeded — Open result',
+    failed: 'Interrupted or failed — Retry',
     cancelled: 'Cancelled',
   };
   return labels[status] ?? status;

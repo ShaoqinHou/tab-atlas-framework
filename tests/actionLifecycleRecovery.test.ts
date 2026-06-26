@@ -137,11 +137,12 @@ describe('agent action lifecycle recovery', () => {
           AND approval IN ('automatic', 'preview')
       `).get() as { count: number }).count).toBe(0);
       expect((db.prepare('SELECT COUNT(*) AS count FROM agent_action_recovery_events').get() as { count: number }).count).toBe(1);
-      const effect = db.prepare('SELECT status, error FROM action_effects WHERE id = ?').get('effect_recent') as { status: string; error: string | null };
+      const effect = db.prepare('SELECT status, error, completed_at FROM action_effects WHERE id = ?').get('effect_recent') as { status: string; error: string | null; completed_at: string | null };
       expect(effect).toMatchObject({
         status: 'failed',
         error: 'Interrupted while running; retry is available.',
       });
+      expect(effect.completed_at).toBe('2026-06-01T00:10:00.000Z');
     } finally {
       db.close();
     }

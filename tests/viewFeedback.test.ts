@@ -375,6 +375,32 @@ describe('view revisions and membership feedback', () => {
     expect(plan.views[0].memberships[0].evidenceRefs.some(ref => ref.startsWith('feedback:'))).toBe(false);
   });
 
+  it('does not apply project-board correction to an unrelated practical tutorial view', () => {
+    const { db, resourceId } = seed();
+    recordMembershipFeedback(db, {
+      viewId: 'view_1',
+      membershipId: 'mem_1',
+      targetKind: 'resource',
+      targetId: resourceId,
+      decision: 'pin_exclude',
+      reason: 'Keep this excluded only for this intent.',
+      sourceCommandText: 'Plan a board view named TabAtlas Project Board with sections extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, and testing.',
+      sourceGoal: 'Organize supplied TabAtlas project resources into implementation-oriented board sections.',
+      sourceRules: [
+        'Preserve sections: extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, and testing.',
+        'Treat YouTube titles and URL kinds as metadata-level evidence only.',
+      ],
+    });
+
+    const commandText = 'Plan a separate view named Practical Painting Tutorials for painting-learning resources, keeping it separate from the TabAtlas Project Board.';
+    const brief = buildResourceBriefForIntent(db, resourceId, { commandText });
+    const plan = planSemanticViewHeuristic(commandText, [brief]);
+
+    expect(brief.evidence.some(item => item.kind === 'membership_feedback')).toBe(false);
+    expect(plan.views[0].memberships[0].evidenceRefs.some(ref => ref.startsWith('feedback:'))).toBe(false);
+    expect(plan.views[0].memberships[0].reason).not.toMatch(/feedback|previously pinned|prior correction/i);
+  });
+
   it('applies game UI pin to a related game interface command', () => {
     const { db, resourceId } = seed();
     recordMembershipFeedback(db, {

@@ -85,6 +85,7 @@ export interface SendConversationMessageInput {
 export interface SendConversationMessageOptions {
   plannerProvider: LlmProvider;
   actionPlannerProvider?: LlmProvider;
+  deferActionExecution?: boolean;
 }
 
 export interface AgentActionExecutionOptions {
@@ -184,7 +185,12 @@ export async function sendConversationMessage(
     return getConversationSnapshot(db, input.threadId);
   }
   const planned = await planConversationTurn(db, options.plannerProvider, history, context);
-  const plan = mergePresentationActions(planned, presentationPlan?.actions ?? []);
+  const plan = normalizeConversationActionPlan(
+    mergePresentationActions(planned, presentationPlan?.actions ?? []),
+    input.content,
+    input.activeViewId,
+    context,
+  );
   const assistant = appendConversationMessage(db, {
     threadId: input.threadId,
     role: 'assistant',
@@ -199,12 +205,50 @@ export async function sendConversationMessage(
     },
   });
   const persistedPlan = persistAgentTurnPlan(db, { threadId: input.threadId, assistantMessageId: assistant.id, plan });
-  for (const action of actionsReadyWithoutConfirmation(persistedPlan)) {
-    await runPersistedAgentAction(db, action.id, {
-      plannerProvider: options.actionPlannerProvider ?? options.plannerProvider,
-    });
+  const readyActions = actionsReadyWithoutConfirmation(persistedPlan);
+  const executionOptions = {
+    plannerProvider: options.actionPlannerProvider ?? options.plannerProvider,
+  };
+  if (options.deferActionExecution) {
+    void runReadyActionsSequentially(db, readyActions.map(action => action.id), executionOptions)
+      .catch(() => undefined);
+  } else {
+    await runReadyActionsSequentially(db, readyActions.map(action => action.id), executionOptions);
   }
   return getConversationSnapshot(db, input.threadId);
+}
+
+async function runReadyActionsSequentially(
+  db: Database.Database,
+  actionIds: string[],
+  options: AgentActionExecutionOptions,
+): Promise<void> {
+  let latestCreatedViewId: string | undefined;
+  for (const actionId of actionIds) {
+    if (latestCreatedViewId) attachReviewActionToCreatedView(db, actionId, latestCreatedViewId);
+    const record = await runPersistedAgentAction(db, actionId, options);
+    latestCreatedViewId = firstViewIdFromActionResult(record.result) ?? latestCreatedViewId;
+  }
+}
+
+function attachReviewActionToCreatedView(db: Database.Database, actionId: string, sourceViewId: string): void {
+  const record = getAgentAction(db, actionId);
+  if (record.action.kind !== 'start_review') return;
+  if (record.action.sourceViewId && viewExists(db, record.action.sourceViewId)) return;
+  const action = { ...record.action, sourceViewId };
+  db.prepare(`
+    UPDATE agent_actions
+    SET action_json = ?, updated_at = ?
+    WHERE id = ? AND status IN ('proposed', 'approved')
+  `).run(JSON.stringify(action), new Date().toISOString(), actionId);
+}
+
+function firstViewIdFromActionResult(result: unknown): string | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const record = result as { viewIds?: unknown; createdViewIds?: unknown; viewId?: unknown };
+  if (Array.isArray(record.viewIds) && typeof record.viewIds[0] === 'string') return record.viewIds[0];
+  if (Array.isArray(record.createdViewIds) && typeof record.createdViewIds[0] === 'string') return record.createdViewIds[0];
+  return typeof record.viewId === 'string' ? record.viewId : undefined;
 }
 
 function planPresentationTurn(
@@ -235,7 +279,7 @@ export async function planConversationTurn(
     'Use only local TabAtlas context supplied here. Do not browse pages, mutate browser tabs, inspect cookies, parse sessions, run shell commands, or invent transcript content.',
     'Return a JSON AgentTurnPlan with reply, actions, presentationActions, questions, and assumptions.',
     'Allowed action kinds: plan_view, refine_view, start_review, scan_resources, add_annotation, explain_membership, accept_view.',
-    'When a request changes the active semantic view, use refine_view with the supplied activeViewId instead of creating a detached heuristic action.',
+    'Use refine_view only when the user explicitly asks to refine, adjust, exclude from, or change this/current/active view. If the user asks for a new board, workspace, collection, project space, or later-review view, use plan_view even when an activeViewId is supplied.',
     'When a request reviews weak, conflicting, or uncertain items in the active view, include sourceViewId on start_review.',
     'For requests about information inside videos, state evidence readiness in plain language: known atomic items, transcript/description evidence, metadata-only videos, videos needing targeted extraction or scan, and unavailable transcripts.',
     'When evidence is insufficient for inside-video details, offer exactly one bounded scan_resources action for the relevant resource IDs. Do not scan the whole library.',
@@ -313,6 +357,56 @@ export async function confirmAgentAction(
   if (record.action.approval !== 'confirm') return runPersistedAgentAction(db, actionId, options);
   approveAgentAction(db, actionId);
   return runPersistedAgentAction(db, actionId, options);
+}
+
+export function normalizeConversationActionPlan(
+  plan: AgentTurnPlanValue,
+  userText: string,
+  activeViewId?: string,
+  context?: unknown,
+): AgentTurnPlanValue {
+  const candidateLimit = conversationCandidateLimit();
+  const explicitRefinement = isExplicitActiveViewRefinementRequest(userText);
+  const createsNewView = plan.actions.some(action => action.kind === 'plan_view')
+    || plan.actions.some(action => action.kind === 'refine_view' && activeViewId && !explicitRefinement);
+  return validateAgentTurnPlan({
+    ...plan,
+    actions: plan.actions.map(action => {
+      if (action.kind === 'plan_view') {
+        return { ...action, candidateLimit: Math.min(action.candidateLimit, candidateLimit) };
+      }
+      if (action.kind === 'refine_view' && activeViewId && !explicitRefinement) {
+        return {
+          id: action.id,
+          kind: 'plan_view',
+          approval: 'preview',
+          rationale: 'The request asks for a new workspace, so it should create a separate preview instead of rewriting the active view.',
+          commandText: userText,
+          candidateLimit,
+        };
+      }
+      if (action.kind === 'scan_resources') {
+        const resourceIds = uniqueStrings(action.resourceIds);
+        const fallbackIds = resourceIds.length ? resourceIds : fallbackScanResourceIds(context, userText);
+        return {
+          ...action,
+          resourceIds: fallbackIds,
+          limit: fallbackIds.length ? Math.min(action.limit, fallbackIds.length) : action.limit,
+        };
+      }
+      if (action.kind === 'start_review' && createsNewView && action.sourceViewId === activeViewId) {
+        const withoutStaleSource = { ...action };
+        delete withoutStaleSource.sourceViewId;
+        return withoutStaleSource;
+      }
+      if (action.kind === 'start_review' && action.sourceViewId && !action.sourceViewId.startsWith('view_')) {
+        const withoutInvalidSource = { ...action };
+        delete withoutInvalidSource.sourceViewId;
+        return withoutInvalidSource;
+      }
+      return action;
+    }),
+  });
 }
 
 export async function retryAgentAction(
@@ -436,7 +530,7 @@ export async function executeAgentAction(
           preview.goal ? `Existing goal: ${preview.goal}` : '',
           `User refinement: ${action.instruction}`,
         ].filter(Boolean).join(' '),
-        candidateLimit: 200,
+        candidateLimit: conversationCandidateLimit(),
         seedResourceIds,
         parentRevisionId: parentRevision?.id,
       });
@@ -449,15 +543,18 @@ export async function executeAgentAction(
             ? 'conflicts'
             : action.queue === 'ambiguous'
               ? 'ambiguous'
-              : action.queue === 'extraction_failure'
-                ? 'extraction_failures'
-                : 'unmarked',
+            : action.queue === 'extraction_failure'
+              ? 'extraction_failures'
+              : 'unmarked',
         title: `${action.queue.replace(/_/g, ' ')} review`,
         commandText: action.queue,
-        sourceViewId: action.sourceViewId,
+        sourceViewId: action.sourceViewId && viewExists(db, action.sourceViewId) ? action.sourceViewId : undefined,
         preload: 5,
       });
     case 'scan_resources':
+      if (action.resourceIds.length === 0) {
+        throw new Error('scan_resources requires explicit resourceIds; conversation actions must not scan the whole library');
+      }
       return runActionEffect(db, action.id, 'scan_job_create', {
         resourceIds: action.resourceIds,
         limit: action.limit,
@@ -974,6 +1071,56 @@ function validateActionPlan(plan: AgentTurnPlanValue): string[] {
     ids.add(action.id);
   }
   return errors;
+}
+
+function isExplicitActiveViewRefinementRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /\b(refine|make\s+(it|this)\s+|keep\s+this|change\s+this|adjust\s+this|reclassify|stricter|looser)\b/.test(lower)
+    || /\b(exclude|remove|reject)\b/.test(lower)
+    || /\b(this|current|active|existing)\s+(view|workspace|board)\b/.test(lower);
+}
+
+function conversationCandidateLimit(): number {
+  const configured = Number(process.env.TABATLAS_CONVERSATION_CANDIDATE_LIMIT ?? 24);
+  if (!Number.isFinite(configured) || configured <= 0) return 24;
+  return Math.min(Math.floor(configured), 120);
+}
+
+function fallbackScanResourceIds(context: unknown, userText: string): string[] {
+  const explicitIds = uniqueStrings([...userText.matchAll(/\bres_[a-z0-9]+\b/gi)].map(match => match[0]));
+  if (explicitIds.length) return explicitIds.slice(0, 12);
+  const resources = resourcesFromConversationContext(context);
+  const videoResources = resources.filter(resource => {
+    const searchable = `${resource.urlKind} ${resource.host} ${resource.title}`.toLowerCase();
+    return /youtube|video|transcript/.test(searchable);
+  });
+  const candidates = videoResources.length ? videoResources : resources;
+  return uniqueStrings(candidates.map(resource => resource.id)).slice(0, 12);
+}
+
+function resourcesFromConversationContext(context: unknown): Array<{ id: string; title: string; urlKind: string; host: string }> {
+  if (!context || typeof context !== 'object') return [];
+  const resources = (context as { resources?: unknown }).resources;
+  if (!Array.isArray(resources)) return [];
+  return resources.flatMap(resource => {
+    if (!resource || typeof resource !== 'object') return [];
+    const record = resource as { id?: unknown; title?: unknown; urlKind?: unknown; host?: unknown };
+    if (typeof record.id !== 'string' || !record.id) return [];
+    return [{
+      id: record.id,
+      title: typeof record.title === 'string' ? record.title : '',
+      urlKind: typeof record.urlKind === 'string' ? record.urlKind : '',
+      host: typeof record.host === 'string' ? record.host : '',
+    }];
+  });
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(value => typeof value === 'string' && value.trim()).map(value => value.trim()))];
+}
+
+function viewExists(db: Database.Database, viewId: string): boolean {
+  return Boolean(db.prepare('SELECT id FROM views WHERE id = ?').get(viewId));
 }
 
 function parseJson(value: string): unknown {

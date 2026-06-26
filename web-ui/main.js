@@ -36,6 +36,7 @@ async function refreshOnboarding() {
 }
 
 async function restoreInspectorSelection() {
+  if (state.assistantPanel !== 'inspector') return;
   if (!state.selectedTargetKind || !state.selectedTargetId || !state.activeViewId) return;
   try {
     await openInspector(state.selectedTargetKind, state.selectedTargetId, {

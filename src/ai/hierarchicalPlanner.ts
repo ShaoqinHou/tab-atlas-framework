@@ -274,6 +274,11 @@ function planValidator(briefs: ResourceBriefType[]) {
         }
       }
     }
+    for (const queue of value.reviewQueues) {
+      for (const targetId of queue.targetIds) {
+        if (!targetIds.has(targetId)) errors.push(`review queue ${queue.queueName} references unknown targetId ${targetId}`);
+      }
+    }
     return errors;
   };
 }
