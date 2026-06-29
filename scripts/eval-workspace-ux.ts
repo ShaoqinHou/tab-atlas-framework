@@ -404,16 +404,19 @@ function startServer(targetDbPath: string, targetPort: number): ChildProcess {
     cwd: root,
     env: {
       ...process.env,
+      TABATLAS_RUNTIME_PROFILE: 'development',
       TABATLAS_DB: targetDbPath,
       TABATLAS_PORT: String(targetPort),
       TABATLAS_BOOTSTRAP_DIR: path.join(outputRoot, 'bootstrap'),
+      TABATLAS_INSTANCE_NAME: 'workspace-ux-eval',
+      TABATLAS_ALLOW_IDENTITY_INIT: '1',
       TABATLAS_CAPTURE_ROOTS: path.join(root, 'tests'),
       TABATLAS_FAKE_CODEX_PROVIDER: 'workspace_ux',
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  child.stdout.on('data', chunk => fs.appendFileSync(path.join(outputRoot, 'server.log'), chunk));
-  child.stderr.on('data', chunk => fs.appendFileSync(path.join(outputRoot, 'server.log'), chunk));
+  child.stdout?.on('data', chunk => fs.appendFileSync(path.join(outputRoot, 'server.log'), chunk));
+  child.stderr?.on('data', chunk => fs.appendFileSync(path.join(outputRoot, 'server.log'), chunk));
   return child;
 }
 
@@ -433,7 +436,8 @@ async function waitForServer(): Promise<void> {
 
 async function stopServer(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
-  child.kill();
+  if (child.connected) child.send('tabatlas:shutdown');
+  else child.kill();
   await Promise.race([
     new Promise(resolve => child.once('exit', resolve)),
     delay(3000),

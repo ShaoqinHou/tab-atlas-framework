@@ -26,6 +26,7 @@ import {
   validateSemanticChunkCoverage,
   type HierarchicalPlannerIdentity,
 } from './hierarchicalPlannerSafety.js';
+import { repairSemanticViewPlanCandidate, semanticViewPlanJsonContract } from './semanticViewPlanRepair.js';
 
 export interface HierarchicalPlanningOptions extends PlanSemanticViewOptions {
   maxDirectResources?: number;
@@ -169,6 +170,7 @@ export async function planSemanticViewHierarchical(
   const merged = await runStructured(provider, mergePrompt(commandText, mergeInput), SemanticViewPlan, {
     system,
     maxRetries: 2,
+    repair: value => repairSemanticViewPlanCandidate(commandText, value),
     semanticValidate: planValidator(briefs),
   });
   accumulateUsage(usage, merged.usage);
@@ -225,6 +227,7 @@ function mergePrompt(commandText: string, input: HierarchicalMergeInput): string
     'Merge these SemanticChunkResult decisions into the ordinary SemanticViewPlan schema.',
     'Do not invent URLs, titles, private text, or target IDs. Preserve evidence refs.',
     'Targets with unresolved or conflicting chunk decisions should become needs_review or conflict memberships.',
+    semanticViewPlanJsonContract(),
     '',
     `Command: ${redactSensitiveText(commandText)}`,
     '',
@@ -269,6 +272,11 @@ function planValidator(briefs: ResourceBriefType[]) {
             errors.push(`membership for ${membership.targetId} references unknown evidence ${ref}`);
           }
         }
+      }
+    }
+    for (const queue of value.reviewQueues) {
+      for (const targetId of queue.targetIds) {
+        if (!targetIds.has(targetId)) errors.push(`review queue ${queue.queueName} references unknown targetId ${targetId}`);
       }
     }
     return errors;

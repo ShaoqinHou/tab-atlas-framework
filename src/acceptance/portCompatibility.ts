@@ -6,7 +6,8 @@ export interface PortCompatibilityDetails extends RuntimePortCompatibility {
   receivers: string[];
   hostPermissions: string[];
   popupDefaultReceiver: string;
-  serverDefaultPort: number;
+  serverDefaultPort: number | null;
+  serverRequiresExplicitPort: boolean;
   issues: string[];
 }
 
@@ -24,6 +25,7 @@ export function checkPortCompatibility(
   const hostPermissions = manifest.host_permissions ?? [];
   const popupDefaultReceiver = parsePopupDefaultReceiver(popup);
   const serverDefaultPort = parseServerDefaultPort(server);
+  const serverRequiresExplicitPort = serverDefaultPort === null && /resolveRuntimeConfig\(\)/.test(server);
   const receiverListIncludesServer = receivers.includes(serverUrl);
   const manifestCoversServer = hostPermissions.some(permission => permission === `${serverUrl}/*`);
   const popupDefaultMatchesServer = popupDefaultReceiver === serverUrl;
@@ -32,7 +34,7 @@ export function checkPortCompatibility(
   if (!manifestCoversServer) issues.push(`manifest host_permissions does not cover ${serverUrl}`);
   if (!popupDefaultMatchesServer) issues.push(`popup default receiver is ${popupDefaultReceiver || '(none)'}, expected ${serverUrl}`);
   const serverPort = new URL(serverUrl).port;
-  if (serverPort && Number(serverPort) !== serverDefaultPort) {
+  if (!serverRequiresExplicitPort && serverPort && Number(serverPort) !== serverDefaultPort) {
     issues.push(`server default port is ${serverDefaultPort}, acceptance URL uses ${serverPort}`);
   }
   return {
@@ -41,6 +43,7 @@ export function checkPortCompatibility(
     hostPermissions,
     popupDefaultReceiver,
     serverDefaultPort,
+    serverRequiresExplicitPort,
     receiverListIncludesServer,
     manifestCoversServer,
     popupDefaultMatchesServer,
@@ -59,7 +62,7 @@ function parsePopupDefaultReceiver(popup: string): string {
   return match?.[1] ?? '';
 }
 
-function parseServerDefaultPort(server: string): number {
+function parseServerDefaultPort(server: string): number | null {
   const match = server.match(/TABATLAS_PORT\s*\?\?\s*(\d+)/);
-  return match ? Number(match[1]) : 0;
+  return match ? Number(match[1]) : null;
 }

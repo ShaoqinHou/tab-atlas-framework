@@ -426,6 +426,23 @@ h3 {
   max-width: 720px;
 }
 
+.setup-prompt {
+  align-items: center;
+  background: #eef6ff;
+  border: 1px solid #bfdcff;
+  border-radius: 7px;
+  color: #174b7a;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+}
+
+.setup-prompt strong {
+  display: block;
+}
+
 .restore-summary {
   background: #eef6ff;
   border: 1px solid #bfdcff;
@@ -904,6 +921,8 @@ button.related-row {
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  position: relative;
+  z-index: 2;
 }
 
 .review-layout {
@@ -915,6 +934,7 @@ button.related-row {
 .review-current {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .review-current-header {
@@ -987,8 +1007,10 @@ button.related-row {
 }
 
 .review-side {
+  align-self: start;
   display: grid;
   gap: 14px;
+  min-width: 0;
 }
 
 .progress-block {
@@ -1053,6 +1075,23 @@ button.related-row {
   border-radius: 4px;
   font-size: 12px;
   padding: 1px 5px;
+}
+
+.shortcut-legend {
+  position: static;
+  z-index: 0;
+}
+
+@media (max-height: 820px) {
+  .shortcut-legend {
+    border-top: 1px solid var(--line);
+    padding-top: 8px;
+  }
+
+  .shortcut-legend p {
+    max-height: 64px;
+    overflow: auto;
+  }
 }
 
 @media (max-width: 1080px) {

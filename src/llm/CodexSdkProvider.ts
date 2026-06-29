@@ -6,6 +6,7 @@ export interface CodexSdkProviderConfig {
   workingDirectory?: string;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   reuseThread?: boolean;
+  timeoutMs?: number;
 }
 
 export class CodexSdkProvider implements LlmProvider {
@@ -41,7 +42,15 @@ export class CodexSdkProvider implements LlmProvider {
     this.thread = thread;
 
     const fullPrompt = opts?.system ? `${opts.system}\n\n---\n\n${prompt}` : prompt;
-    const turn = await thread.run(fullPrompt, opts?.outputSchema ? { outputSchema: opts.outputSchema } : undefined);
+    const controller = new AbortController();
+    const turn = await withTimeout(
+      thread.run(fullPrompt, {
+        ...(opts?.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+        signal: controller.signal,
+      }),
+      opts?.timeoutMs ?? this.cfg.timeoutMs ?? 120_000,
+      () => controller.abort(),
+    );
     return {
       text: turn.finalResponse ?? '',
       usage: {
@@ -51,4 +60,18 @@ export class CodexSdkProvider implements LlmProvider {
       },
     };
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, onTimeout: () => void): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error(`Codex turn timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }

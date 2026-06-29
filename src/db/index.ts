@@ -2,22 +2,29 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export function openDatabase(filePath = path.join(process.cwd(), 'data', 'tabatlas.sqlite')) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+export function openDatabase(filePath: string) {
+  if (!filePath) throw new Error('openDatabase requires an explicit database path.');
+  if (filePath !== ':memory:') fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const db = new Database(filePath);
-  const schemas = [
-    new URL('./schema.sql', import.meta.url),
-    new URL('./schema-v2-durable.sql', import.meta.url),
-    new URL('./schema-v3-evidence.sql', import.meta.url),
-    new URL('./schema-v4-local-trust.sql', import.meta.url),
-    new URL('./schema-v5-user-workspace.sql', import.meta.url),
-    new URL('./schema-v6-release-acceptance.sql', import.meta.url),
-  ];
-  for (const schemaPath of schemas) {
-    db.exec(fs.readFileSync(schemaPath, 'utf8'));
+  try {
+    const schemas = [
+      new URL('./schema.sql', import.meta.url),
+      new URL('./schema-v2-durable.sql', import.meta.url),
+      new URL('./schema-v3-evidence.sql', import.meta.url),
+      new URL('./schema-v4-local-trust.sql', import.meta.url),
+      new URL('./schema-v5-user-workspace.sql', import.meta.url),
+      new URL('./schema-v6-release-acceptance.sql', import.meta.url),
+      new URL('./schema-v7-runtime-safety.sql', import.meta.url),
+    ];
+    for (const schemaPath of schemas) {
+      db.exec(fs.readFileSync(schemaPath, 'utf8'));
+    }
+    runLightweightMigrations(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
   }
-  runLightweightMigrations(db);
-  return db;
 }
 
 function runLightweightMigrations(db: Database.Database): void {
@@ -30,6 +37,7 @@ function runLightweightMigrations(db: Database.Database): void {
   ensureColumn(db, 'codex_provider_threads', 'model', "TEXT NOT NULL DEFAULT 'gpt-5.5'");
   ensureColumn(db, 'codex_provider_threads', 'reasoning_effort', "TEXT NOT NULL DEFAULT 'medium'");
   ensureColumn(db, 'codex_provider_threads', 'owner_key', "TEXT NOT NULL DEFAULT 'local'");
+  ensureSingletonDatabaseIdentity(db);
   db.exec(`
     UPDATE agent_actions
     SET idempotency_key = id
@@ -57,6 +65,23 @@ function runLightweightMigrations(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_codex_provider_threads_identity
       ON codex_provider_threads(role, owner_key, scope_key, model, reasoning_effort, generation)
+  `);
+}
+
+function ensureSingletonDatabaseIdentity(db: Database.Database): void {
+  const table = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table' AND name = 'database_identity'
+  `).get();
+  if (!table) return;
+  const count = (db.prepare('SELECT COUNT(*) AS count FROM database_identity').get() as { count: number }).count;
+  if (count > 1) {
+    throw new Error(`Database has ${count} runtime identities. Explicit remediation is required before TabAtlas can open it.`);
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_database_identity_singleton
+      ON database_identity((1))
   `);
 }
 

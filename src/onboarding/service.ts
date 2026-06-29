@@ -148,6 +148,7 @@ export function getOnboardingSnapshot(db: Database.Database): OnboardingSnapshot
 
 function computeCompletedSteps(db: Database.Database): Set<OnboardingStepId> {
   const done = new Set<OnboardingStepId>(['receiver_running']);
+  if ((process.env.TABATLAS_CAPTURE_ROOTS ?? '').trim()) done.add('capture_roots_configured');
   if (countActiveDashboardSessions(db) > 0) done.add('dashboard_session_ready');
   if ((db.prepare(`SELECT COUNT(*) AS count FROM snapshots`).get() as { count: number }).count > 0) done.add('snapshot_captured');
   if ((db.prepare(`SELECT COUNT(*) AS count FROM extraction_artifacts`).get() as { count: number }).count > 0) done.add('extraction_ready');

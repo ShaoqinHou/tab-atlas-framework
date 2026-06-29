@@ -9,6 +9,8 @@ import {
   createConversationThread,
   getAgentAction,
   getConversationSnapshot,
+  recoverInterruptedAgentActions,
+  retryAgentAction,
   sendConversationMessage,
 } from '../agent/conversationService.js';
 import {
@@ -26,7 +28,7 @@ import { createGenericWebpageAdapter } from '../extract/webpage.js';
 import { createYouTubeLayeredEvidenceAdapter, importManualYouTubeTranscript } from '../extract/youtube.js';
 import { importSnapshot } from '../import/headlessSnapshot.js';
 import { getJobSnapshot, listJobItems, listJobs, requestJobCancel, retryFailedJobItems } from '../jobs/service.js';
-import { startInProcessJobWorker } from '../jobs/worker.js';
+import { startInProcessJobWorker, type RunningJobWorker } from '../jobs/worker.js';
 import { addUserAnnotationTool, explainMembership, getReviewNext, getResourceBriefs, searchResources, submitReviewDecision } from '../agent/tools.js';
 import type { CodexSdkProviderConfig } from '../llm/CodexSdkProvider.js';
 import { createCodexProviderRegistry, type CodexProviderRole } from '../llm/providerScope.js';
@@ -87,54 +89,78 @@ import {
   verifySnapshotDoesNotContainCapabilityMaterial,
   verifySnapshotDoesNotContainToken,
 } from '../acceptance/manualBrowserSession.js';
+import { assertProfileDatabaseCompatibility, resolveRuntimeConfig } from '../runtime/contracts.js';
+import { acquireDatabaseLease, type DatabaseLease } from '../runtime/databaseLease.js';
+import {
+  ensureDatabaseIdentity,
+  readDatabaseIdentity,
+  runtimeProfileDefaultEnvironment,
+  type DatabaseIdentity,
+} from '../runtime/databaseIdentity.js';
+import { assertPortAvailable } from '../runtime/startupPreflight.js';
+import type { BootstrapSecretDescriptor } from '../onboarding/service.js';
 
 const host = '127.0.0.1';
-const port = Number(process.env.TABATLAS_PORT ?? 9787);
-const db = openDatabase(process.env.TABATLAS_DB);
+const runtime = resolveRuntimeConfig();
+await assertPortAvailable(host, runtime.port);
+const lease = acquireDatabaseLease({
+  databasePath: runtime.databasePath,
+  profile: runtime.profile,
+  port: runtime.port,
+  instanceName: runtime.instanceName,
+  recoverStale: runtime.recoverStaleLease,
+});
+process.once('exit', () => lease.release());
+const existingIdentity = readDatabaseIdentity(runtime.databasePath);
+if (!existingIdentity && !runtime.allowIdentityInitialization) {
+  lease.release();
+  throw new Error('Database has no runtime identity. Use an explicit runtime identity or clone command before starting TabAtlas.');
+}
+if (existingIdentity) {
+  try {
+    assertProfileDatabaseCompatibility(runtime.profile, existingIdentity.environment);
+  } catch (error) {
+    lease.release();
+    throw error;
+  }
+}
+let db: ReturnType<typeof openDatabase>;
+let dbIdentity: DatabaseIdentity;
+try {
+  db = openDatabase(runtime.databasePath);
+  dbIdentity = ensureDatabaseIdentity(db, {
+    runtimeProfile: runtime.profile,
+    environment: existingIdentity?.environment ?? runtimeProfileDefaultEnvironment(runtime.profile),
+    sourceDatabaseId: existingIdentity?.sourceDatabaseId,
+    allowInitialize: runtime.allowIdentityInitialization,
+  });
+} catch (error) {
+  lease.release();
+  throw error;
+}
 const app = Fastify({ logger: true });
-installLocalRequestGuard(app, db, { host, port });
+installLocalRequestGuard(app, db, { host, port: runtime.port });
 const importPolicy = importPathPolicyFromEnv();
 const indexHtml = new URL('../../web-ui/index.html', import.meta.url);
 const webUiRoot = path.resolve(process.cwd(), 'web-ui');
-const bootstrapSecret = (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0)
-  ? ensureBootstrapSecret(db, {
-    directory: process.env.TABATLAS_BOOTSTRAP_DIR ?? path.join(process.cwd(), 'data'),
-  })
-  : null;
-if (bootstrapSecret) {
-  app.log.info({ filePath: bootstrapSecret.filePath, expiresAt: bootstrapSecret.expiresAt }, 'TabAtlas bootstrap secret file ready');
-}
+let bootstrapSecret: BootstrapSecretDescriptor | null = null;
+let jobWorker: RunningJobWorker | undefined;
 const codexProviders = createCodexProviderRegistry(db, {
   maxTurnsPerThread: Number(process.env.TABATLAS_CODEX_MAX_TURNS_PER_THREAD ?? 20),
   workingDirectory: process.cwd(),
 });
 const extractionRegistry = new ExtractionAdapterRegistry();
 registerExtractionAdapters(extractionRegistry);
-const jobWorker = startInProcessJobWorker(db, {
-  codex_scan: async (jobId, context) => {
-    const job = getJobSnapshot(db, jobId);
-    const input = asRecord(job.input);
-    const reasoningEffort = readReasoningEffort(input.reasoningEffort);
-    const provider = getCodexProvider({ role: 'resource_scan', reasoningEffort, scope: `job:${jobId}` });
-    await resumeCodexScanJob(db, provider, jobId, {
-      maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
-      maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
-      signal: context.signal,
-    });
-  },
-  metadata_fetch: async (jobId, context) => {
-    await resumeExtractionJob(db, extractionRegistry, jobId, {
-      maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
-      maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
-      signal: context.signal,
-    });
-  },
-}, {
-  pollMs: Number(process.env.TABATLAS_WORKER_POLL_MS ?? 1500),
-  concurrency: Number(process.env.TABATLAS_WORKER_CONCURRENCY ?? 1),
-});
 
-app.get('/health', async () => ({ ok: true, app: 'tabatlas', time: new Date().toISOString() }));
+app.get('/health', async () => ({
+  ok: true,
+  app: 'tabatlas',
+  profile: runtime.profile,
+  instanceName: runtime.instanceName,
+  port: runtime.port,
+  databaseId: dbIdentity.databaseId,
+  time: new Date().toISOString(),
+}));
 
 app.get('/', async (_request, reply) => {
   const html = await fs.readFile(indexHtml, 'utf8');
@@ -256,7 +282,7 @@ app.get('/api/security/status', async () => {
     WHERE outcome = 'denied'
   `).get() as { count: number };
   return {
-    bound: { host, port },
+    bound: { host, port: runtime.port },
     capabilities: listCapabilities(db),
     pairingCodes: [],
     pairingChallenges: listPairingChallenges(db),
@@ -417,7 +443,7 @@ app.post('/api/acceptance/browser-sessions', async (request, reply) => {
   if (!parsed.success) return reply.status(400).send({ ok: false, error: 'browser must be chrome or edge' });
   const receiverUrl = typeof body.receiverUrl === 'string' && body.receiverUrl.trim()
     ? body.receiverUrl.trim()
-    : `http://${host}:${port}`;
+    : `http://${host}:${runtime.port}`;
   const ttlMs = typeof body.ttlMs === 'number' ? body.ttlMs : undefined;
   const created = createManualBrowserAcceptanceSession(db, {
     browser: parsed.data,
@@ -591,7 +617,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   if (!content.trim()) return reply.status(400).send({ ok: false, error: 'content is required' });
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
   const provider = getCodexProvider({ role: 'conversation_planner', reasoningEffort, scope: `conversation:${params.threadId}` });
-  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${params.threadId}` });
+  const actionProvider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort), scope: `conversation-action:${params.threadId}` });
   const snapshot = await sendConversationMessage(db, {
     threadId: params.threadId,
     content,
@@ -601,6 +627,7 @@ app.post('/api/conversations/:threadId/messages', async (request, reply) => {
   }, {
     plannerProvider: provider,
     actionPlannerProvider: actionProvider,
+    deferActionExecution: true,
   });
   return reply.send(snapshot);
 });
@@ -610,13 +637,22 @@ app.post('/api/agent-actions/:actionId/confirm', async (request, reply) => {
   const body = asRecord(request.body);
   const action = getAgentAction(db, params.actionId);
   const reasoningEffort = readReasoningEffort(body.reasoningEffort);
-  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort, scope: `conversation-action:${action.threadId}` });
+  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort ?? reasoningEffort), scope: `conversation-action:${action.threadId}` });
   return reply.send(await confirmAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
 app.post('/api/agent-actions/:actionId/cancel', async (request, reply) => {
   const params = request.params as { actionId: string };
   return reply.send(cancelAgentAction(db, params.actionId));
+});
+
+app.post('/api/agent-actions/:actionId/retry', async (request, reply) => {
+  const params = request.params as { actionId: string };
+  const body = asRecord(request.body);
+  const action = getAgentAction(db, params.actionId);
+  const reasoningEffort = readReasoningEffort(body.reasoningEffort);
+  const provider = getCodexProvider({ role: 'semantic_planner', reasoningEffort: readConversationActionReasoningEffort(body.actionReasoningEffort ?? reasoningEffort), scope: `conversation-action:${action.threadId}` });
+  return reply.send(await retryAgentAction(db, params.actionId, { plannerProvider: provider }));
 });
 
 app.post('/api/agent/refine', async (request, reply) => {
@@ -922,13 +958,83 @@ app.post('/api/membership-feedback/:feedbackId/undo', async (request, reply) => 
   return reply.send(undoMembershipFeedback(db, params.feedbackId));
 });
 
-app.listen({ host, port }).catch(err => {
-  app.log.error(err);
+try {
+  await app.listen({ host, port: runtime.port });
+  recoverInterruptedAgentActions(db, { recoverAllRunning: true });
+  if (countActiveAdminCapabilities(db) === 0 && countActiveDashboardSessions(db) === 0) {
+    bootstrapSecret = ensureBootstrapSecret(db, {
+      directory: runtime.bootstrapDirectory,
+    });
+    app.log.info({ filePath: bootstrapSecret.filePath, expiresAt: bootstrapSecret.expiresAt }, 'TabAtlas bootstrap secret file ready');
+  }
+  jobWorker = startRuntimeJobWorker();
+  app.log.info({
+    profile: runtime.profile,
+    instanceName: runtime.instanceName,
+    port: runtime.port,
+    databaseId: dbIdentity.databaseId,
+    databaseEnvironment: dbIdentity.environment,
+  }, 'TabAtlas receiver ready');
+} catch (error) {
+  app.log.error(error);
+  await cleanupRuntime(app, db, lease, jobWorker);
   process.exit(1);
+}
+
+let shutdownStarted = false;
+process.once('SIGINT', () => {
+  void shutdownRuntime(0);
+});
+process.once('SIGTERM', () => {
+  void shutdownRuntime(0);
+});
+process.on('message', message => {
+  if (message === 'tabatlas:shutdown') void shutdownRuntime(0);
 });
 
-process.once('SIGINT', () => jobWorker.stop());
-process.once('SIGTERM', () => jobWorker.stop());
+function startRuntimeJobWorker(): RunningJobWorker {
+  return startInProcessJobWorker(db, {
+    codex_scan: async (jobId, context) => {
+      const job = getJobSnapshot(db, jobId);
+      const input = asRecord(job.input);
+      const reasoningEffort = readReasoningEffort(input.reasoningEffort);
+      const provider = getCodexProvider({ role: 'resource_scan', reasoningEffort, scope: `job:${jobId}` });
+      await resumeCodexScanJob(db, provider, jobId, {
+        maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
+        maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
+        signal: context.signal,
+      });
+    },
+    metadata_fetch: async (jobId, context) => {
+      await resumeExtractionJob(db, extractionRegistry, jobId, {
+        maxItems: Number(process.env.TABATLAS_WORKER_MAX_ITEMS_PER_TICK ?? 1),
+        maxRetries: Number(process.env.TABATLAS_JOB_MAX_RETRIES ?? 3),
+        signal: context.signal,
+      });
+    },
+  }, {
+    pollMs: Number(process.env.TABATLAS_WORKER_POLL_MS ?? 1500),
+    concurrency: Number(process.env.TABATLAS_WORKER_CONCURRENCY ?? 1),
+  });
+}
+
+async function cleanupRuntime(
+  runningApp: typeof app,
+  runningDb: ReturnType<typeof openDatabase>,
+  runningLease: DatabaseLease,
+  runningWorker?: RunningJobWorker,
+): Promise<void> {
+  runningWorker?.stop();
+  await runningApp.close().catch(() => undefined);
+  runningDb.close();
+  runningLease.release();
+}
+
+async function shutdownRuntime(code: number): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  await cleanupRuntime(app, db, lease, jobWorker).finally(() => process.exit(code));
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
@@ -980,6 +1086,14 @@ function getCodexProvider(
 
 function readReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
   return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' ? value : 'medium';
+}
+
+function readConversationActionReasoningEffort(value: unknown): CodexSdkProviderConfig['reasoningEffort'] {
+  if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
+  const configured = process.env.TABATLAS_CONVERSATION_ACTION_REASONING_EFFORT;
+  return configured === 'minimal' || configured === 'low' || configured === 'medium' || configured === 'high' || configured === 'xhigh'
+    ? configured
+    : 'low';
 }
 
 function readCapabilityKind(value: unknown): CapabilityKind {

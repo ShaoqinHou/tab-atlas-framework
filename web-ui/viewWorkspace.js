@@ -46,6 +46,7 @@ export function initViewWorkspace() {
       await openInspector(cardButton.dataset.targetKind, cardButton.dataset.targetId, {
         viewId: state.activeViewId,
         origin: cardButton,
+        tab: 'overview',
       });
       return;
     }
@@ -80,6 +81,9 @@ export async function refreshViewWorkspace(viewId = state.activeViewId) {
   }
   workspace = await getJson(`/api/views/${encodeURIComponent(viewId)}/workspace?limit=24`);
   sectionPages = new Map(workspace.sections.map(section => [section.id, section.cards.slice()]));
+  if (state.focusedSectionId && !workspace.sections.some(section => section.id === state.focusedSectionId)) {
+    setState({ focusedSectionId: '' });
+  }
   await restoreSectionPages();
   renderWorkspace();
 }
@@ -102,6 +106,7 @@ export function setWorkspaceFilter(filter) {
     tagFilters = filter.tags ?? [];
     queryFilter = filter.query?.toLowerCase() ?? '';
   }
+  setState({ focusedSectionId: '' });
   persistWorkspaceFilters();
   renderFilters();
   renderWorkspace();
@@ -138,6 +143,7 @@ export function showRevisionComparison(comparison) {
 }
 
 function renderWorkspace() {
+  restoreFiltersFromState();
   const target = document.getElementById('viewWorkspace');
   if (!target) return;
   if (!workspace) {
@@ -223,6 +229,7 @@ function renderMembershipChanges(items) {
 }
 
 function renderFilters() {
+  restoreFiltersFromState();
   const target = document.getElementById('viewFilters');
   if (!target) return;
   const filters = [
@@ -342,8 +349,11 @@ function renderCard(card, variant) {
 
 function visibleSections() {
   if (!workspace) return [];
+  const focusedSectionId = workspace.sections.some(section => section.id === state.focusedSectionId)
+    ? state.focusedSectionId
+    : '';
   return workspace.sections
-    .filter(section => !state.focusedSectionId || section.id === state.focusedSectionId)
+    .filter(section => !focusedSectionId || section.id === focusedSectionId)
     .map(section => {
       const cards = sectionPages.get(section.id) ?? section.cards;
       const visibleCards = cards.filter(card => {
@@ -426,6 +436,12 @@ function persistWorkspaceFilters() {
     workspaceTagFilters: tagFilters.join(','),
     workspaceQueryFilter: queryFilter,
   });
+}
+
+function restoreFiltersFromState() {
+  stateFilters = csvList(state.workspaceStateFilters) || ['visible'];
+  tagFilters = csvList(state.workspaceTagFilters);
+  queryFilter = (state.workspaceQueryFilter || '').toLowerCase();
 }
 
 function csvList(value) {

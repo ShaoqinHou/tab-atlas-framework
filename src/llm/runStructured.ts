@@ -3,6 +3,7 @@ import type { LlmProvider, LlmTurnOptions, LlmUsage } from './types.js';
 
 export interface RunStructuredOptions<T> extends LlmTurnOptions {
   maxRetries?: number;
+  repair?: (value: unknown) => unknown;
   semanticValidate?: (value: T) => string[];
 }
 
@@ -45,7 +46,8 @@ export async function runStructured<T>(
       currentPrompt = reaskPrompt(prompt, raw, errors);
       continue;
     }
-    const parsed = schema.safeParse(json);
+    const candidate = opts.repair ? opts.repair(json) : json;
+    const parsed = schema.safeParse(candidate);
     if (!parsed.success) {
       const errors = parsed.error.issues.map(i => `${i.path.join('.') || '(root)'}: ${i.message}`);
       attempts.push({ raw, errors });

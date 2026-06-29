@@ -428,8 +428,8 @@ export function undoMembershipFeedback(
     feedbackId,
     restoredState: row.previous_state ?? undefined,
     message: row.previous_state
-      ? `Removed correction and restored this membership to ${row.previous_state}.`
-      : 'Removed correction. Re-run refinement if this view needs a prior state restored.',
+      ? `Correction undone. Restored this membership to ${row.previous_state}.`
+      : 'Correction undone. Re-run refinement if this view needs a prior state restored.',
   };
 }
 

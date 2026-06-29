@@ -134,6 +134,12 @@ function renderReview() {
       <div class="empty-state">
         <p class="kicker">${escapeHtml(snapshot.session.title || 'Review')}</p>
         <h3>Queue complete.</h3>
+        <div class="review-start-grid">
+          <button type="button" data-review-start="unmarked">Unmarked</button>
+          <button type="button" data-review-start="weak">Weak matches</button>
+          <button type="button" data-review-start="conflict">Conflicts</button>
+          <button type="button" data-review-start="extraction_failure">Extraction failures</button>
+        </div>
       </div>
     `;
     return;
