@@ -212,14 +212,18 @@ export function createCodexProviderRegistry(
 ): ScopedProviderRegistry {
   return new ScopedProviderRegistry(db, {
     maxTurnsPerThread: options.maxTurnsPerThread,
-    providerFactory: config => process.env.TABATLAS_FAKE_CODEX_PROVIDER === 'workspace_ux'
-      ? new WorkspaceUxFakeProvider(config)
-      : new CodexSdkProvider({
+    providerFactory: config => {
+      if (process.env.TABATLAS_ROLEPLAY_PROVIDER === 'deterministic' || process.env.TABATLAS_FAKE_CODEX_PROVIDER === 'roleplay') {
+        return new RoleplayDeterministicProvider(config);
+      }
+      if (process.env.TABATLAS_FAKE_CODEX_PROVIDER === 'workspace_ux') return new WorkspaceUxFakeProvider(config);
+      return new CodexSdkProvider({
         reasoningEffort: config.reasoningEffort,
         reuseThread: config.reuseThread,
         workingDirectory: options.workingDirectory,
         timeoutMs: Number(process.env.TABATLAS_CODEX_TURN_TIMEOUT_MS ?? 180_000),
-      }),
+      });
+    },
   });
 }
 
@@ -247,6 +251,198 @@ type ChunkDecision = {
   reason: string;
   evidenceRefs: string[];
 };
+
+class RoleplayDeterministicProvider implements LlmProvider {
+  readonly threadId: string;
+
+  constructor(private readonly config: ProviderFactoryConfig) {
+    this.threadId = `roleplay_thread_${config.role}_${config.generation}`;
+  }
+
+  async complete(prompt: string): Promise<LlmResult> {
+    const text = JSON.stringify(this.responseFor(prompt));
+    return {
+      text,
+      usage: {
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: Math.ceil(text.length / 4),
+        quotaTurns: 0,
+      },
+    };
+  }
+
+  private responseFor(prompt: string): unknown {
+    if (this.config.role === 'conversation_planner' || prompt.includes('AgentTurnPlan')) {
+      return this.conversationPlan(prompt);
+    }
+    if (prompt.includes('Return only SemanticChunkResult JSON')) {
+      return this.chunkResult(prompt);
+    }
+    return this.semanticPlan(prompt);
+  }
+
+  private conversationPlan(prompt: string): unknown {
+    const latest = latestConversationUserText(prompt);
+    const lower = latest.toLowerCase();
+    const activeViewId = activeViewIdFromConversationPrompt(prompt);
+    if (/\bvideos?\b/.test(lower) || lower.includes('inside') || /what do we.*transcripts?/i.test(latest)) {
+      const relevant = resourcesFromPrompt(prompt)
+        .filter(resource => /youtube|video|transcript/i.test(`${resource.urlKind ?? ''} ${resource.title ?? ''} ${resource.host ?? ''}`))
+        .slice(0, 6);
+      return {
+        reply: [
+          'Known atomic items and transcript-backed evidence are separated from metadata-only videos.',
+          'Unavailable transcripts remain explicit, and one bounded scan can improve evidence without scanning the whole library.',
+        ].join(' '),
+        actions: [{
+          id: 'roleplay_scan_video_evidence',
+          kind: 'scan_resources',
+          approval: 'confirm',
+          resourceIds: relevant.map(resource => resource.resourceId),
+          limit: Math.max(1, relevant.length),
+          force: false,
+          rationale: 'Bounded evidence-improvement scan for relevant video resources only.',
+        }],
+        questions: [],
+        assumptions: ['Title-only videos are metadata-only until local transcript or description evidence exists.'],
+      };
+    }
+    if (lower.includes('watch later') || lower.includes('opened for later') || lower.includes('opened-for-later')) {
+      return {
+        reply: 'I will create a watch-later workspace and open a review lane for it.',
+        actions: [{
+          id: 'roleplay_watch_later_view',
+          kind: 'plan_view',
+          approval: 'preview',
+          commandText: 'Create a view named Watch Later / Opened Later Review with sections High-value, Quick-review, Safe-to-ignore, and Needs review.',
+          candidateLimit: 80,
+          rationale: 'The user asked for a later-review workspace.',
+        }, {
+          id: 'roleplay_watch_later_review',
+          kind: 'start_review',
+          approval: 'automatic',
+          queue: 'weak',
+          rationale: 'Open a review lane for uncertain later-review candidates.',
+        }],
+        questions: [],
+        assumptions: ['Use local annotations and titles only.'],
+      };
+    }
+    if (lower.includes('practical painting tutorials')) {
+      return {
+        reply: 'I will create a separate practical painting tutorials workspace.',
+        actions: [{
+          id: 'roleplay_painting_tutorials_view',
+          kind: 'plan_view',
+          approval: 'preview',
+          commandText: 'Create a separate view named Practical Painting Tutorials for hands-on painting tutorial resources.',
+          candidateLimit: 60,
+          rationale: 'The user requested a separate unrelated-purpose view.',
+        }],
+        questions: [],
+        assumptions: ['Keep this independent from the current TabAtlas project board.'],
+      };
+    }
+    if (activeViewId && /\b(refine|exclude|remove|stricter|looser|reclassify|adjust|change|correction)\b/.test(lower)) {
+      return {
+        reply: 'I will refine the active view and keep the correction scoped to this intent.',
+        actions: [{
+          id: 'roleplay_refine_active_view',
+          kind: 'refine_view',
+          approval: 'preview',
+          viewId: activeViewId,
+          instruction: latest,
+          rationale: 'This is an explicit refinement of the active workspace.',
+        }],
+        questions: [],
+        assumptions: ['Corrections remain scoped to the active view intent.'],
+      };
+    }
+    if (lower.includes('review lane') || lower.includes('open a review')) {
+      return {
+        reply: 'I will open a focused review queue for uncertain items.',
+        actions: [{
+          id: 'roleplay_start_review',
+          kind: 'start_review',
+          approval: 'automatic',
+          queue: lower.includes('conflict') ? 'conflict' : 'weak',
+          rationale: 'Focused review lets the user process uncertain resources.',
+        }],
+        questions: [],
+        assumptions: [],
+      };
+    }
+    return {
+      reply: 'I will preview a deterministic workspace from the local tab library.',
+      actions: [{
+        id: 'roleplay_plan_view',
+        kind: 'plan_view',
+        approval: 'preview',
+        commandText: roleplayCommandText(latest),
+        candidateLimit: 80,
+        rationale: 'A preview uses the real action pipeline while keeping release evidence deterministic.',
+      }],
+      questions: [],
+      assumptions: ['Use local titles, tab groups, annotations, extracted summaries, and atomic items only.'],
+    };
+  }
+
+  private chunkResult(prompt: string): unknown {
+    const commandText = commandTextFromPrompt(prompt);
+    const chunkId = textAfterLabel(prompt, 'Chunk ID:') || 'semantic_chunk_roleplay';
+    const resources = resourcesFromPrompt(prompt);
+    const decisions = roleplayDecisionsFor(commandText, resources).slice(0, 100);
+    const decided = new Set(decisions.map(decision => decision.targetId));
+    return {
+      commandText,
+      chunkId,
+      decisions,
+      unresolvedTargets: targetIdsFromResources(resources).filter(targetId => !decided.has(targetId)),
+      notes: ['Deterministic role-play provider chunk result.'],
+    };
+  }
+
+  private semanticPlan(prompt: string): unknown {
+    const commandText = commandTextFromPrompt(prompt);
+    const resources = resourcesFromPrompt(prompt);
+    const lower = commandText.toLowerCase();
+    const decisions = roleplayDecisionsFor(commandText, resources);
+    const sections = roleplaySectionsFor(commandText);
+    return {
+      commandText,
+      views: [{
+        name: lower.includes('watch later') || lower.includes('opened later')
+          ? 'Watch Later / Opened Later Review'
+          : lower.includes('painting')
+            ? 'Practical Painting Tutorials'
+            : lower.includes('project') || lower.includes('tabatlas')
+              ? 'TabAtlas Project Board'
+              : 'Visual Inspiration Board',
+        description: 'Deterministic pre-human role-play view from local resources.',
+        goal: commandText,
+        inclusionRules: [
+          'Use local evidence only.',
+          'Preserve requested sections for deterministic release role-play.',
+          'Keep uncertain resources reviewable.',
+        ],
+        exclusionRules: ['Do not infer unavailable transcript, private, or inside-video content.'],
+        sections,
+        sortPolicy: 'Group by requested section, then confidence and user evidence.',
+        confidence: 0.9,
+        memberships: decisions,
+      }],
+      reviewQueues: [{
+        queueName: 'uncertain',
+        reason: 'Weak, conflicting, and needs-review memberships should be checked by the user.',
+        targetIds: decisions
+          .filter(decision => decision.targetKind === 'resource' && ['weak_include', 'conflict', 'needs_review'].includes(decision.state))
+          .slice(0, 40)
+          .map(decision => decision.targetId),
+      }],
+      explanation: 'Deterministic role-play response for the release gate.',
+    };
+  }
+}
 
 class WorkspaceUxFakeProvider implements LlmProvider {
   readonly threadId: string;
@@ -520,6 +716,76 @@ function decisionsFor(commandText: string, resources: PromptResource[]): ChunkDe
     }
   }
   return decisions;
+}
+
+function roleplayCommandText(latest: string): string {
+  const lower = latest.toLowerCase();
+  if (lower.includes('project') || lower.includes('tabatlas')) {
+    return 'Create a board named TabAtlas Project Board with sections extension, receiver, Codex, storage, extraction, transcripts, security, UX, installation, packaging, and testing.';
+  }
+  if (lower.includes('watch later') || lower.includes('opened for later')) {
+    return 'Create a view named Watch Later / Opened Later Review with sections High-value, Quick-review, Safe-to-ignore, and Needs review.';
+  }
+  if (lower.includes('painting')) {
+    return 'Create a separate view named Practical Painting Tutorials for hands-on painting tutorial resources.';
+  }
+  return 'Create a board named Visual Inspiration Board with sections Personal inspiration, Visual references, Game inspiration, Cross-domain references, and Needs review.';
+}
+
+function roleplaySectionsFor(commandText: string): string[] {
+  const lower = commandText.toLowerCase();
+  if (lower.includes('project') || lower.includes('tabatlas')) {
+    return ['extension', 'receiver', 'Codex', 'storage', 'extraction', 'transcripts', 'security', 'UX', 'installation', 'packaging', 'testing'];
+  }
+  if (lower.includes('watch later') || lower.includes('opened later')) {
+    return ['High-value', 'Quick-review', 'Safe-to-ignore', 'Needs review'];
+  }
+  if (lower.includes('painting')) {
+    return ['Needs review'];
+  }
+  return ['Personal inspiration', 'Visual references', 'Game inspiration', 'Cross-domain references', 'Needs review'];
+}
+
+function roleplayDecisionsFor(commandText: string, resources: PromptResource[]): ChunkDecision[] {
+  const lower = commandText.toLowerCase();
+  const base = decisionsFor(commandText, resources);
+  const sections = roleplaySectionsFor(commandText);
+  if (lower.includes('painting')) {
+    return base.map((decision, index) => ({
+      ...decision,
+      section: 'Needs review',
+      state: index < 6 ? 'needs_review' : 'exclude',
+      confidence: index < 6 ? 0.46 : 0.78,
+      reason: index < 6
+        ? 'Kept reviewable because practical painting tutorial evidence is uncertain in the local fixture.'
+        : 'Excluded from the unrelated practical painting intent.',
+      evidenceRefs: decision.evidenceRefs,
+    } as ChunkDecision));
+  }
+  if (lower.includes('watch later') || lower.includes('opened later')) {
+    return base.map((decision, index) => ({
+      ...decision,
+      section: sections[index % sections.length],
+      state: index % 5 === 0 ? 'needs_review' : index % 3 === 0 ? 'weak_include' : 'strong_include',
+      confidence: index % 5 === 0 ? 0.48 : index % 3 === 0 ? 0.58 : 0.84,
+      reason: 'Deterministic later-review candidate from local annotation, title, or captured-tab evidence.',
+      evidenceRefs: decision.evidenceRefs,
+    } as ChunkDecision));
+  }
+  if (lower.includes('project') || lower.includes('tabatlas')) {
+    return base.map((decision, index) => ({
+      ...decision,
+      section: sections[index % sections.length],
+      state: decision.state === 'exclude' && index < sections.length ? 'weak_include' : decision.state,
+      confidence: decision.state === 'exclude' && index < sections.length ? 0.56 : decision.confidence,
+      evidenceRefs: decision.evidenceRefs.length ? decision.evidenceRefs : [`title:${decision.targetId}`],
+    } as ChunkDecision));
+  }
+  return base.map((decision, index) => ({
+    ...decision,
+    section: sections[index % sections.length],
+    state: decision.state === 'exclude' && index < 8 ? 'needs_review' : decision.state,
+  } as ChunkDecision));
 }
 
 function projectSectionFor(text: string, index: number): string {
